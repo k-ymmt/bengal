@@ -9,6 +9,4 @@ wasm-encoder = "0.227"
 miette = { version = "7", features = ["fancy"] }
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
-
-[dev-dependencies]
 wasmtime = "31"
