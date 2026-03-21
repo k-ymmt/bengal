@@ -23,6 +23,38 @@ pub enum Token {
     #[token(")")]
     RParen,
 
+    // Phase 2: keywords
+    #[token("func")]
+    Func,
+    #[token("let")]
+    Let,
+    #[token("var")]
+    Var,
+    #[token("return")]
+    Return,
+    #[token("yield")]
+    Yield,
+
+    // Phase 2: symbols
+    #[token("->")]
+    Arrow,
+    #[token(":")]
+    Colon,
+    #[token(";")]
+    Semicolon,
+    #[token(",")]
+    Comma,
+    #[token("{")]
+    LBrace,
+    #[token("}")]
+    RBrace,
+    #[token("=")]
+    Eq,
+
+    // Phase 2: identifiers
+    #[regex("[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
+    Ident(String),
+
     Eof,
 }
 
@@ -36,6 +68,19 @@ impl fmt::Display for Token {
             Token::Slash => write!(f, "/"),
             Token::LParen => write!(f, "("),
             Token::RParen => write!(f, ")"),
+            Token::Func => write!(f, "func"),
+            Token::Let => write!(f, "let"),
+            Token::Var => write!(f, "var"),
+            Token::Return => write!(f, "return"),
+            Token::Yield => write!(f, "yield"),
+            Token::Arrow => write!(f, "->"),
+            Token::Colon => write!(f, ":"),
+            Token::Semicolon => write!(f, ";"),
+            Token::Comma => write!(f, ","),
+            Token::LBrace => write!(f, "{{"),
+            Token::RBrace => write!(f, "}}"),
+            Token::Eq => write!(f, "="),
+            Token::Ident(s) => write!(f, "{}", s),
             Token::Eof => write!(f, "EOF"),
         }
     }

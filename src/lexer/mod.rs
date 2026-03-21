@@ -86,6 +86,59 @@ mod tests {
     }
 
     #[test]
+    fn func_declaration_tokens() {
+        assert_eq!(
+            token_nodes("func main() -> i32 { return 42; }"),
+            vec![
+                Token::Func,
+                Token::Ident("main".to_string()),
+                Token::LParen,
+                Token::RParen,
+                Token::Arrow,
+                Token::Ident("i32".to_string()),
+                Token::LBrace,
+                Token::Return,
+                Token::Number(42),
+                Token::Semicolon,
+                Token::RBrace,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn let_binding_tokens() {
+        assert_eq!(
+            token_nodes("let x: i32 = 10;"),
+            vec![
+                Token::Let,
+                Token::Ident("x".to_string()),
+                Token::Colon,
+                Token::Ident("i32".to_string()),
+                Token::Eq,
+                Token::Number(10),
+                Token::Semicolon,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn yield_expression_tokens() {
+        assert_eq!(
+            token_nodes("yield a + 1;"),
+            vec![
+                Token::Yield,
+                Token::Ident("a".to_string()),
+                Token::Plus,
+                Token::Number(1),
+                Token::Semicolon,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
     fn lex_error_on_invalid_character() {
         let err = tokenize("2 @ 3").unwrap_err();
         match err {
