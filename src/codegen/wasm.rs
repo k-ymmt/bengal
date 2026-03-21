@@ -35,7 +35,9 @@ fn collect_locals(func: &BirFunction) -> (HashMap<Value, u32>, u32) {
             let result = match inst {
                 Instruction::Literal { result, .. }
                 | Instruction::BinaryOp { result, .. }
-                | Instruction::Call { result, .. } => result,
+                | Instruction::Call { result, .. }
+                | Instruction::Compare { result, .. }
+                | Instruction::Not { result, .. } => result,
             };
             if !locals.contains_key(result) {
                 locals.insert(*result, next_local);
@@ -90,6 +92,9 @@ fn emit_instruction(
             func.instruction(&wasm_encoder::Instruction::Call(idx));
             func.instruction(&wasm_encoder::Instruction::LocalSet(locals[result]));
         }
+        Instruction::Compare { .. } | Instruction::Not { .. } => {
+            todo!("Phase 3 Step 9: Compare/Not codegen")
+        }
     }
 }
 
@@ -97,6 +102,9 @@ fn emit_terminator(term: &Terminator, locals: &HashMap<Value, u32>, func: &mut F
     match term {
         Terminator::Return(value) => {
             func.instruction(&wasm_encoder::Instruction::LocalGet(locals[value]));
+        }
+        Terminator::ReturnVoid | Terminator::Br { .. } | Terminator::CondBr { .. } => {
+            todo!("Phase 3 Step 9: ReturnVoid/Br/CondBr codegen")
         }
     }
 }

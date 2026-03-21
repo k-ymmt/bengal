@@ -100,6 +100,7 @@ impl Lowering {
             params,
             return_type: convert_type(&func.return_type),
             blocks: vec![bb0],
+            body: vec![CfgRegion::Block(0)],
         }
     }
 

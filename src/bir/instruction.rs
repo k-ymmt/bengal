@@ -19,6 +19,16 @@ pub enum BirBinOp {
     Div,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BirCompareOp {
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Instruction {
     /// %result = literal <value> : <type>
@@ -42,12 +52,37 @@ pub enum Instruction {
         args: Vec<Value>,
         ty: BirType,
     },
+    /// %result = compare <op> %lhs, %rhs : bool
+    Compare {
+        result: Value,
+        op: BirCompareOp,
+        lhs: Value,
+        rhs: Value,
+    },
+    /// %result = not %operand : bool
+    Not {
+        result: Value,
+        operand: Value,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Terminator {
     /// return %value
     Return(Value),
+    /// return (void)
+    ReturnVoid,
+    /// br bb_target(%arg0: type, %arg1: type, ...)
+    Br {
+        target: u32,
+        args: Vec<(Value, BirType)>,
+    },
+    /// cond_br %cond, bb_then, bb_else
+    CondBr {
+        cond: Value,
+        then_bb: u32,
+        else_bb: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,11 +94,44 @@ pub struct BasicBlock {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CfgRegion {
+    /// Single basic block — emit instructions + terminator
+    Block(u32),
+    /// if/else branch
+    IfElse {
+        cond_region: Vec<CfgRegion>,
+        cond_bb: u32,
+        cond_value: Value,
+        then_region: Vec<CfgRegion>,
+        else_region: Vec<CfgRegion>,
+        merge_bb: u32,
+    },
+    /// if without else
+    IfOnly {
+        cond_region: Vec<CfgRegion>,
+        cond_bb: u32,
+        cond_value: Value,
+        then_region: Vec<CfgRegion>,
+        merge_bb: u32,
+    },
+    /// while loop
+    While {
+        entry_bb: u32,
+        header_region: Vec<CfgRegion>,
+        header_bb: u32,
+        cond_value: Value,
+        body_region: Vec<CfgRegion>,
+        exit_bb: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BirFunction {
     pub name: String,
     pub params: Vec<(Value, BirType)>,
     pub return_type: BirType,
     pub blocks: Vec<BasicBlock>,
+    pub body: Vec<CfgRegion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

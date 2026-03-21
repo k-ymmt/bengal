@@ -119,6 +119,9 @@ fn print_instruction(inst: &Instruction, out: &mut String) {
                 format_type(ty)
             ));
         }
+        Instruction::Compare { .. } | Instruction::Not { .. } => {
+            todo!("Phase 3 Step 7: Compare/Not printing")
+        }
     }
 }
 
@@ -126,6 +129,9 @@ fn print_terminator(term: &Terminator, out: &mut String) {
     match term {
         Terminator::Return(val) => {
             out.push_str(&format!("return {}", format_value(val)));
+        }
+        Terminator::ReturnVoid | Terminator::Br { .. } | Terminator::CondBr { .. } => {
+            todo!("Phase 3 Step 7: ReturnVoid/Br/CondBr printing")
         }
     }
 }
