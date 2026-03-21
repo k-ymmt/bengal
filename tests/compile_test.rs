@@ -197,3 +197,179 @@ fn err_yield_in_func() {
 fn err_return_in_block() {
     assert!(bengal::compile_source("func main() -> i32 { let x: i32 = { return 1; }; return x; }").is_err());
 }
+
+// --- Phase 3: control flow, bool, comparisons ---
+
+#[test]
+fn if_else_true() {
+    assert_eq!(
+        compile_and_run("func main() -> i32 { let x: i32 = if true { yield 1; } else { yield 2; }; return x; }"),
+        1
+    );
+}
+
+#[test]
+fn if_else_false() {
+    assert_eq!(
+        compile_and_run("func main() -> i32 { let x: i32 = if false { yield 1; } else { yield 2; }; return x; }"),
+        2
+    );
+}
+
+#[test]
+fn if_else_comparison() {
+    assert_eq!(
+        compile_and_run("func main() -> i32 { let x: i32 = if 3 > 2 { yield 10; } else { yield 20; }; return x; }"),
+        10
+    );
+}
+
+#[test]
+fn if_no_else() {
+    assert_eq!(
+        compile_and_run("func main() -> i32 { if true { }; return 42; }"),
+        42
+    );
+}
+
+#[test]
+fn while_sum() {
+    assert_eq!(
+        compile_and_run("func main() -> i32 { var i: i32 = 0; var s: i32 = 0; while i < 10 { s = s + i; i = i + 1; }; return s; }"),
+        45
+    );
+}
+
+#[test]
+fn while_factorial() {
+    assert_eq!(
+        compile_and_run("func main() -> i32 { var n: i32 = 5; var r: i32 = 1; while n > 0 { r = r * n; n = n - 1; }; return r; }"),
+        120
+    );
+}
+
+#[test]
+fn comparison_eq() {
+    assert_eq!(
+        compile_and_run("func main() -> i32 { let x: i32 = if 1 == 1 { yield 1; } else { yield 0; }; return x; }"),
+        1
+    );
+}
+
+#[test]
+fn comparison_ne() {
+    assert_eq!(
+        compile_and_run("func main() -> i32 { let x: i32 = if 1 != 2 { yield 1; } else { yield 0; }; return x; }"),
+        1
+    );
+}
+
+#[test]
+fn comparison_le() {
+    assert_eq!(
+        compile_and_run("func main() -> i32 { let x: i32 = if 3 <= 3 { yield 1; } else { yield 0; }; return x; }"),
+        1
+    );
+}
+
+#[test]
+fn comparison_ge() {
+    assert_eq!(
+        compile_and_run("func main() -> i32 { let x: i32 = if 3 >= 4 { yield 1; } else { yield 0; }; return x; }"),
+        0
+    );
+}
+
+#[test]
+fn logical_and() {
+    assert_eq!(
+        compile_and_run("func main() -> i32 { let x: i32 = if true && true { yield 1; } else { yield 0; }; return x; }"),
+        1
+    );
+}
+
+#[test]
+fn logical_and_short() {
+    assert_eq!(
+        compile_and_run("func main() -> i32 { let x: i32 = if false && true { yield 1; } else { yield 0; }; return x; }"),
+        0
+    );
+}
+
+#[test]
+fn logical_or() {
+    assert_eq!(
+        compile_and_run("func main() -> i32 { let x: i32 = if false || true { yield 1; } else { yield 0; }; return x; }"),
+        1
+    );
+}
+
+#[test]
+fn logical_not() {
+    assert_eq!(
+        compile_and_run("func main() -> i32 { let x: i32 = if !false { yield 1; } else { yield 0; }; return x; }"),
+        1
+    );
+}
+
+#[test]
+fn early_return() {
+    assert_eq!(
+        compile_and_run("func abs(x: i32) -> i32 { if x < 0 { return 0 - x; }; return x; } func main() -> i32 { return abs(0 - 5); }"),
+        5
+    );
+}
+
+#[test]
+fn diverging_then() {
+    assert_eq!(
+        compile_and_run("func main() -> i32 { let x: i32 = if false { return 99; } else { yield 42; }; return x; }"),
+        42
+    );
+}
+
+#[test]
+fn diverging_else() {
+    assert_eq!(
+        compile_and_run("func main() -> i32 { let x: i32 = if true { yield 42; } else { return 99; }; return x; }"),
+        42
+    );
+}
+
+#[test]
+fn nested_if() {
+    assert_eq!(
+        compile_and_run("func clamp(x: i32, lo: i32, hi: i32) -> i32 { if x < lo { return lo; }; if x > hi { return hi; }; return x; } func main() -> i32 { return clamp(50, 0, 10); }"),
+        10
+    );
+}
+
+#[test]
+fn unit_func() {
+    assert_eq!(
+        compile_and_run("func noop() { return; } func main() -> i32 { noop(); return 42; }"),
+        42
+    );
+}
+
+// --- Phase 3: error cases ---
+
+#[test]
+fn err_if_non_bool_cond() {
+    assert!(bengal::compile_source("func main() -> i32 { if 1 { yield 1; } else { yield 2; }; return 0; }").is_err());
+}
+
+#[test]
+fn err_if_branch_mismatch() {
+    assert!(bengal::compile_source("func main() -> i32 { if true { yield 1; } else { yield true; }; return 0; }").is_err());
+}
+
+#[test]
+fn err_while_non_bool_cond() {
+    assert!(bengal::compile_source("func main() -> i32 { while 1 { }; return 0; }").is_err());
+}
+
+#[test]
+fn err_yield_in_while() {
+    assert!(bengal::compile_source("func main() -> i32 { while true { yield 1; }; return 0; }").is_err());
+}

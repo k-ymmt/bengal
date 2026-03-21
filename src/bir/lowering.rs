@@ -509,31 +509,48 @@ impl Lowering {
                 self.push_scope();
                 let (then_result, then_inner_regions) = self.lower_block_stmts(then_block);
                 self.pop_scope();
-
                 let mut then_region = then_inner_regions;
+                // Don't seal yet — need to know merge type first
 
-                // Determine merge type from then result
-                let mut has_then_value = false;
-                let mut merge_type = BirType::Unit;
+                // else block
+                let then_block_label = self.current_block_label;
+                let then_instructions = std::mem::take(&mut self.current_instructions);
+                let then_params = std::mem::take(&mut self.current_block_params);
 
-                match then_result {
+                self.start_block(bb_else, vec![]);
+                self.push_scope();
+                let (else_result, else_inner_regions) = self.lower_block_stmts(else_blk);
+                self.pop_scope();
+                let mut else_region = else_inner_regions;
+
+                let else_block_label = self.current_block_label;
+                let else_instructions = std::mem::take(&mut self.current_instructions);
+                let else_params = std::mem::take(&mut self.current_block_params);
+
+                // Determine if merge block needs a value parameter
+                let then_yields = matches!(&then_result, Some(StmtResult::Yield(_)));
+                let else_yields = matches!(&else_result, Some(StmtResult::Yield(_)));
+                let has_merge_value = then_yields || else_yields;
+                let merge_type = BirType::I32; // Phase 3: yield values are always i32
+
+                // Seal then block
+                self.current_block_label = then_block_label;
+                self.current_instructions = then_instructions;
+                self.current_block_params = then_params;
+                match &then_result {
                     Some(StmtResult::Yield(v)) => {
-                        has_then_value = true;
-                        // Infer type from the yield — for now assume I32 if not Unit
-                        merge_type = BirType::I32; // will be refined
                         self.seal_block(Terminator::Br {
                             target: bb_merge,
-                            args: vec![(v, merge_type)],
+                            args: vec![(*v, merge_type)],
                         });
                     }
                     Some(StmtResult::Return(v)) => {
-                        self.seal_block(Terminator::Return(v));
+                        self.seal_block(Terminator::Return(*v));
                     }
                     Some(StmtResult::ReturnVoid) => {
                         self.seal_block(Terminator::ReturnVoid);
                     }
                     _ => {
-                        // Unit block — no value
                         self.seal_block(Terminator::Br {
                             target: bb_merge,
                             args: vec![],
@@ -542,26 +559,19 @@ impl Lowering {
                 }
                 then_region.push(CfgRegion::Block(bb_then));
 
-                // else block
-                self.start_block(bb_else, vec![]);
-                self.push_scope();
-                let (else_result, else_inner_regions) = self.lower_block_stmts(else_blk);
-                self.pop_scope();
-
-                let mut else_region = else_inner_regions;
-
-                match else_result {
+                // Seal else block
+                self.current_block_label = else_block_label;
+                self.current_instructions = else_instructions;
+                self.current_block_params = else_params;
+                match &else_result {
                     Some(StmtResult::Yield(v)) => {
-                        if !has_then_value {
-                            merge_type = BirType::I32;
-                        }
                         self.seal_block(Terminator::Br {
                             target: bb_merge,
-                            args: vec![(v, merge_type)],
+                            args: vec![(*v, merge_type)],
                         });
                     }
                     Some(StmtResult::Return(v)) => {
-                        self.seal_block(Terminator::Return(v));
+                        self.seal_block(Terminator::Return(*v));
                     }
                     Some(StmtResult::ReturnVoid) => {
                         self.seal_block(Terminator::ReturnVoid);
@@ -576,7 +586,7 @@ impl Lowering {
                 else_region.push(CfgRegion::Block(bb_else));
 
                 // merge block
-                let merge_params = if has_then_value {
+                let merge_params = if has_merge_value {
                     let result = self.fresh_value();
                     self.start_block(bb_merge, vec![(result, merge_type)]);
                     result
