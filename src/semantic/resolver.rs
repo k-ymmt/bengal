@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::error::{BengalError, Result, Span};
 use super::types::Type;
 
 #[derive(Debug, Clone)]
@@ -18,6 +19,8 @@ pub struct Resolver {
     scopes: Vec<HashMap<String, VarInfo>>,
     functions: HashMap<String, FuncSig>,
     pub current_return_type: Option<Type>,
+    loop_depth: u32,
+    loop_break_types: Vec<Option<Type>>,
 }
 
 impl Resolver {
@@ -26,6 +29,8 @@ impl Resolver {
             scopes: Vec::new(),
             functions: HashMap::new(),
             current_return_type: None,
+            loop_depth: 0,
+            loop_break_types: Vec::new(),
         }
     }
 
@@ -58,5 +63,39 @@ impl Resolver {
 
     pub fn lookup_func(&self, name: &str) -> Option<&FuncSig> {
         self.functions.get(name)
+    }
+
+    pub fn enter_loop(&mut self) {
+        self.loop_depth += 1;
+        self.loop_break_types.push(None);
+    }
+
+    pub fn exit_loop(&mut self) -> Option<Type> {
+        self.loop_depth -= 1;
+        self.loop_break_types.pop().flatten()
+    }
+
+    pub fn in_loop(&self) -> bool {
+        self.loop_depth > 0
+    }
+
+    pub fn set_break_type(&mut self, ty: Type) -> Result<()> {
+        let current = self.loop_break_types.last_mut().unwrap();
+        match current {
+            Some(existing) if *existing != ty => {
+                Err(BengalError::SemanticError {
+                    message: format!(
+                        "break type mismatch: expected `{:?}`, found `{:?}`",
+                        existing, ty
+                    ),
+                    span: Span { start: 0, end: 0 },
+                })
+            }
+            Some(_) => Ok(()),
+            None => {
+                *current = Some(ty);
+                Ok(())
+            }
+        }
     }
 }
