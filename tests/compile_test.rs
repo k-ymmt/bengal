@@ -373,3 +373,181 @@ fn err_while_non_bool_cond() {
 fn err_yield_in_while() {
     assert!(bengal::compile_source("func main() -> i32 { while true { yield 1; }; return 0; }").is_err());
 }
+
+// --- Phase 4: break / continue ---
+
+#[test]
+fn while_break() {
+    assert_eq!(compile_and_run("func main() -> i32 { var i: i32 = 0; while true { if i == 3 { break; }; i = i + 1; }; return i; }"), 3);
+}
+
+#[test]
+fn while_continue() {
+    assert_eq!(compile_and_run("func main() -> i32 { var i: i32 = 0; var s: i32 = 0; while i < 5 { i = i + 1; if i == 3 { continue; }; s = s + i; }; return s; }"), 12);
+}
+
+#[test]
+fn nested_break() {
+    assert_eq!(compile_and_run("func main() -> i32 { var outer: i32 = 0; var i: i32 = 0; while i < 3 { var j: i32 = 0; while true { if j == 2 { break; }; j = j + 1; }; outer = outer + j; i = i + 1; }; return outer; }"), 6);
+}
+
+#[test]
+fn break_with_var_update() {
+    assert_eq!(compile_and_run("func main() -> i32 { var x: i32 = 0; while true { x = x + 10; break; }; return x; }"), 10);
+}
+
+#[test]
+fn continue_skip_even() {
+    assert_eq!(compile_and_run("func main() -> i32 { var i: i32 = 0; var s: i32 = 0; while i < 6 { i = i + 1; if (i / 2) * 2 == i { continue; }; s = s + i; }; return s; }"), 9);
+}
+
+#[test]
+fn break_diverge_in_if_else() {
+    assert_eq!(compile_and_run("func main() -> i32 { var i: i32 = 0; while i < 10 { let x: i32 = if i == 5 { break; } else { yield i; }; i = x + 1; }; return i; }"), 5);
+}
+
+#[test]
+fn continue_diverge_in_if_else() {
+    assert_eq!(compile_and_run("func main() -> i32 { var i: i32 = 0; var s: i32 = 0; while i < 5 { i = i + 1; let v: i32 = if i == 3 { continue; } else { yield i; }; s = s + v; }; return s; }"), 12);
+}
+
+#[test]
+fn break_with_value() {
+    assert_eq!(compile_and_run("func main() -> i32 { let x: i32 = while true { break 42; }; return x; }"), 42);
+}
+
+#[test]
+fn break_with_value_computed() {
+    assert_eq!(compile_and_run("func main() -> i32 { var i: i32 = 0; let x: i32 = while true { i = i + 1; if i == 5 { break i * 10; }; }; return x; }"), 50);
+}
+
+#[test]
+fn break_with_value_nested_if() {
+    assert_eq!(compile_and_run("func main() -> i32 { let x: i32 = while true { if true { break 1; } else { break 2; }; }; return x; }"), 1);
+}
+
+#[test]
+fn nobreak_basic() {
+    assert_eq!(compile_and_run("func main() -> i32 { var i: i32 = 0; let x: i32 = while i < 5 { if i == 3 { break 99; }; i = i + 1; } nobreak { yield 0; }; return x; }"), 99);
+}
+
+#[test]
+fn nobreak_condition_false() {
+    // while body has no break → while_ty is Unit, nobreak must also be Unit
+    // Use mutable var to observe the value after loop
+    assert_eq!(compile_and_run("func main() -> i32 { var i: i32 = 0; while i < 3 { i = i + 1; } nobreak { }; return i; }"), 3);
+}
+
+#[test]
+fn nobreak_no_break_in_body() {
+    // while body has no break → while_ty is Unit, nobreak must also be Unit
+    assert_eq!(compile_and_run("func main() -> i32 { var i: i32 = 0; while i < 5 { i = i + 1; } nobreak { }; return i * 10; }"), 50);
+}
+
+// --- Phase 4: multi-numeric types ---
+
+#[test]
+fn i64_arithmetic() {
+    assert_eq!(compile_and_run("func main() -> i32 { let x: i64 = 100 as i64; let y: i64 = 200 as i64; return (x + y) as i32; }"), 300);
+}
+
+#[test]
+fn i64_comparison() {
+    assert_eq!(compile_and_run("func main() -> i32 { let x: i64 = 10 as i64; let y: i64 = 20 as i64; let r: i32 = if x < y { yield 1; } else { yield 0; }; return r; }"), 1);
+}
+
+#[test]
+fn f64_arithmetic() {
+    assert_eq!(compile_and_run("func main() -> i32 { let x: f64 = 3.5; let y: f64 = 1.5; return (x + y) as i32; }"), 5);
+}
+
+#[test]
+fn mixed_cast_chain() {
+    assert_eq!(compile_and_run("func main() -> i32 { let x: i32 = 42; let y: i64 = x as i64; let z: i32 = y as i32; return z; }"), 42);
+}
+
+// --- Phase 4: local type inference ---
+
+#[test]
+fn infer_i32() {
+    assert_eq!(compile_and_run("func main() -> i32 { let x = 10; return x; }"), 10);
+}
+
+#[test]
+fn infer_i32_expr() {
+    assert_eq!(compile_and_run("func main() -> i32 { let x = 1 + 2 * 3; return x; }"), 7);
+}
+
+#[test]
+fn infer_bool() {
+    assert_eq!(compile_and_run("func main() -> i32 { let b = true; let r: i32 = if b { yield 1; } else { yield 0; }; return r; }"), 1);
+}
+
+#[test]
+fn infer_var() {
+    assert_eq!(compile_and_run("func main() -> i32 { var x = 0; x = x + 1; return x; }"), 1);
+}
+
+// --- Phase 4: cast ---
+
+#[test]
+fn cast_i32_to_i64() {
+    assert_eq!(compile_and_run("func main() -> i32 { let x: i64 = 42 as i64; return x as i32; }"), 42);
+}
+
+#[test]
+fn cast_noop() {
+    assert_eq!(compile_and_run("func main() -> i32 { let x: i32 = 42 as i32; return x; }"), 42);
+}
+
+// --- Phase 4: error cases ---
+
+#[test]
+fn err_break_outside_loop() {
+    assert!(bengal::compile_source("func main() -> i32 { break; return 0; }").is_err());
+}
+
+#[test]
+fn err_continue_outside_loop() {
+    assert!(bengal::compile_source("func main() -> i32 { continue; return 0; }").is_err());
+}
+
+#[test]
+fn err_cast_bool() {
+    assert!(bengal::compile_source("func main() -> i32 { let x = true as i32; return x; }").is_err());
+}
+
+#[test]
+fn err_mixed_arithmetic() {
+    assert!(bengal::compile_source("func main() -> i32 { let x: i32 = 1; let y: i64 = 2 as i64; return x + y; }").is_err());
+}
+
+#[test]
+fn err_infer_mismatch() {
+    assert!(bengal::compile_source("func main() -> i32 { let x: i32 = 3.14; return 0; }").is_err());
+}
+
+#[test]
+fn err_integer_overflow() {
+    assert!(bengal::compile_source("func main() -> i32 { let x = 3000000000; return 0; }").is_err());
+}
+
+#[test]
+fn err_break_value_no_nobreak() {
+    assert!(bengal::compile_source("func main() -> i32 { var i: i32 = 0; let x: i32 = while i < 10 { break 1; }; return x; }").is_err());
+}
+
+#[test]
+fn err_break_value_type_mismatch() {
+    assert!(bengal::compile_source("func main() -> i32 { let x: i32 = while true { break true; }; return x; }").is_err());
+}
+
+#[test]
+fn err_nobreak_in_while_true() {
+    assert!(bengal::compile_source("func main() -> i32 { let x: i32 = while true { break 10; } nobreak { yield 20; }; return x; }").is_err());
+}
+
+#[test]
+fn err_nobreak_type_mismatch() {
+    assert!(bengal::compile_source("func main() -> i32 { var i: i32 = 0; let x: i32 = while i < 10 { break 1; } nobreak { yield true; }; return x; }").is_err());
+}

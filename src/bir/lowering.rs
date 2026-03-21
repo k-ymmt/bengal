@@ -835,6 +835,7 @@ impl Lowering {
         let (body_result, body_inner_regions) = self.lower_block_stmts(body);
         self.pop_scope();
 
+        let has_inner_regions = !body_inner_regions.is_empty();
         let mut body_region = body_inner_regions;
 
         // Track the last block in the body (may differ from bb_body if if/while regions exist)
@@ -866,9 +867,24 @@ impl Lowering {
             }
         }
 
-        // Add the last body block (which may be bb_body if no inner regions,
-        // or the merge/exit block of the last inner region)
-        body_region.push(CfgRegion::Block(last_body_bb));
+        // Add body blocks to body_region:
+        // - If body_inner_regions is empty, bb_body IS last_body_bb (no if/while inside)
+        // - If body_inner_regions is non-empty, bb_body is already used as cond_bb
+        //   inside the first region (e.g., IfOnly), so we add last_body_bb instead
+        let body_diverged = matches!(
+            body_result,
+            Some(StmtResult::Break) | Some(StmtResult::Continue) | Some(StmtResult::Return(_)) | Some(StmtResult::ReturnVoid)
+        );
+        if has_inner_regions {
+            // bb_body is used as cond_bb inside the first inner region (IfOnly etc.)
+            // Add last_body_bb only if body didn't diverge (otherwise it's an unreachable dummy)
+            if !body_diverged {
+                body_region.push(CfgRegion::Block(last_body_bb));
+            }
+        } else {
+            // No inner regions — bb_body contains all body instructions + terminator
+            body_region.push(CfgRegion::Block(bb_body));
+        }
 
         // Pop loop context and get break type
         let loop_ctx = self.loop_stack.pop().unwrap();

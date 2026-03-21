@@ -11,7 +11,8 @@ pub fn compile_source(source: &str) -> Result<Vec<u8>> {
     let tokens = lexer::tokenize(source)?;
     let program = parser::parse(tokens)?;
     semantic::analyze(&program)?;
-    let bir = bir::lower_program(&program)?;
+    let mut bir = bir::lower_program(&program)?;
+    bir::optimize_module(&mut bir);
     let wasm = codegen::compile(&bir)?;
     Ok(wasm)
 }
