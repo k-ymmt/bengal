@@ -20,6 +20,17 @@ fn format_binop(op: &BirBinOp) -> &str {
     }
 }
 
+fn format_compare_op(op: &BirCompareOp) -> &str {
+    match op {
+        BirCompareOp::Eq => "eq",
+        BirCompareOp::Ne => "ne",
+        BirCompareOp::Lt => "lt",
+        BirCompareOp::Gt => "gt",
+        BirCompareOp::Le => "le",
+        BirCompareOp::Ge => "ge",
+    }
+}
+
 fn format_value(v: &Value) -> String {
     format!("%{}", v.0)
 }
@@ -119,8 +130,26 @@ fn print_instruction(inst: &Instruction, out: &mut String) {
                 format_type(ty)
             ));
         }
-        Instruction::Compare { .. } | Instruction::Not { .. } => {
-            todo!("Phase 3 Step 7: Compare/Not printing")
+        Instruction::Compare {
+            result,
+            op,
+            lhs,
+            rhs,
+        } => {
+            out.push_str(&format!(
+                "{} = compare {} {}, {} : bool",
+                format_value(result),
+                format_compare_op(op),
+                format_value(lhs),
+                format_value(rhs)
+            ));
+        }
+        Instruction::Not { result, operand } => {
+            out.push_str(&format!(
+                "{} = not {} : bool",
+                format_value(result),
+                format_value(operand)
+            ));
         }
     }
 }
@@ -130,8 +159,31 @@ fn print_terminator(term: &Terminator, out: &mut String) {
         Terminator::Return(val) => {
             out.push_str(&format!("return {}", format_value(val)));
         }
-        Terminator::ReturnVoid | Terminator::Br { .. } | Terminator::CondBr { .. } => {
-            todo!("Phase 3 Step 7: ReturnVoid/Br/CondBr printing")
+        Terminator::ReturnVoid => {
+            out.push_str("return_void");
+        }
+        Terminator::Br { target, args } => {
+            if args.is_empty() {
+                out.push_str(&format!("br bb{}", target));
+            } else {
+                let args_str: Vec<String> = args
+                    .iter()
+                    .map(|(val, ty)| format!("{}: {}", format_value(val), format_type(ty)))
+                    .collect();
+                out.push_str(&format!("br bb{}({})", target, args_str.join(", ")));
+            }
+        }
+        Terminator::CondBr {
+            cond,
+            then_bb,
+            else_bb,
+        } => {
+            out.push_str(&format!(
+                "cond_br {}, bb{}, bb{}",
+                format_value(cond),
+                then_bb,
+                else_bb
+            ));
         }
     }
 }
