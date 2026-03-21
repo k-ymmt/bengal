@@ -24,7 +24,9 @@ fn collect_locals(func: &BirFunction) -> HashMap<Value, u32> {
     for block in &func.blocks {
         for inst in &block.instructions {
             match inst {
-                Instruction::Literal { result, .. } | Instruction::BinaryOp { result, .. } => {
+                Instruction::Literal { result, .. }
+                | Instruction::BinaryOp { result, .. }
+                | Instruction::Call { result, .. } => {
                     locals.insert(*result, result.0);
                 }
             }
@@ -56,6 +58,9 @@ fn emit_instruction(inst: &Instruction, locals: &HashMap<Value, u32>, func: &mut
             };
             func.instruction(&wasm_op);
             func.instruction(&wasm_encoder::Instruction::LocalSet(locals[result]));
+        }
+        Instruction::Call { .. } => {
+            todo!("Step 8: Call codegen")
         }
     }
 }
@@ -120,11 +125,14 @@ pub fn compile(bir_module: &BirModule) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bir::lowering::lower;
-    use crate::parser::ast::{BinOp, Expr};
+    use crate::bir::lowering::lower_program;
+    use crate::lexer::tokenize;
+    use crate::parser::parse;
 
-    fn compile_and_run(expr: &Expr) -> i32 {
-        let bir_module = lower(expr).unwrap();
+    fn compile_and_run(source: &str) -> i32 {
+        let tokens = tokenize(source).unwrap();
+        let program = parse(tokens).unwrap();
+        let bir_module = lower_program(&program).unwrap();
         let wasm_bytes = compile(&bir_module).unwrap();
 
         let engine = wasmtime::Engine::default();
@@ -139,23 +147,11 @@ mod tests {
 
     #[test]
     fn compile_literal() {
-        let result = compile_and_run(&Expr::Number(42));
-        assert_eq!(result, 42);
+        assert_eq!(compile_and_run("42"), 42);
     }
 
     #[test]
     fn compile_binary_expr() {
-        // 2 + 3 * 4 = 14
-        let expr = Expr::BinaryOp {
-            op: BinOp::Add,
-            left: Box::new(Expr::Number(2)),
-            right: Box::new(Expr::BinaryOp {
-                op: BinOp::Mul,
-                left: Box::new(Expr::Number(3)),
-                right: Box::new(Expr::Number(4)),
-            }),
-        };
-        let result = compile_and_run(&expr);
-        assert_eq!(result, 14);
+        assert_eq!(compile_and_run("2 + 3 * 4"), 14);
     }
 }

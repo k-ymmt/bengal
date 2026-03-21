@@ -104,6 +104,21 @@ fn print_instruction(inst: &Instruction, out: &mut String) {
                 format_type(ty)
             ));
         }
+        Instruction::Call {
+            result,
+            func_name,
+            args,
+            ty,
+        } => {
+            let args_str: Vec<String> = args.iter().map(format_value).collect();
+            out.push_str(&format!(
+                "{} = call @{}({}) : {}",
+                format_value(result),
+                func_name,
+                args_str.join(", "),
+                format_type(ty)
+            ));
+        }
     }
 }
 
@@ -118,15 +133,20 @@ fn print_terminator(term: &Terminator, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::ast::{BinOp, Expr};
-    use super::super::lowering::lower;
+    use super::super::lowering::lower_program;
+    use crate::lexer::tokenize;
+    use crate::parser::parse;
+
+    fn print_str(input: &str) -> String {
+        let tokens = tokenize(input).unwrap();
+        let program = parse(tokens).unwrap();
+        let module = lower_program(&program).unwrap();
+        print_module(&module)
+    }
 
     #[test]
     fn print_literal() {
-        let expr = Expr::Number(42);
-        let module = lower(&expr).unwrap();
-        let output = print_module(&module);
-
+        let output = print_str("func main() -> i32 { return 42; }");
         let expected = "\
 bir @main() -> i32 {
 bb0:
@@ -139,19 +159,7 @@ bb0:
 
     #[test]
     fn print_binary_expr() {
-        // 2 + 3 * 4
-        let expr = Expr::BinaryOp {
-            op: BinOp::Add,
-            left: Box::new(Expr::Number(2)),
-            right: Box::new(Expr::BinaryOp {
-                op: BinOp::Mul,
-                left: Box::new(Expr::Number(3)),
-                right: Box::new(Expr::Number(4)),
-            }),
-        };
-        let module = lower(&expr).unwrap();
-        let output = print_module(&module);
-
+        let output = print_str("2 + 3 * 4");
         let expected = "\
 bir @main() -> i32 {
 bb0:
@@ -164,5 +172,13 @@ bb0:
 }
 ";
         assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn print_call() {
+        let output = print_str(
+            "func add(a: i32, b: i32) -> i32 { return a + b; } func main() -> i32 { return add(1, 2); }",
+        );
+        assert!(output.contains("call @add(%0, %1) : i32"));
     }
 }

@@ -35,6 +35,13 @@ pub enum Instruction {
         rhs: Value,
         ty: BirType,
     },
+    /// %result = call @func_name(%arg0, %arg1, ...) : <type>
+    Call {
+        result: Value,
+        func_name: String,
+        args: Vec<Value>,
+        ty: BirType,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
