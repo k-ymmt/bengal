@@ -3,6 +3,7 @@ pub mod codegen;
 pub mod error;
 pub mod lexer;
 pub mod parser;
+pub mod semantic;
 
 use error::{BengalError, Result};
 use parser::ast::{Program, Stmt};
