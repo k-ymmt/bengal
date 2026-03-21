@@ -1,9 +1,20 @@
-func square(x: i32) -> i32 {
-    return x * x;
+func abs(x: i32) -> i32 {
+    if x < 0 {
+        return 0 - x;
+    };
+    return x;
+}
+
+func sum_to(n: i32) -> i32 {
+    var i: i32 = 0;
+    var s: i32 = 0;
+    while i < n {
+        s = s + i;
+        i = i + 1;
+    };
+    return s;
 }
 
 func main() -> i32 {
-    let a: i32 = 3;
-    let b: i32 = 4;
-    return square(a) + square(b);
+    return abs(0 - sum_to(10));
 }
