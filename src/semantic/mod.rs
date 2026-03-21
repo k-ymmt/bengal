@@ -171,8 +171,8 @@ fn analyze_control_block(block: &Block, resolver: &mut Resolver) -> Result<Optio
                     let ty = analyze_expr(expr, resolver)?;
                     result = Some(ty);
                 }
-                Stmt::Return(_) => {
-                    // Block diverges (return exits function)
+                Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue => {
+                    // Block diverges (control flow exits)
                     result = None;
                 }
                 _ => {
@@ -207,13 +207,19 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
     match stmt {
         Stmt::Let { name, ty, value } => {
             let val_ty = analyze_expr(value, resolver)?;
-            let var_ty = resolve_type(ty.as_ref().unwrap());
-            if val_ty != var_ty {
-                return Err(sem_err(format!(
-                    "type mismatch: expected `{:?}`, found `{:?}`",
-                    var_ty, val_ty
-                )));
-            }
+            let var_ty = match ty {
+                Some(ann) => {
+                    let declared = resolve_type(ann);
+                    if val_ty != declared {
+                        return Err(sem_err(format!(
+                            "type mismatch: expected `{:?}`, found `{:?}`",
+                            declared, val_ty
+                        )));
+                    }
+                    declared
+                }
+                None => val_ty,
+            };
             resolver.define_var(
                 name.clone(),
                 VarInfo {
@@ -224,13 +230,19 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
         }
         Stmt::Var { name, ty, value } => {
             let val_ty = analyze_expr(value, resolver)?;
-            let var_ty = resolve_type(ty.as_ref().unwrap());
-            if val_ty != var_ty {
-                return Err(sem_err(format!(
-                    "type mismatch: expected `{:?}`, found `{:?}`",
-                    var_ty, val_ty
-                )));
-            }
+            let var_ty = match ty {
+                Some(ann) => {
+                    let declared = resolve_type(ann);
+                    if val_ty != declared {
+                        return Err(sem_err(format!(
+                            "type mismatch: expected `{:?}`, found `{:?}`",
+                            declared, val_ty
+                        )));
+                    }
+                    declared
+                }
+                None => val_ty,
+            };
             resolver.define_var(
                 name.clone(),
                 VarInfo {
@@ -288,15 +300,36 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
         Stmt::Expr(expr) => {
             let _ty = analyze_expr(expr, resolver)?;
         }
-        Stmt::Break(_) => todo!("break"),
-        Stmt::Continue => todo!("continue"),
+        Stmt::Break(opt_expr) => {
+            if !resolver.in_loop() {
+                return Err(sem_err("break outside of loop"));
+            }
+            let break_ty = match opt_expr {
+                Some(expr) => analyze_expr(expr, resolver)?,
+                None => Type::Unit,
+            };
+            resolver.set_break_type(break_ty)?;
+        }
+        Stmt::Continue => {
+            if !resolver.in_loop() {
+                return Err(sem_err("continue outside of loop"));
+            }
+        }
     }
     Ok(())
 }
 
 fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
     match expr {
-        Expr::Number(_) => Ok(Type::I32),
+        Expr::Number(n) => {
+            if *n < i32::MIN as i64 || *n > i32::MAX as i64 {
+                return Err(sem_err(format!(
+                    "integer literal `{}` is out of range for `i32`",
+                    n
+                )));
+            }
+            Ok(Type::I32)
+        }
         Expr::Bool(_) => Ok(Type::Bool),
         Expr::Ident(name) => match resolver.lookup_var(name) {
             Some(info) => Ok(info.ty.clone()),
@@ -317,17 +350,21 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             let left_ty = analyze_expr(left, resolver)?;
             let right_ty = analyze_expr(right, resolver)?;
             match op {
-                // Arithmetic: i32 x i32 → i32
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
-                    if left_ty != Type::I32 || right_ty != Type::I32 {
-                        return Err(sem_err("arithmetic operation requires `i32` operands"));
+                    if !left_ty.is_numeric() || left_ty != right_ty {
+                        return Err(sem_err(format!(
+                            "arithmetic operation requires matching numeric operands, found `{:?}` and `{:?}`",
+                            left_ty, right_ty
+                        )));
                     }
-                    Ok(Type::I32)
+                    Ok(left_ty)
                 }
-                // Comparison: i32 x i32 → bool
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
-                    if left_ty != Type::I32 || right_ty != Type::I32 {
-                        return Err(sem_err("comparison operation requires `i32` operands"));
+                    if !left_ty.is_numeric() || left_ty != right_ty {
+                        return Err(sem_err(format!(
+                            "comparison requires matching numeric operands, found `{:?}` and `{:?}`",
+                            left_ty, right_ty
+                        )));
                     }
                     Ok(Type::Bool)
                 }
@@ -409,16 +446,57 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                 }
             }
         }
-        Expr::While { condition, body, nobreak: _ } => {
+        Expr::While { condition, body, nobreak } => {
             let cond_ty = analyze_expr(condition, resolver)?;
             if cond_ty != Type::Bool {
                 return Err(sem_err("while condition must be `bool`"));
             }
+            let is_while_true = **condition == Expr::Bool(true);
+
+            resolver.enter_loop();
             analyze_loop_block(body, resolver)?;
-            Ok(Type::Unit)
+            let break_ty = resolver.exit_loop();
+
+            let while_ty = break_ty.unwrap_or(Type::Unit);
+
+            match (is_while_true, nobreak) {
+                (true, Some(_)) => {
+                    return Err(sem_err("`nobreak` is unreachable in `while true`"));
+                }
+                (false, None) if while_ty != Type::Unit => {
+                    return Err(sem_err(
+                        "`while` with non-unit break requires `nobreak` block",
+                    ));
+                }
+                (false, Some(nobreak_block)) => {
+                    let nobreak_ty = analyze_control_block(nobreak_block, resolver)?;
+                    match nobreak_ty {
+                        Some(t) if t != while_ty => {
+                            return Err(sem_err(format!(
+                                "nobreak type `{:?}` does not match while type `{:?}`",
+                                t, while_ty
+                            )));
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+
+            Ok(while_ty)
         }
-        Expr::Float(_) => todo!("float"),
-        Expr::Cast { .. } => todo!("cast"),
+        Expr::Float(_) => Ok(Type::F64),
+        Expr::Cast { expr, target_type } => {
+            let source_ty = analyze_expr(expr, resolver)?;
+            let target_ty = resolve_type(target_type);
+            if !source_ty.is_numeric() || !target_ty.is_numeric() {
+                return Err(sem_err(format!(
+                    "cannot cast `{:?}` to `{:?}`",
+                    source_ty, target_ty
+                )));
+            }
+            Ok(target_ty)
+        }
     }
 }
 
@@ -639,6 +717,196 @@ mod tests {
     fn err_assign_type_mismatch() {
         let err = analyze_str(
             "func main() -> i32 { var x: i32 = 0; x = false; return x; }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    // --- Phase 4 normal cases ---
+
+    #[test]
+    fn ok_type_inference() {
+        analyze_str("func main() -> i32 { let x = 10; return x; }").unwrap();
+    }
+
+    #[test]
+    fn ok_cast_i64() {
+        analyze_str(
+            "func main() -> i32 { let x: i64 = 42 as i64; return x as i32; }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ok_float_literal() {
+        analyze_str(
+            "func main() -> i32 { let x = 3.14; let y: i32 = 0; return y; }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ok_break_in_if() {
+        analyze_str(
+            "func main() -> i32 { var i: i32 = 0; while i < 3 { if i == 1 { break; }; i = i + 1; }; return i; }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ok_continue_in_if() {
+        analyze_str(
+            "func main() -> i32 { var i: i32 = 0; var s: i32 = 0; while i < 5 { i = i + 1; if i == 3 { continue; }; s = s + i; }; return s; }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ok_break_in_if_else() {
+        analyze_str(
+            "func main() -> i32 { var i: i32 = 0; while i < 10 { let x: i32 = if i == 5 { break; } else { yield i; }; i = i + 1; }; return i; }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ok_i64_function() {
+        analyze_str(
+            "func add_i64(a: i64, b: i64) -> i64 { return a + b; } func main() -> i32 { return add_i64(1 as i64, 2 as i64) as i32; }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ok_while_true_break_value() {
+        analyze_str(
+            "func main() -> i32 { let x: i32 = while true { break 10; }; return x; }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ok_while_true_break_unit() {
+        analyze_str(
+            "func main() -> i32 { while true { break; }; return 42; }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ok_while_cond_nobreak() {
+        analyze_str(
+            "func main() -> i32 { var i: i32 = 0; let x: i32 = while i < 10 { if i == 5 { break 99; }; i = i + 1; } nobreak { yield 0; }; return x; }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ok_while_cond_unit_nobreak() {
+        analyze_str(
+            "func main() -> i32 { var i: i32 = 0; while i < 3 { i = i + 1; } nobreak { }; return i; }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ok_i32_max() {
+        analyze_str(
+            "func main() -> i32 { let x = 2147483647; return x; }",
+        )
+        .unwrap();
+    }
+
+    // --- Phase 4 error cases ---
+
+    #[test]
+    fn err_break_outside_loop() {
+        let err = analyze_str("func main() -> i32 { break; return 0; }").unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_continue_outside_loop() {
+        let err = analyze_str("func main() -> i32 { continue; return 0; }").unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_nobreak_in_while_true() {
+        let err = analyze_str(
+            "func main() -> i32 { let x: i32 = while true { break 10; } nobreak { yield 20; }; return x; }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_non_unit_break_without_nobreak() {
+        let err = analyze_str(
+            "func main() -> i32 { var i: i32 = 0; let x: i32 = while i < 10 { break 1; }; return x; }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_nobreak_type_mismatch() {
+        let err = analyze_str(
+            "func main() -> i32 { var i: i32 = 0; let x: i32 = while i < 10 { break 1; } nobreak { yield true; }; return x; }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_cast_type_mismatch() {
+        let err = analyze_str(
+            "func main() -> i32 { let x: i32 = 42 as i64; return x; }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_arithmetic_type_mismatch() {
+        let err = analyze_str(
+            "func main() -> i32 { let x: i32 = 1; let y: i64 = 2 as i64; return x + y; }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_cast_bool() {
+        let err = analyze_str(
+            "func main() -> i32 { let b: bool = true; let x = b as i32; return x; }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_float_to_i32() {
+        let err = analyze_str(
+            "func main() -> i32 { let x: i32 = 3.14; return x; }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_integer_out_of_range() {
+        let err = analyze_str(
+            "func main() -> i32 { let x = 3000000000; return 0; }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_integer_out_of_range_with_cast() {
+        let err = analyze_str(
+            "func main() -> i32 { return 3000000000 as i64; }",
         )
         .unwrap_err();
         assert!(matches!(err, BengalError::SemanticError { .. }));
