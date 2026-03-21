@@ -1,9 +1,9 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub functions: Vec<Function>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Function {
     pub name: String,
     pub params: Vec<Param>,
@@ -20,22 +20,27 @@ pub struct Param {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeAnnotation {
     I32,
+    I64,
+    F32,
+    F64,
     Bool,
     Unit,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    Let { name: String, ty: TypeAnnotation, value: Expr },
-    Var { name: String, ty: TypeAnnotation, value: Expr },
+    Let { name: String, ty: Option<TypeAnnotation>, value: Expr },
+    Var { name: String, ty: Option<TypeAnnotation>, value: Expr },
     Assign { name: String, value: Expr },
     Return(Option<Expr>),
     Yield(Expr),
+    Break(Option<Expr>),
+    Continue,
     Expr(Expr),
 }
 
@@ -60,9 +65,10 @@ pub enum UnaryOp {
     Not, // !
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Number(i64),
+    Float(f64),
     Ident(String),
     BinaryOp {
         op: BinOp,
@@ -74,5 +80,6 @@ pub enum Expr {
     Bool(bool),
     UnaryOp { op: UnaryOp, operand: Box<Expr> },
     If { condition: Box<Expr>, then_block: Block, else_block: Option<Block> },
-    While { condition: Box<Expr>, body: Block },
+    While { condition: Box<Expr>, body: Block, nobreak: Option<Block> },
+    Cast { expr: Box<Expr>, target_type: TypeAnnotation },
 }

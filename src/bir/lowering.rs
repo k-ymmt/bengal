@@ -255,6 +255,8 @@ impl Lowering {
                 let _val = self.lower_expr(expr);
                 StmtResult::None
             }
+            Stmt::Break(_) => todo!("break"),
+            Stmt::Continue => todo!("continue"),
         }
     }
 
@@ -358,7 +360,9 @@ impl Lowering {
                 then_block,
                 else_block,
             } => self.lower_if(condition, then_block, else_block.as_ref()),
-            Expr::While { condition, body } => self.lower_while(condition, body),
+            Expr::While { condition, body, nobreak: _ } => self.lower_while(condition, body),
+            Expr::Float(_) => todo!("float"),
+            Expr::Cast { .. } => todo!("cast"),
         }
     }
 
@@ -778,6 +782,9 @@ fn convert_compare_op(op: BinOp) -> BirCompareOp {
 fn convert_type(ty: &TypeAnnotation) -> BirType {
     match ty {
         TypeAnnotation::I32 => BirType::I32,
+        TypeAnnotation::I64 => BirType::I64,
+        TypeAnnotation::F32 => BirType::F32,
+        TypeAnnotation::F64 => BirType::F64,
         TypeAnnotation::Bool => BirType::Bool,
         TypeAnnotation::Unit => BirType::Unit,
     }

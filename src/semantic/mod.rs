@@ -207,7 +207,7 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
     match stmt {
         Stmt::Let { name, ty, value } => {
             let val_ty = analyze_expr(value, resolver)?;
-            let var_ty = resolve_type(ty);
+            let var_ty = resolve_type(ty.as_ref().unwrap());
             if val_ty != var_ty {
                 return Err(sem_err(format!(
                     "type mismatch: expected `{:?}`, found `{:?}`",
@@ -224,7 +224,7 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
         }
         Stmt::Var { name, ty, value } => {
             let val_ty = analyze_expr(value, resolver)?;
-            let var_ty = resolve_type(ty);
+            let var_ty = resolve_type(ty.as_ref().unwrap());
             if val_ty != var_ty {
                 return Err(sem_err(format!(
                     "type mismatch: expected `{:?}`, found `{:?}`",
@@ -288,6 +288,8 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
         Stmt::Expr(expr) => {
             let _ty = analyze_expr(expr, resolver)?;
         }
+        Stmt::Break(_) => todo!("break"),
+        Stmt::Continue => todo!("continue"),
     }
     Ok(())
 }
@@ -407,7 +409,7 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                 }
             }
         }
-        Expr::While { condition, body } => {
+        Expr::While { condition, body, nobreak: _ } => {
             let cond_ty = analyze_expr(condition, resolver)?;
             if cond_ty != Type::Bool {
                 return Err(sem_err("while condition must be `bool`"));
@@ -415,6 +417,8 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             analyze_loop_block(body, resolver)?;
             Ok(Type::Unit)
         }
+        Expr::Float(_) => todo!("float"),
+        Expr::Cast { .. } => todo!("cast"),
     }
 }
 

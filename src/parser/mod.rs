@@ -133,7 +133,7 @@ impl Parser {
                 let ty = self.parse_type()?;
                 self.expect(Token::Eq)?;
                 let value = self.parse_expr()?;
-                Stmt::Let { name, ty, value }
+                Stmt::Let { name, ty: Some(ty), value }
             }
             Token::Var => {
                 self.advance();
@@ -142,7 +142,7 @@ impl Parser {
                 let ty = self.parse_type()?;
                 self.expect(Token::Eq)?;
                 let value = self.parse_expr()?;
-                Stmt::Var { name, ty, value }
+                Stmt::Var { name, ty: Some(ty), value }
             }
             Token::Return => {
                 self.advance();
@@ -387,6 +387,7 @@ impl Parser {
         Ok(Expr::While {
             condition: Box::new(condition),
             body,
+            nobreak: None,
         })
     }
 
@@ -548,7 +549,7 @@ mod tests {
             stmts[0],
             Stmt::Let {
                 name: "x".to_string(),
-                ty: TypeAnnotation::I32,
+                ty: Some(TypeAnnotation::I32),
                 value: Expr::Number(10),
             }
         );
@@ -590,7 +591,7 @@ mod tests {
             stmts[0],
             Stmt::Let {
                 name: "x".to_string(),
-                ty: TypeAnnotation::I32,
+                ty: Some(TypeAnnotation::I32),
                 value: Expr::Block(Block {
                     stmts: vec![Stmt::Yield(Expr::Number(10))],
                 }),
