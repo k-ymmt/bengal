@@ -137,7 +137,7 @@ impl Parser {
             Token::Return => {
                 self.advance();
                 let expr = self.parse_expr()?;
-                Stmt::Return(expr)
+                Stmt::Return(Some(expr))
             }
             Token::Yield => {
                 self.advance();
@@ -290,7 +290,7 @@ pub fn parse(tokens: Vec<SpannedToken>) -> Result<Program> {
                 params: vec![],
                 return_type: TypeAnnotation::I32,
                 body: Block {
-                    stmts: vec![Stmt::Return(expr)],
+                    stmts: vec![Stmt::Return(Some(expr))],
                 },
             }],
         })
@@ -311,7 +311,7 @@ mod tests {
     fn parse_expr_str(input: &str) -> Expr {
         let program = parse_str(input).unwrap();
         match program.functions[0].body.stmts.last().unwrap() {
-            Stmt::Return(expr) => expr.clone(),
+            Stmt::Return(Some(expr)) => expr.clone(),
             _ => panic!("expected Return statement"),
         }
     }
@@ -391,7 +391,7 @@ mod tests {
         assert_eq!(f.name, "main");
         assert_eq!(f.params, vec![]);
         assert_eq!(f.return_type, TypeAnnotation::I32);
-        assert_eq!(f.body.stmts, vec![Stmt::Return(Expr::Number(42))]);
+        assert_eq!(f.body.stmts, vec![Stmt::Return(Some(Expr::Number(42)))]);
     }
 
     #[test]
@@ -408,7 +408,7 @@ mod tests {
                 value: Expr::Number(10),
             }
         );
-        assert_eq!(stmts[1], Stmt::Return(Expr::Ident("x".to_string())));
+        assert_eq!(stmts[1], Stmt::Return(Some(Expr::Ident("x".to_string()))));
     }
 
     #[test]
@@ -426,11 +426,11 @@ mod tests {
         );
         assert_eq!(
             f.body.stmts[0],
-            Stmt::Return(Expr::BinaryOp {
+            Stmt::Return(Some(Expr::BinaryOp {
                 op: BinOp::Add,
                 left: Box::new(Expr::Ident("a".to_string())),
                 right: Box::new(Expr::Ident("b".to_string())),
-            })
+            }))
         );
     }
 
@@ -452,7 +452,7 @@ mod tests {
                 }),
             }
         );
-        assert_eq!(stmts[1], Stmt::Return(Expr::Ident("x".to_string())));
+        assert_eq!(stmts[1], Stmt::Return(Some(Expr::Ident("x".to_string()))));
     }
 
     #[test]
@@ -464,7 +464,7 @@ mod tests {
         assert_eq!(f.params, vec![]);
         assert_eq!(f.return_type, TypeAnnotation::I32);
         assert_eq!(f.body.stmts.len(), 1);
-        assert!(matches!(&f.body.stmts[0], Stmt::Return(Expr::BinaryOp { .. })));
+        assert!(matches!(&f.body.stmts[0], Stmt::Return(Some(Expr::BinaryOp { .. }))));
     }
 
     #[test]

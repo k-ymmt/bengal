@@ -95,7 +95,7 @@ fn analyze_function(func: &Function, resolver: &mut Resolver) -> Result<()> {
         analyze_stmt(stmt, resolver)?;
 
         // If this is the Return statement, check type matches
-        if let Stmt::Return(expr) = stmt {
+        if let Stmt::Return(Some(expr)) = stmt {
             let expr_ty = analyze_expr(expr, resolver)?;
             if expr_ty != return_type {
                 return Err(sem_err(format!(
@@ -195,8 +195,11 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
                 }
             }
         }
-        Stmt::Return(expr) => {
+        Stmt::Return(Some(expr)) => {
             let _ty = analyze_expr(expr, resolver)?;
+        }
+        Stmt::Return(None) => {
+            // Unit return — will be validated in Phase 3 Step 5
         }
         Stmt::Yield(expr) => {
             let _ty = analyze_expr(expr, resolver)?;
@@ -248,6 +251,7 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             Ok(sig.return_type.clone())
         }
         Expr::Block(block) => analyze_block_expr(block, resolver),
+        _ => todo!("Phase 3 Step 5: Bool, UnaryOp, If, While type checking"),
     }
 }
 

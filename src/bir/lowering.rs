@@ -139,9 +139,12 @@ impl Lowering {
                 self.assign_var(name, val);
                 StmtResult::None
             }
-            Stmt::Return(expr) => {
+            Stmt::Return(Some(expr)) => {
                 let val = self.lower_expr(expr, instructions);
                 StmtResult::Return(val)
+            }
+            Stmt::Return(None) => {
+                todo!("Phase 3 Step 8: ReturnVoid lowering")
             }
             Stmt::Yield(expr) => {
                 let val = self.lower_expr(expr, instructions);
@@ -199,6 +202,7 @@ impl Lowering {
                     _ => unreachable!("block expression must yield (semantic analysis guarantees this)"),
                 }
             }
+            _ => todo!("Phase 3 Step 8: Bool, UnaryOp, If, While, comparison/logical lowering"),
         }
     }
 }
@@ -209,12 +213,14 @@ fn convert_binop(op: BinOp) -> BirBinOp {
         BinOp::Sub => BirBinOp::Sub,
         BinOp::Mul => BirBinOp::Mul,
         BinOp::Div => BirBinOp::Div,
+        _ => todo!("Phase 3 Step 8: comparison/logical BinOp conversion"),
     }
 }
 
 fn convert_type(ty: &TypeAnnotation) -> BirType {
     match ty {
         TypeAnnotation::I32 => BirType::I32,
+        _ => todo!("Phase 3 Step 8: Bool, Unit type conversion"),
     }
 }
 

@@ -20,6 +20,8 @@ pub struct Param {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeAnnotation {
     I32,
+    Bool,
+    Unit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,7 +34,7 @@ pub enum Stmt {
     Let { name: String, ty: TypeAnnotation, value: Expr },
     Var { name: String, ty: TypeAnnotation, value: Expr },
     Assign { name: String, value: Expr },
-    Return(Expr),
+    Return(Option<Expr>),
     Yield(Expr),
     Expr(Expr),
 }
@@ -43,6 +45,19 @@ pub enum BinOp {
     Sub, // -
     Mul, // *
     Div, // /
+    Eq,  // ==
+    Ne,  // !=
+    Lt,  // <
+    Gt,  // >
+    Le,  // <=
+    Ge,  // >=
+    And, // &&
+    Or,  // ||
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOp {
+    Not, // !
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,4 +71,8 @@ pub enum Expr {
     },
     Call { name: String, args: Vec<Expr> },
     Block(Block),
+    Bool(bool),
+    UnaryOp { op: UnaryOp, operand: Box<Expr> },
+    If { condition: Box<Expr>, then_block: Block, else_block: Option<Block> },
+    While { condition: Box<Expr>, body: Block },
 }
