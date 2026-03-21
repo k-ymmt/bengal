@@ -15,6 +15,9 @@ pub enum BengalError {
     #[error("Parse error: {message}")]
     ParseError { message: String, span: Span },
 
+    #[error("Semantic error: {message}")]
+    SemanticError { message: String, span: Span },
+
     #[error("Lowering error: {message}")]
     LoweringError { message: String },
 
@@ -46,6 +49,12 @@ impl BengalError {
                 label: "here".to_string(),
             },
             BengalError::ParseError { message, span } => BengalDiagnostic {
+                message,
+                src_code: source,
+                span: Some(SourceSpan::new(span.start.into(), span.end - span.start)),
+                label: "here".to_string(),
+            },
+            BengalError::SemanticError { message, span } => BengalDiagnostic {
                 message,
                 src_code: source,
                 span: Some(SourceSpan::new(span.start.into(), span.end - span.start)),
