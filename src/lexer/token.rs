@@ -35,6 +35,18 @@ pub enum Token {
     #[token("yield")]
     Yield,
 
+    // Phase 3: keywords
+    #[token("true")]
+    True,
+    #[token("false")]
+    False,
+    #[token("if")]
+    If,
+    #[token("else")]
+    Else,
+    #[token("while")]
+    While,
+
     // Phase 2: symbols
     #[token("->")]
     Arrow,
@@ -50,6 +62,28 @@ pub enum Token {
     RBrace,
     #[token("=")]
     Eq,
+
+    // Phase 3: comparison operators
+    #[token("==")]
+    EqEq,
+    #[token("!=")]
+    NotEq,
+    #[token("<=")]
+    LtEq,
+    #[token(">=")]
+    GtEq,
+    #[token("<")]
+    Lt,
+    #[token(">")]
+    Gt,
+
+    // Phase 3: logical operators
+    #[token("&&")]
+    AmpAmp,
+    #[token("||")]
+    PipePipe,
+    #[token("!")]
+    Bang,
 
     // Phase 2: identifiers
     #[regex("[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
@@ -80,6 +114,20 @@ impl fmt::Display for Token {
             Token::LBrace => write!(f, "{{"),
             Token::RBrace => write!(f, "}}"),
             Token::Eq => write!(f, "="),
+            Token::True => write!(f, "true"),
+            Token::False => write!(f, "false"),
+            Token::If => write!(f, "if"),
+            Token::Else => write!(f, "else"),
+            Token::While => write!(f, "while"),
+            Token::EqEq => write!(f, "=="),
+            Token::NotEq => write!(f, "!="),
+            Token::Lt => write!(f, "<"),
+            Token::Gt => write!(f, ">"),
+            Token::LtEq => write!(f, "<="),
+            Token::GtEq => write!(f, ">="),
+            Token::AmpAmp => write!(f, "&&"),
+            Token::PipePipe => write!(f, "||"),
+            Token::Bang => write!(f, "!"),
             Token::Ident(s) => write!(f, "{}", s),
             Token::Eof => write!(f, "EOF"),
         }
