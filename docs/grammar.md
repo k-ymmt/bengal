@@ -1,22 +1,23 @@
-# Bengal Language Grammar — Phase 3
+# Bengal Language Grammar — Phase 4
 
 ## Overview
 
 Bengal is an expression-oriented language that compiles to WebAssembly.
-Phase 3 adds control flow (`if`/`else`, `while`), `bool` type, `()` (Unit) type, comparison and logical operators, and early `return`.
+Phase 4 adds loop control (`break`/`continue`), multiple numeric types (`i64`, `f32`, `f64`), local type inference, `as` casts, `while` expressions with `break` values and `nobreak` blocks, and constant folding optimization.
 
 Key design principles:
 
 - **Explicit returns**: Functions return values with `return`, block expressions with `yield`.
-- **Mandatory type annotations**: All variables and return types must be explicitly annotated.
+- **Optional type annotations**: Type annotations on `let`/`var` can be omitted when the type can be inferred from the initializer.
 - **Immutable by default**: `let` bindings are immutable, `var` bindings are mutable.
-- **Expression-oriented**: `if`/`else` is an expression that produces a value via `yield`.
+- **Expression-oriented**: `if`/`else` and `while` are expressions that produce values.
 
 ## Lexical Grammar
 
 ```ebnf
 (* Literals *)
 integer_literal = digit , { digit } ;
+float_literal   = digit , { digit } , "." , digit , { digit } ;
 digit           = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
 bool_literal    = "true" | "false" ;
 
@@ -26,7 +27,8 @@ letter_or_underscore = "a".."z" | "A".."Z" | "_" ;
 
 (* Keywords *)
 keyword = "func" | "let" | "var" | "return" | "yield"
-        | "true" | "false" | "if" | "else" | "while" ;
+        | "true" | "false" | "if" | "else" | "while"
+        | "break" | "continue" | "as" | "nobreak" ;
 
 (* Arithmetic operators *)
 additive_op       = "+" | "-" ;
@@ -68,17 +70,20 @@ function   = "func" , identifier , param_list , [ "->" , type ] , block ;
 
 param_list = "(" , [ param , { "," , param } ] , ")" ;
 param      = identifier , ":" , type ;
-type       = "i32" | "bool" | "(" , ")" ;
+type       = "i32" | "i64" | "f32" | "f64" | "bool" | "(" , ")" ;
 
 block      = "{" , { statement } , "}" ;
 
-statement  = let_stmt | var_stmt | assign_stmt | return_stmt | yield_stmt | expr_stmt ;
-let_stmt    = "let" , identifier , ":" , type , "=" , expression , ";" ;
-var_stmt    = "var" , identifier , ":" , type , "=" , expression , ";" ;
-assign_stmt = identifier , "=" , expression , ";" ;
-return_stmt = "return" , [ expression ] , ";" ;
-yield_stmt  = "yield" , expression , ";" ;
-expr_stmt   = expression , ";" ;
+statement  = let_stmt | var_stmt | assign_stmt | return_stmt | yield_stmt
+           | break_stmt | continue_stmt | expr_stmt ;
+let_stmt      = "let" , identifier , [ ":" , type ] , "=" , expression , ";" ;
+var_stmt      = "var" , identifier , [ ":" , type ] , "=" , expression , ";" ;
+assign_stmt   = identifier , "=" , expression , ";" ;
+return_stmt   = "return" , [ expression ] , ";" ;
+yield_stmt    = "yield" , expression , ";" ;
+break_stmt    = "break" , [ expression ] , ";" ;
+continue_stmt = "continue" , ";" ;
+expr_stmt     = expression , ";" ;
 
 expression       = or_expr ;
 or_expr          = and_expr , { "||" , and_expr } ;
@@ -86,9 +91,11 @@ and_expr         = equality_expr , { "&&" , equality_expr } ;
 equality_expr    = comparison_expr , { ( "==" | "!=" ) , comparison_expr } ;
 comparison_expr  = additive_expr , { ( "<" | ">" | "<=" | ">=" ) , additive_expr } ;
 additive_expr    = term , { ( "+" | "-" ) , term } ;
-term             = unary , { ( "*" | "/" ) , unary } ;
+term             = cast_expr , { ( "*" | "/" ) , cast_expr } ;
+cast_expr        = unary , { "as" , type } ;
 unary            = "!" , unary | factor ;
 factor           = integer_literal
+                 | float_literal
                  | bool_literal
                  | identifier , "(" , [ expression , { "," , expression } ] , ")"  (* call *)
                  | identifier                                                       (* variable *)
@@ -99,7 +106,7 @@ factor           = integer_literal
                  ;
 
 if_expr    = "if" , expression , block , [ "else" , block ] ;
-while_expr = "while" , expression , block ;
+while_expr = "while" , expression , block , [ "nobreak" , block ] ;
 ```
 
 ## Operator Precedence and Associativity
@@ -112,7 +119,8 @@ while_expr = "while" , expression , block ;
 | 4 | `<` `>` `<=` `>=` | Left |
 | 5 | `+` `-` | Left |
 | 6 | `*` `/` | Left |
-| 7 (highest) | `!` (prefix) | Right |
+| 7 | `as` (postfix cast) | Left |
+| 8 (highest) | `!` (prefix) | Right |
 
 ## Type System
 
@@ -121,9 +129,13 @@ while_expr = "while" , expression , block ;
 | `i32` | 32-bit signed integer | 1 |
 | `bool` | Boolean (`true` / `false`) | 3 |
 | `()` | Unit type (no value) | 3 |
-| `i64` | 64-bit signed integer | Future |
-| `f32` | 32-bit floating point | Future |
-| `f64` | 64-bit floating point | Future |
+| `i64` | 64-bit signed integer | 4 |
+| `f32` | 32-bit floating point | 4 |
+| `f64` | 64-bit floating point | 4 |
+
+### Default literal types
+- Integer literals (`42`) default to `i32`.
+- Float literals (`3.14`) default to `f64`.
 
 ## Semantic Rules
 
@@ -131,13 +143,14 @@ while_expr = "while" , expression , block ;
 - `main` function must exist, take no parameters, and return `i32`.
 - Function return type defaults to `()` if `->` is omitted.
 - All functions must end with a `return` statement.
-- `return` may appear at any position (early return is allowed in Phase 3).
+- `return` may appear at any position (early return is allowed).
 - `return;` (no value) is valid for `()` return type functions.
 
-### Variables
+### Variables and type inference
 - `let` variables are immutable; `var` variables are mutable.
 - Shadowing is allowed (re-declaring a variable in the same or inner scope).
-- Variable initializers and assignments must match the declared type.
+- Type annotations on `let`/`var` are optional. When omitted, the type is inferred from the initializer expression.
+- When a type annotation is present, the initializer type must match.
 
 ### Block expressions
 - `yield` must be the last statement in a block expression.
@@ -146,27 +159,54 @@ while_expr = "while" , expression , block ;
 
 ### if/else
 - `if` condition must be `bool`.
-- `if`/`else` with both branches: then and else types must match (or one may diverge via `return`).
+- `if`/`else` with both branches: then and else types must match (or one may diverge via `return`, `break`, or `continue`).
 - `if` without `else`: type is `()`.
-- When one branch diverges (via `return`), the other branch's type is used.
+- When one branch diverges, the other branch's type is used.
 
-### while
+### while, break, continue
 - `while` condition must be `bool`.
-- `while` type is always `()`.
-- `yield` is not allowed in while loop body.
-- `return` is allowed in while loop body (early return).
-- `break`/`continue` are not supported (Phase 4).
+- `break` and `continue` are only allowed inside a `while` loop body.
+- `break;` exits the innermost loop. `break expr;` exits and provides a value.
+- `continue;` jumps to the loop header (re-evaluates condition).
+- `break` and `continue` are treated as diverging (like `return`) in control flow analysis.
+
+#### while expression type and nobreak
+
+The type of a `while` expression is determined by its `break` statements:
+
+| Condition | break type | nobreak | while type |
+|---|---|---|---|
+| `while true` | Unit (`break;` or none) | Forbidden | `()` |
+| `while true` | Non-Unit (`break expr`) | Forbidden | break value type |
+| `while cond` | Unit (`break;` or none) | Optional | `()` |
+| `while cond` | Non-Unit (`break expr`) | **Required** | break/nobreak common type |
+
+- `while true` + `nobreak` → compile error (nobreak is unreachable).
+- `while cond` + non-Unit break + no `nobreak` → compile error (condition-false path has no value).
+- `nobreak` block type must match the break type. It uses `yield` to provide a value.
 
 ### Operators
-- Arithmetic (`+`, `-`, `*`, `/`): both operands `i32`, result `i32`.
-- Comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`): both operands `i32`, result `bool`.
+- Arithmetic (`+`, `-`, `*`, `/`): both operands must be the same numeric type. Result is that type.
+- Comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`): both operands must be the same numeric type. Result is `bool`.
 - Logical (`&&`, `||`): both operands `bool`, result `bool`. Short-circuit evaluation.
 - Logical not (`!`): operand `bool`, result `bool`.
 
+### Type conversion (as)
+- `expr as type` converts between numeric types (`i32`, `i64`, `f32`, `f64`).
+- Casting to/from `bool` is not allowed.
+- `as` binds tighter than all binary operators but lower than `!` (prefix).
+
+### Integer literal range
+- Integer literals default to `i32`. Values outside `i32` range (`-2147483648` to `2147483647`) are a compile error.
+
+## Optimizations
+
+- **Constant folding**: Compile-time evaluation of arithmetic and comparison on literal operands (e.g., `2 + 3` → `5`).
+
 ## Features Not Yet Supported
 
-- **Loop control**: `break` / `continue` (Phase 4)
-- **Additional types**: `i64`, `f32`, `f64`
-- **Type inference**: `let x = 1 + 2;` (Phase 4)
-- **Type conversion**: `as` casts (Phase 4)
 - **Unary minus**: `-x` negation
+- **String type**: string literals and operations
+- **Arrays/structs**: composite data types
+- **Closures/first-class functions**
+- **Integer literal suffixes**: `42i64` (use `42 as i64` instead)

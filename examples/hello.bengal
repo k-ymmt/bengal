@@ -1,20 +1,29 @@
-func abs(x: i32) -> i32 {
-    if x < 0 {
-        return 0 - x;
+func fibonacci(n: i32) -> i32 {
+    var a = 0;
+    var b = 1;
+    var i = 0;
+    while i < n {
+        let next = a + b;
+        a = b;
+        b = next;
+        i = i + 1;
     };
-    return x;
+    return a;
 }
 
-func sum_to(n: i32) -> i32 {
-    var i: i32 = 0;
-    var s: i32 = 0;
+func sum_evens(n: i32) -> i32 {
+    var i = 0;
+    var s = 0;
     while i < n {
-        s = s + i;
         i = i + 1;
+        if (i / 2) * 2 != i {
+            continue;
+        };
+        s = s + i;
     };
     return s;
 }
 
 func main() -> i32 {
-    return abs(0 - sum_to(10));
+    return fibonacci(10) + sum_evens(10);
 }
