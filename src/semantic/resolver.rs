@@ -17,6 +17,7 @@ pub struct FuncSig {
 pub struct Resolver {
     scopes: Vec<HashMap<String, VarInfo>>,
     functions: HashMap<String, FuncSig>,
+    pub current_return_type: Option<Type>,
 }
 
 impl Resolver {
@@ -24,6 +25,7 @@ impl Resolver {
         Self {
             scopes: Vec::new(),
             functions: HashMap::new(),
+            current_return_type: None,
         }
     }
 
