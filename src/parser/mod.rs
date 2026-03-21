@@ -55,8 +55,12 @@ impl Parser {
             _ => unreachable!(),
         };
         let params = self.parse_param_list()?;
-        self.expect(Token::Arrow)?;
-        let return_type = self.parse_type()?;
+        let return_type = if self.peek().node == Token::Arrow {
+            self.advance();
+            self.parse_type()?
+        } else {
+            TypeAnnotation::Unit
+        };
         let body = self.parse_block()?;
         Ok(Function {
             name,
@@ -92,9 +96,15 @@ impl Parser {
     }
 
     fn parse_type(&mut self) -> Result<TypeAnnotation> {
+        if self.peek().node == Token::LParen {
+            self.advance();
+            self.expect(Token::RParen)?;
+            return Ok(TypeAnnotation::Unit);
+        }
         let tok = self.expect(Token::Ident(String::new()))?;
         match &tok.node {
             Token::Ident(s) if s == "i32" => Ok(TypeAnnotation::I32),
+            Token::Ident(s) if s == "bool" => Ok(TypeAnnotation::Bool),
             _ => Err(BengalError::ParseError {
                 message: format!("unknown type `{}`", tok.node),
                 span: tok.span,
@@ -136,8 +146,12 @@ impl Parser {
             }
             Token::Return => {
                 self.advance();
-                let expr = self.parse_expr()?;
-                Stmt::Return(Some(expr))
+                if self.peek().node == Token::Semicolon {
+                    Stmt::Return(None)
+                } else {
+                    let expr = self.parse_expr()?;
+                    Stmt::Return(Some(expr))
+                }
             }
             Token::Yield => {
                 self.advance();
@@ -173,9 +187,88 @@ impl Parser {
         }
     }
 
-    // --- Expr (arithmetic + ident + call + block) ---
+    // --- Expr (7-level precedence chain) ---
 
+    // Level 1 (lowest): ||
     fn parse_expr(&mut self) -> Result<Expr> {
+        let mut left = self.parse_and()?;
+        loop {
+            if self.peek().node != Token::PipePipe {
+                break;
+            }
+            self.advance();
+            let right = self.parse_and()?;
+            left = Expr::BinaryOp {
+                op: BinOp::Or,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+        Ok(left)
+    }
+
+    // Level 2: &&
+    fn parse_and(&mut self) -> Result<Expr> {
+        let mut left = self.parse_equality()?;
+        loop {
+            if self.peek().node != Token::AmpAmp {
+                break;
+            }
+            self.advance();
+            let right = self.parse_equality()?;
+            left = Expr::BinaryOp {
+                op: BinOp::And,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+        Ok(left)
+    }
+
+    // Level 3: == !=
+    fn parse_equality(&mut self) -> Result<Expr> {
+        let mut left = self.parse_comparison()?;
+        loop {
+            let op = match self.peek().node {
+                Token::EqEq => BinOp::Eq,
+                Token::NotEq => BinOp::Ne,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_comparison()?;
+            left = Expr::BinaryOp {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+        Ok(left)
+    }
+
+    // Level 4: < > <= >=
+    fn parse_comparison(&mut self) -> Result<Expr> {
+        let mut left = self.parse_additive()?;
+        loop {
+            let op = match self.peek().node {
+                Token::Lt => BinOp::Lt,
+                Token::Gt => BinOp::Gt,
+                Token::LtEq => BinOp::Le,
+                Token::GtEq => BinOp::Ge,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_additive()?;
+            left = Expr::BinaryOp {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+        Ok(left)
+    }
+
+    // Level 5: + -
+    fn parse_additive(&mut self) -> Result<Expr> {
         let mut left = self.parse_term()?;
         loop {
             let op = match self.peek().node {
@@ -194,8 +287,9 @@ impl Parser {
         Ok(left)
     }
 
+    // Level 6: * /
     fn parse_term(&mut self) -> Result<Expr> {
-        let mut left = self.parse_factor()?;
+        let mut left = self.parse_unary()?;
         loop {
             let op = match self.peek().node {
                 Token::Star => BinOp::Mul,
@@ -203,7 +297,7 @@ impl Parser {
                 _ => break,
             };
             self.advance();
-            let right = self.parse_factor()?;
+            let right = self.parse_unary()?;
             left = Expr::BinaryOp {
                 op,
                 left: Box::new(left),
@@ -213,6 +307,19 @@ impl Parser {
         Ok(left)
     }
 
+    // Level 7 (highest): ! (prefix)
+    fn parse_unary(&mut self) -> Result<Expr> {
+        if self.peek().node == Token::Bang {
+            self.advance();
+            let operand = self.parse_unary()?;
+            return Ok(Expr::UnaryOp {
+                op: UnaryOp::Not,
+                operand: Box::new(operand),
+            });
+        }
+        self.parse_factor()
+    }
+
     fn parse_factor(&mut self) -> Result<Expr> {
         let tok = self.peek();
         match &tok.node {
@@ -220,6 +327,14 @@ impl Parser {
                 let n = *n;
                 self.advance();
                 Ok(Expr::Number(n))
+            }
+            Token::True => {
+                self.advance();
+                Ok(Expr::Bool(true))
+            }
+            Token::False => {
+                self.advance();
+                Ok(Expr::Bool(false))
             }
             Token::LParen => {
                 self.advance();
@@ -239,11 +354,40 @@ impl Parser {
                 let block = self.parse_block()?;
                 Ok(Expr::Block(block))
             }
+            Token::If => self.parse_if_expr(),
+            Token::While => self.parse_while_expr(),
             _ => Err(BengalError::ParseError {
                 message: format!("unexpected token `{}`", tok.node),
                 span: tok.span,
             }),
         }
+    }
+
+    fn parse_if_expr(&mut self) -> Result<Expr> {
+        self.expect(Token::If)?;
+        let condition = self.parse_expr()?;
+        let then_block = self.parse_block()?;
+        let else_block = if self.peek().node == Token::Else {
+            self.advance();
+            Some(self.parse_block()?)
+        } else {
+            None
+        };
+        Ok(Expr::If {
+            condition: Box::new(condition),
+            then_block,
+            else_block,
+        })
+    }
+
+    fn parse_while_expr(&mut self) -> Result<Expr> {
+        self.expect(Token::While)?;
+        let condition = self.parse_expr()?;
+        let body = self.parse_block()?;
+        Ok(Expr::While {
+            condition: Box::new(condition),
+            body,
+        })
     }
 
     fn parse_call(&mut self, name: String) -> Result<Expr> {
@@ -473,5 +617,70 @@ mod tests {
             parse_str("func main() -> i32 { let x: = 10; }"),
             Err(BengalError::ParseError { .. })
         ));
+    }
+
+    // --- Phase 3 tests ---
+
+    #[test]
+    fn parse_if_else() {
+        let program = parse_str(
+            "func main() -> i32 { if true { yield 1; } else { yield 2; }; return 0; }",
+        )
+        .unwrap();
+        let stmts = &program.functions[0].body.stmts;
+        assert_eq!(stmts.len(), 2);
+        assert!(matches!(&stmts[0], Stmt::Expr(Expr::If { else_block: Some(_), .. })));
+    }
+
+    #[test]
+    fn parse_while() {
+        let program =
+            parse_str("func main() -> i32 { while false { }; return 0; }").unwrap();
+        let stmts = &program.functions[0].body.stmts;
+        assert_eq!(stmts.len(), 2);
+        assert!(matches!(&stmts[0], Stmt::Expr(Expr::While { .. })));
+    }
+
+    #[test]
+    fn parse_comparison() {
+        let expr = parse_expr_str("1 < 2");
+        assert_eq!(
+            expr,
+            Expr::BinaryOp {
+                op: BinOp::Lt,
+                left: Box::new(Expr::Number(1)),
+                right: Box::new(Expr::Number(2)),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_unit_return_function() {
+        let program = parse_str("func foo() { return; }").unwrap();
+        let f = &program.functions[0];
+        assert_eq!(f.name, "foo");
+        assert_eq!(f.return_type, TypeAnnotation::Unit);
+        assert_eq!(f.body.stmts, vec![Stmt::Return(None)]);
+    }
+
+    #[test]
+    fn parse_logical_precedence() {
+        // true && false || !true → Or(And(true, false), Not(true))
+        let expr = parse_expr_str("true && false || !true");
+        assert_eq!(
+            expr,
+            Expr::BinaryOp {
+                op: BinOp::Or,
+                left: Box::new(Expr::BinaryOp {
+                    op: BinOp::And,
+                    left: Box::new(Expr::Bool(true)),
+                    right: Box::new(Expr::Bool(false)),
+                }),
+                right: Box::new(Expr::UnaryOp {
+                    op: UnaryOp::Not,
+                    operand: Box::new(Expr::Bool(true)),
+                }),
+            }
+        );
     }
 }
