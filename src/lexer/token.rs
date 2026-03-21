@@ -7,8 +7,11 @@ use crate::error::Span;
 #[derive(Debug, Clone, PartialEq, Logos)]
 #[logos(skip r"[ \t\n\r]+")]
 pub enum Token {
-    #[regex("[0-9]+", |lex| lex.slice().parse::<i32>().ok())]
-    Number(i32),
+    #[regex("[0-9]+", |lex| lex.slice().parse::<i64>().ok())]
+    Number(i64),
+
+    #[regex("[0-9]+\\.[0-9]+", |lex| lex.slice().parse::<f64>().ok())]
+    Float(f64),
 
     #[token("+")]
     Plus,
@@ -46,6 +49,16 @@ pub enum Token {
     Else,
     #[token("while")]
     While,
+
+    // Phase 4: keywords
+    #[token("break")]
+    Break,
+    #[token("continue")]
+    Continue,
+    #[token("as")]
+    As,
+    #[token("nobreak")]
+    Nobreak,
 
     // Phase 2: symbols
     #[token("->")]
@@ -96,6 +109,7 @@ impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Token::Number(n) => write!(f, "{}", n),
+            Token::Float(n) => write!(f, "{}", n),
             Token::Plus => write!(f, "+"),
             Token::Minus => write!(f, "-"),
             Token::Star => write!(f, "*"),
@@ -119,6 +133,10 @@ impl fmt::Display for Token {
             Token::If => write!(f, "if"),
             Token::Else => write!(f, "else"),
             Token::While => write!(f, "while"),
+            Token::Break => write!(f, "break"),
+            Token::Continue => write!(f, "continue"),
+            Token::As => write!(f, "as"),
+            Token::Nobreak => write!(f, "nobreak"),
             Token::EqEq => write!(f, "=="),
             Token::NotEq => write!(f, "!="),
             Token::Lt => write!(f, "<"),

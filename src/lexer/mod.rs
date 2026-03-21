@@ -233,6 +233,67 @@ mod tests {
     }
 
     #[test]
+    fn float_literal() {
+        assert_eq!(
+            token_nodes("3.14"),
+            vec![Token::Float(3.14), Token::Eof]
+        );
+        assert_eq!(
+            token_nodes("42.0"),
+            vec![Token::Float(42.0), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn break_continue_keywords() {
+        assert_eq!(
+            token_nodes("break"),
+            vec![Token::Break, Token::Eof]
+        );
+        assert_eq!(
+            token_nodes("continue"),
+            vec![Token::Continue, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn as_keyword() {
+        assert_eq!(
+            token_nodes("42 as i64"),
+            vec![
+                Token::Number(42),
+                Token::As,
+                Token::Ident("i64".to_string()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn nobreak_keyword() {
+        assert_eq!(
+            token_nodes("nobreak"),
+            vec![Token::Nobreak, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn while_break_tokens() {
+        assert_eq!(
+            token_nodes("while true { break; }"),
+            vec![
+                Token::While,
+                Token::True,
+                Token::LBrace,
+                Token::Break,
+                Token::Semicolon,
+                Token::RBrace,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
     fn lex_error_on_invalid_character() {
         let err = tokenize("2 @ 3").unwrap_err();
         match err {

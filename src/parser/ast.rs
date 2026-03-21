@@ -62,7 +62,7 @@ pub enum UnaryOp {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
-    Number(i32),
+    Number(i64),
     Ident(String),
     BinaryOp {
         op: BinOp,
