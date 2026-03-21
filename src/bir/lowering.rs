@@ -42,6 +42,7 @@ impl Lowering {
                 });
                 result
             }
+            _ => todo!("Phase 2: Ident, Call, Block lowering"),
         }
     }
 }
