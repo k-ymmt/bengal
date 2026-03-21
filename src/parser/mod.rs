@@ -104,6 +104,9 @@ impl Parser {
         let tok = self.expect(Token::Ident(String::new()))?;
         match &tok.node {
             Token::Ident(s) if s == "i32" => Ok(TypeAnnotation::I32),
+            Token::Ident(s) if s == "i64" => Ok(TypeAnnotation::I64),
+            Token::Ident(s) if s == "f32" => Ok(TypeAnnotation::F32),
+            Token::Ident(s) if s == "f64" => Ok(TypeAnnotation::F64),
             Token::Ident(s) if s == "bool" => Ok(TypeAnnotation::Bool),
             _ => Err(BengalError::ParseError {
                 message: format!("unknown type `{}`", tok.node),
@@ -129,20 +132,28 @@ impl Parser {
             Token::Let => {
                 self.advance();
                 let name = self.expect_ident()?;
-                self.expect(Token::Colon)?;
-                let ty = self.parse_type()?;
+                let ty = if self.peek().node == Token::Colon {
+                    self.advance();
+                    Some(self.parse_type()?)
+                } else {
+                    None
+                };
                 self.expect(Token::Eq)?;
                 let value = self.parse_expr()?;
-                Stmt::Let { name, ty: Some(ty), value }
+                Stmt::Let { name, ty, value }
             }
             Token::Var => {
                 self.advance();
                 let name = self.expect_ident()?;
-                self.expect(Token::Colon)?;
-                let ty = self.parse_type()?;
+                let ty = if self.peek().node == Token::Colon {
+                    self.advance();
+                    Some(self.parse_type()?)
+                } else {
+                    None
+                };
                 self.expect(Token::Eq)?;
                 let value = self.parse_expr()?;
-                Stmt::Var { name, ty: Some(ty), value }
+                Stmt::Var { name, ty, value }
             }
             Token::Return => {
                 self.advance();
@@ -152,6 +163,19 @@ impl Parser {
                     let expr = self.parse_expr()?;
                     Stmt::Return(Some(expr))
                 }
+            }
+            Token::Break => {
+                self.advance();
+                if self.peek().node == Token::Semicolon {
+                    Stmt::Break(None)
+                } else {
+                    let expr = self.parse_expr()?;
+                    Stmt::Break(Some(expr))
+                }
+            }
+            Token::Continue => {
+                self.advance();
+                Stmt::Continue
             }
             Token::Yield => {
                 self.advance();
@@ -289,7 +313,7 @@ impl Parser {
 
     // Level 6: * /
     fn parse_term(&mut self) -> Result<Expr> {
-        let mut left = self.parse_unary()?;
+        let mut left = self.parse_cast()?;
         loop {
             let op = match self.peek().node {
                 Token::Star => BinOp::Mul,
@@ -297,7 +321,7 @@ impl Parser {
                 _ => break,
             };
             self.advance();
-            let right = self.parse_unary()?;
+            let right = self.parse_cast()?;
             left = Expr::BinaryOp {
                 op,
                 left: Box::new(left),
@@ -307,7 +331,21 @@ impl Parser {
         Ok(left)
     }
 
-    // Level 7 (highest): ! (prefix)
+    // Level 7: as (postfix)
+    fn parse_cast(&mut self) -> Result<Expr> {
+        let mut expr = self.parse_unary()?;
+        while self.peek().node == Token::As {
+            self.advance();
+            let target_type = self.parse_type()?;
+            expr = Expr::Cast {
+                expr: Box::new(expr),
+                target_type,
+            };
+        }
+        Ok(expr)
+    }
+
+    // Level 8 (highest): ! (prefix)
     fn parse_unary(&mut self) -> Result<Expr> {
         if self.peek().node == Token::Bang {
             self.advance();
@@ -327,6 +365,11 @@ impl Parser {
                 let n = *n;
                 self.advance();
                 Ok(Expr::Number(n))
+            }
+            Token::Float(f) => {
+                let f = *f;
+                self.advance();
+                Ok(Expr::Float(f))
             }
             Token::True => {
                 self.advance();
@@ -384,10 +427,16 @@ impl Parser {
         self.expect(Token::While)?;
         let condition = self.parse_expr()?;
         let body = self.parse_block()?;
+        let nobreak = if self.peek().node == Token::Nobreak {
+            self.advance();
+            Some(self.parse_block()?)
+        } else {
+            None
+        };
         Ok(Expr::While {
             condition: Box::new(condition),
             body,
-            nobreak: None,
+            nobreak,
         })
     }
 
@@ -683,5 +732,127 @@ mod tests {
                 }),
             }
         );
+    }
+
+    // --- Phase 4 tests ---
+
+    #[test]
+    fn parse_let_type_inference() {
+        let program =
+            parse_str("func main() -> i32 { let x = 42; return x; }").unwrap();
+        let stmts = &program.functions[0].body.stmts;
+        assert_eq!(
+            stmts[0],
+            Stmt::Let {
+                name: "x".to_string(),
+                ty: None,
+                value: Expr::Number(42),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_let_with_i64() {
+        let program =
+            parse_str("func main() -> i32 { let x: i64 = 42; return 0; }").unwrap();
+        let stmts = &program.functions[0].body.stmts;
+        assert_eq!(
+            stmts[0],
+            Stmt::Let {
+                name: "x".to_string(),
+                ty: Some(TypeAnnotation::I64),
+                value: Expr::Number(42),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_cast_expr() {
+        let expr = parse_expr_str("42 as i64");
+        assert_eq!(
+            expr,
+            Expr::Cast {
+                expr: Box::new(Expr::Number(42)),
+                target_type: TypeAnnotation::I64,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_break_no_value() {
+        let program =
+            parse_str("func main() -> i32 { while true { break; }; return 0; }")
+                .unwrap();
+        let stmts = &program.functions[0].body.stmts;
+        if let Stmt::Expr(Expr::While { body, .. }) = &stmts[0] {
+            assert_eq!(body.stmts[0], Stmt::Break(None));
+        } else {
+            panic!("expected while");
+        }
+    }
+
+    #[test]
+    fn parse_break_with_value() {
+        let program =
+            parse_str("func main() -> i32 { while true { break 10; }; return 0; }")
+                .unwrap();
+        let stmts = &program.functions[0].body.stmts;
+        if let Stmt::Expr(Expr::While { body, .. }) = &stmts[0] {
+            assert_eq!(body.stmts[0], Stmt::Break(Some(Expr::Number(10))));
+        } else {
+            panic!("expected while");
+        }
+    }
+
+    #[test]
+    fn parse_continue() {
+        let program =
+            parse_str("func main() -> i32 { while true { continue; }; return 0; }")
+                .unwrap();
+        let stmts = &program.functions[0].body.stmts;
+        if let Stmt::Expr(Expr::While { body, .. }) = &stmts[0] {
+            assert_eq!(body.stmts[0], Stmt::Continue);
+        } else {
+            panic!("expected while");
+        }
+    }
+
+    #[test]
+    fn parse_float_literal() {
+        let expr = parse_expr_str("3.14");
+        assert_eq!(expr, Expr::Float(3.14));
+    }
+
+    #[test]
+    fn parse_cast_precedence() {
+        // 1 + 2 as i64 → Add(1, Cast(2, I64))
+        let expr = parse_expr_str("1 + 2 as i64");
+        assert_eq!(
+            expr,
+            Expr::BinaryOp {
+                op: BinOp::Add,
+                left: Box::new(Expr::Number(1)),
+                right: Box::new(Expr::Cast {
+                    expr: Box::new(Expr::Number(2)),
+                    target_type: TypeAnnotation::I64,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_while_nobreak() {
+        let program = parse_str(
+            "func main() -> i32 { while true { break 1; } nobreak { yield 2; }; return 0; }",
+        )
+        .unwrap();
+        let stmts = &program.functions[0].body.stmts;
+        if let Stmt::Expr(Expr::While { nobreak, .. }) = &stmts[0] {
+            assert!(nobreak.is_some());
+            let nb = nobreak.as_ref().unwrap();
+            assert_eq!(nb.stmts[0], Stmt::Yield(Expr::Number(2)));
+        } else {
+            panic!("expected while");
+        }
     }
 }
