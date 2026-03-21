@@ -10,6 +10,14 @@ enum StmtResult {
     Return(Value),
     ReturnVoid,
     Yield(Value),
+    Break,
+    Continue,
+}
+
+struct LoopContext {
+    header_bb: u32,
+    exit_bb: u32,
+    break_ty: Option<BirType>,
 }
 
 struct Lowering {
@@ -26,7 +34,11 @@ struct Lowering {
     // Function signatures for Call return type lookup
     func_sigs: HashMap<String, BirType>,
     // Track which variables are mutable (for while loop block args)
-    mutable_vars: Vec<String>,
+    mutable_vars: Vec<(String, BirType)>,
+    // Loop context stack for break/continue
+    loop_stack: Vec<LoopContext>,
+    // Track Value types for cast/multi-numeric support
+    value_types: HashMap<Value, BirType>,
 }
 
 impl Lowering {
@@ -42,6 +54,8 @@ impl Lowering {
             pending_regions: Vec::new(),
             func_sigs,
             mutable_vars: Vec::new(),
+            loop_stack: Vec::new(),
+            value_types: HashMap::new(),
         }
     }
 
@@ -122,12 +136,10 @@ impl Lowering {
 
     /// Collect current values of all mutable variables for while loop block args
     fn collect_mutable_var_values(&self) -> Vec<(String, Value, BirType)> {
-        let mut result = Vec::new();
-        for name in &self.mutable_vars {
-            let val = self.lookup_var(name);
-            result.push((name.clone(), val, BirType::I32));
-        }
-        result
+        self.mutable_vars
+            .iter()
+            .map(|(name, ty)| (name.clone(), self.lookup_var(name), *ty))
+            .collect()
     }
 
     // ========== Function ==========
@@ -213,6 +225,14 @@ impl Lowering {
                     result = Some(StmtResult::Yield(v));
                     break;
                 }
+                StmtResult::Break => {
+                    result = Some(StmtResult::Break);
+                    break;
+                }
+                StmtResult::Continue => {
+                    result = Some(StmtResult::Continue);
+                    break;
+                }
                 StmtResult::None => {}
             }
         }
@@ -232,8 +252,9 @@ impl Lowering {
             Stmt::Var { name, value, .. } => {
                 let val = self.lower_expr(value);
                 self.define_var(name.clone(), val);
-                if !self.mutable_vars.contains(name) {
-                    self.mutable_vars.push(name.clone());
+                let ty = self.value_types.get(&val).copied().unwrap_or(BirType::I32);
+                if !self.mutable_vars.iter().any(|(n, _)| n == name) {
+                    self.mutable_vars.push((name.clone(), ty));
                 }
                 StmtResult::None
             }
@@ -255,8 +276,37 @@ impl Lowering {
                 let _val = self.lower_expr(expr);
                 StmtResult::None
             }
-            Stmt::Break(_) => todo!("break"),
-            Stmt::Continue => todo!("continue"),
+            Stmt::Break(opt_expr) => {
+                let loop_ctx = self.loop_stack.last().unwrap();
+                let exit_bb = loop_ctx.exit_bb;
+                let mutable_vars = self.collect_mutable_var_values();
+                let args: Vec<(Value, BirType)> =
+                    mutable_vars.iter().map(|(_, v, t)| (*v, *t)).collect();
+                let value = match opt_expr {
+                    Some(expr) => {
+                        let val = self.lower_expr(expr);
+                        let ty = self.value_types.get(&val).copied().unwrap_or(BirType::I32);
+                        self.loop_stack.last_mut().unwrap().break_ty = Some(ty);
+                        Some((val, ty))
+                    }
+                    None => None,
+                };
+                self.seal_block(Terminator::BrBreak { exit_bb, args, value });
+                let dummy_bb = self.fresh_block();
+                self.start_block(dummy_bb, vec![]);
+                StmtResult::Break
+            }
+            Stmt::Continue => {
+                let loop_ctx = self.loop_stack.last().unwrap();
+                let header_bb = loop_ctx.header_bb;
+                let mutable_vars = self.collect_mutable_var_values();
+                let args: Vec<(Value, BirType)> =
+                    mutable_vars.iter().map(|(_, v, t)| (*v, *t)).collect();
+                self.seal_block(Terminator::BrContinue { header_bb, args });
+                let dummy_bb = self.fresh_block();
+                self.start_block(dummy_bb, vec![]);
+                StmtResult::Continue
+            }
         }
     }
 
@@ -271,6 +321,17 @@ impl Lowering {
                     value: *n as i64,
                     ty: BirType::I32,
                 });
+                self.value_types.insert(result, BirType::I32);
+                result
+            }
+            Expr::Float(f) => {
+                let result = self.fresh_value();
+                self.emit(Instruction::Literal {
+                    result,
+                    value: f.to_bits() as i64,
+                    ty: BirType::F64,
+                });
+                self.value_types.insert(result, BirType::F64);
                 result
             }
             Expr::Bool(b) => {
@@ -280,6 +341,7 @@ impl Lowering {
                     value: if *b { 1 } else { 0 },
                     ty: BirType::Bool,
                 });
+                self.value_types.insert(result, BirType::Bool);
                 result
             }
             Expr::Ident(name) => self.lookup_var(name),
@@ -292,6 +354,7 @@ impl Lowering {
                             result,
                             operand: operand_val,
                         });
+                        self.value_types.insert(result, BirType::Bool);
                         result
                     }
                 }
@@ -300,31 +363,43 @@ impl Lowering {
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
                     let lhs = self.lower_expr(left);
                     let rhs = self.lower_expr(right);
+                    let ty = self.value_types.get(&lhs).copied().unwrap_or(BirType::I32);
                     let result = self.fresh_value();
                     self.emit(Instruction::BinaryOp {
                         result,
                         op: convert_binop(*op),
                         lhs,
                         rhs,
-                        ty: BirType::I32,
+                        ty,
                     });
+                    self.value_types.insert(result, ty);
                     result
                 }
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                     let lhs = self.lower_expr(left);
                     let rhs = self.lower_expr(right);
+                    let operand_ty = self.value_types.get(&lhs).copied().unwrap_or(BirType::I32);
                     let result = self.fresh_value();
                     self.emit(Instruction::Compare {
                         result,
                         op: convert_compare_op(*op),
                         lhs,
                         rhs,
-                        ty: BirType::I32,
+                        ty: operand_ty,
                     });
+                    self.value_types.insert(result, BirType::Bool);
                     result
                 }
-                BinOp::And => self.lower_short_circuit_and(left, right),
-                BinOp::Or => self.lower_short_circuit_or(left, right),
+                BinOp::And => {
+                    let result = self.lower_short_circuit_and(left, right);
+                    self.value_types.insert(result, BirType::Bool);
+                    result
+                }
+                BinOp::Or => {
+                    let result = self.lower_short_circuit_or(left, right);
+                    self.value_types.insert(result, BirType::Bool);
+                    result
+                }
             },
             Expr::Call { name, args } => {
                 let arg_vals: Vec<Value> =
@@ -341,13 +416,13 @@ impl Lowering {
                     args: arg_vals,
                     ty,
                 });
+                self.value_types.insert(result, ty);
                 result
             }
             Expr::Block(block) => {
                 self.push_scope();
                 let (result, mut inner_regions) = self.lower_block_stmts(block);
                 self.pop_scope();
-                // Collect regions from inner block
                 self.pending_regions.append(&mut inner_regions);
                 match result {
                     Some(StmtResult::Yield(v)) => v,
@@ -361,9 +436,21 @@ impl Lowering {
                 then_block,
                 else_block,
             } => self.lower_if(condition, then_block, else_block.as_ref()),
-            Expr::While { condition, body, nobreak: _ } => self.lower_while(condition, body),
-            Expr::Float(_) => todo!("float"),
-            Expr::Cast { .. } => todo!("cast"),
+            Expr::While { condition, body, nobreak } => self.lower_while(condition, body, nobreak.as_ref()),
+            Expr::Cast { expr, target_type } => {
+                let operand = self.lower_expr(expr);
+                let from_ty = self.value_types.get(&operand).copied().unwrap_or(BirType::I32);
+                let to_ty = convert_type(target_type);
+                let result = self.fresh_value();
+                self.emit(Instruction::Cast {
+                    result,
+                    operand,
+                    from_ty,
+                    to_ty,
+                });
+                self.value_types.insert(result, to_ty);
+                result
+            }
         }
     }
 
@@ -536,7 +623,12 @@ impl Lowering {
                 let then_yields = matches!(&then_result, Some(StmtResult::Yield(_)));
                 let else_yields = matches!(&else_result, Some(StmtResult::Yield(_)));
                 let has_merge_value = then_yields || else_yields;
-                let merge_type = BirType::I32; // Phase 3: yield values are always i32
+                // Infer merge type from yield values
+                let merge_type = match (&then_result, &else_result) {
+                    (Some(StmtResult::Yield(v)), _) => self.value_types.get(v).copied().unwrap_or(BirType::I32),
+                    (_, Some(StmtResult::Yield(v))) => self.value_types.get(v).copied().unwrap_or(BirType::I32),
+                    _ => BirType::I32,
+                };
 
                 // Seal then block
                 self.current_block_label = then_block_label;
@@ -553,6 +645,9 @@ impl Lowering {
                         self.seal_block(Terminator::Return(*v));
                     }
                     Some(StmtResult::ReturnVoid) => {
+                        self.seal_block(Terminator::ReturnVoid);
+                    }
+                    Some(StmtResult::Break) | Some(StmtResult::Continue) => {
                         self.seal_block(Terminator::ReturnVoid);
                     }
                     _ => {
@@ -579,6 +674,9 @@ impl Lowering {
                         self.seal_block(Terminator::Return(*v));
                     }
                     Some(StmtResult::ReturnVoid) => {
+                        self.seal_block(Terminator::ReturnVoid);
+                    }
+                    Some(StmtResult::Break) | Some(StmtResult::Continue) => {
                         self.seal_block(Terminator::ReturnVoid);
                     }
                     _ => {
@@ -634,6 +732,9 @@ impl Lowering {
                     Some(StmtResult::ReturnVoid) => {
                         self.seal_block(Terminator::ReturnVoid);
                     }
+                    Some(StmtResult::Break) | Some(StmtResult::Continue) => {
+                        self.seal_block(Terminator::ReturnVoid);
+                    }
                     _ => {
                         self.seal_block(Terminator::Br {
                             target: bb_merge,
@@ -667,7 +768,7 @@ impl Lowering {
 
     // ========== While ==========
 
-    fn lower_while(&mut self, condition: &Expr, body: &Block) -> Value {
+    fn lower_while(&mut self, condition: &Expr, body: &Block, nobreak: Option<&Block>) -> Value {
         let entry_bb = self.current_block_label;
 
         // Collect mutable var values for block args
@@ -704,39 +805,132 @@ impl Lowering {
             self.assign_var(name, param_val);
         }
 
+        // Push loop context
+        self.loop_stack.push(LoopContext {
+            header_bb: bb_header,
+            exit_bb: bb_exit,
+            break_ty: None,
+        });
+
         // Evaluate condition
         let cond_val = self.lower_expr(condition);
         let header_regions = self.take_pending_regions();
 
+        // Determine nobreak target
+        let bb_nobreak = if nobreak.is_some() {
+            self.fresh_block()
+        } else {
+            bb_exit
+        };
+
         self.seal_block(Terminator::CondBr {
             cond: cond_val,
             then_bb: bb_body,
-            else_bb: bb_exit,
+            else_bb: bb_nobreak,
         });
 
         // Body block
         self.start_block(bb_body, vec![]);
         self.push_scope();
-        let (_body_result, body_inner_regions) = self.lower_block_stmts(body);
+        let (body_result, body_inner_regions) = self.lower_block_stmts(body);
         self.pop_scope();
 
         let mut body_region = body_inner_regions;
 
-        // Collect updated mutable var values for back-edge
-        let updated_args: Vec<(Value, BirType)> = mutable_vars
-            .iter()
-            .map(|(name, _, ty)| (self.lookup_var(name), *ty))
-            .collect();
-
-        self.seal_block(Terminator::Br {
-            target: bb_header,
-            args: updated_args,
-        });
+        // Only emit back-edge if body didn't diverge (break/continue/return)
+        match body_result {
+            Some(StmtResult::Break) | Some(StmtResult::Continue) => {
+                // Already sealed by lower_stmt with BrBreak/BrContinue
+                // Seal the dummy block that lower_stmt started
+                self.seal_block(Terminator::ReturnVoid);
+            }
+            Some(StmtResult::Return(v)) => {
+                self.seal_block(Terminator::Return(v));
+            }
+            Some(StmtResult::ReturnVoid) => {
+                self.seal_block(Terminator::ReturnVoid);
+            }
+            _ => {
+                // Normal fall-through: emit back-edge to header
+                let updated_args: Vec<(Value, BirType)> = mutable_vars
+                    .iter()
+                    .map(|(name, _, ty)| (self.lookup_var(name), *ty))
+                    .collect();
+                self.seal_block(Terminator::Br {
+                    target: bb_header,
+                    args: updated_args,
+                });
+            }
+        }
 
         body_region.push(CfgRegion::Block(bb_body));
 
+        // Pop loop context and get break type
+        let loop_ctx = self.loop_stack.pop().unwrap();
+        let break_ty = loop_ctx.break_ty;
+
+        // Nobreak block
+        let nobreak_region = if let Some(nobreak_blk) = nobreak {
+            self.start_block(bb_nobreak, vec![]);
+            self.push_scope();
+            let (nobreak_result, nobreak_inner_regions) = self.lower_block_stmts(nobreak_blk);
+            self.pop_scope();
+
+            let mut nb_region = nobreak_inner_regions;
+
+            // Seal nobreak block → Br to exit_bb with yield value
+            match nobreak_result {
+                Some(StmtResult::Yield(v)) => {
+                    if break_ty.is_some() {
+                        let ty = self.value_types.get(&v).copied().unwrap_or(BirType::I32);
+                        self.seal_block(Terminator::Br {
+                            target: bb_exit,
+                            args: vec![(v, ty)],
+                        });
+                    } else {
+                        self.seal_block(Terminator::Br {
+                            target: bb_exit,
+                            args: vec![],
+                        });
+                    }
+                }
+                Some(StmtResult::Return(v)) => {
+                    self.seal_block(Terminator::Return(v));
+                }
+                Some(StmtResult::ReturnVoid) => {
+                    self.seal_block(Terminator::ReturnVoid);
+                }
+                _ => {
+                    self.seal_block(Terminator::Br {
+                        target: bb_exit,
+                        args: vec![],
+                    });
+                }
+            }
+
+            nb_region.push(CfgRegion::Block(bb_nobreak));
+            nb_region
+        } else {
+            vec![]
+        };
+
         // Exit block
-        self.start_block(bb_exit, vec![]);
+        let while_result = if let Some(bty) = break_ty {
+            let result_val = self.fresh_value();
+            self.start_block(bb_exit, vec![(result_val, bty)]);
+            self.value_types.insert(result_val, bty);
+            result_val
+        } else {
+            self.start_block(bb_exit, vec![]);
+            let result = self.fresh_value();
+            self.emit(Instruction::Literal {
+                result,
+                value: 0,
+                ty: BirType::Unit,
+            });
+            self.value_types.insert(result, BirType::Unit);
+            result
+        };
 
         self.pending_regions.push(CfgRegion::While {
             entry_bb,
@@ -744,18 +938,11 @@ impl Lowering {
             header_bb: bb_header,
             cond_value: cond_val,
             body_region,
-            nobreak_region: vec![],
+            nobreak_region,
             exit_bb: bb_exit,
         });
 
-        // While returns Unit — dummy value
-        let result = self.fresh_value();
-        self.emit(Instruction::Literal {
-            result,
-            value: 0,
-            ty: BirType::Unit,
-        });
-        result
+        while_result
     }
 }
 
