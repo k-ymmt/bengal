@@ -52,17 +52,25 @@ pub enum Instruction {
         args: Vec<Value>,
         ty: BirType,
     },
-    /// %result = compare <op> %lhs, %rhs : bool
+    /// %result = compare <op> %lhs, %rhs : <type>
     Compare {
         result: Value,
         op: BirCompareOp,
         lhs: Value,
         rhs: Value,
+        ty: BirType,
     },
     /// %result = not %operand : bool
     Not {
         result: Value,
         operand: Value,
+    },
+    /// %result = cast %operand : <from_ty> -> <to_ty>
+    Cast {
+        result: Value,
+        operand: Value,
+        from_ty: BirType,
+        to_ty: BirType,
     },
 }
 
@@ -82,6 +90,17 @@ pub enum Terminator {
         cond: Value,
         then_bb: u32,
         else_bb: u32,
+    },
+    /// break — exit while loop, passing updated mutable vars + optional break value
+    BrBreak {
+        exit_bb: u32,
+        args: Vec<(Value, BirType)>,
+        value: Option<(Value, BirType)>,
+    },
+    /// continue — jump to while header, passing updated mutable vars
+    BrContinue {
+        header_bb: u32,
+        args: Vec<(Value, BirType)>,
     },
 }
 
@@ -121,6 +140,7 @@ pub enum CfgRegion {
         header_bb: u32,
         cond_value: Value,
         body_region: Vec<CfgRegion>,
+        nobreak_region: Vec<CfgRegion>,
         exit_bb: u32,
     },
 }

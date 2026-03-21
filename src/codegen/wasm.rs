@@ -44,7 +44,8 @@ fn collect_locals(func: &BirFunction) -> (HashMap<Value, u32>, u32) {
                 Instruction::Literal { result, .. }
                 | Instruction::BinaryOp { result, .. }
                 | Instruction::Compare { result, .. }
-                | Instruction::Not { result, .. } => (result, false),
+                | Instruction::Not { result, .. }
+                | Instruction::Cast { result, .. } => (result, false),
                 Instruction::Call { result, ty, .. } => {
                     // Skip local allocation for void calls
                     (result, *ty == BirType::Unit)
@@ -113,6 +114,7 @@ fn emit_instruction(
             op,
             lhs,
             rhs,
+            ty: _,
         } => {
             func.instruction(&wasm_encoder::Instruction::LocalGet(locals[lhs]));
             func.instruction(&wasm_encoder::Instruction::LocalGet(locals[rhs]));
@@ -132,6 +134,7 @@ fn emit_instruction(
             func.instruction(&wasm_encoder::Instruction::I32Eqz);
             func.instruction(&wasm_encoder::Instruction::LocalSet(locals[result]));
         }
+        Instruction::Cast { .. } => todo!("cast codegen"),
     }
 }
 
@@ -205,6 +208,8 @@ fn emit_region(
                     // Should not appear in CfgRegion::Block — handled by parent IfElse/While
                     unreachable!("CondBr in CfgRegion::Block should not happen");
                 }
+                Terminator::BrBreak { .. } => todo!("BrBreak codegen"),
+                Terminator::BrContinue { .. } => todo!("BrContinue codegen"),
             }
         }
 
@@ -273,6 +278,7 @@ fn emit_region(
             header_bb,
             cond_value,
             body_region,
+            nobreak_region: _,
             exit_bb,
         } => {
             // 1. entry_bb instructions

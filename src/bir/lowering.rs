@@ -319,6 +319,7 @@ impl Lowering {
                         op: convert_compare_op(*op),
                         lhs,
                         rhs,
+                        ty: BirType::I32,
                     });
                     result
                 }
@@ -743,6 +744,7 @@ impl Lowering {
             header_bb: bb_header,
             cond_value: cond_val,
             body_region,
+            nobreak_region: vec![],
             exit_bb: bb_exit,
         });
 

@@ -135,13 +135,15 @@ fn print_instruction(inst: &Instruction, out: &mut String) {
             op,
             lhs,
             rhs,
+            ty,
         } => {
             out.push_str(&format!(
-                "{} = compare {} {}, {} : bool",
+                "{} = compare {} {}, {} : {}",
                 format_value(result),
                 format_compare_op(op),
                 format_value(lhs),
-                format_value(rhs)
+                format_value(rhs),
+                format_type(ty)
             ));
         }
         Instruction::Not { result, operand } => {
@@ -149,6 +151,20 @@ fn print_instruction(inst: &Instruction, out: &mut String) {
                 "{} = not {} : bool",
                 format_value(result),
                 format_value(operand)
+            ));
+        }
+        Instruction::Cast {
+            result,
+            operand,
+            from_ty,
+            to_ty,
+        } => {
+            out.push_str(&format!(
+                "{} = cast {} : {} -> {}",
+                format_value(result),
+                format_value(operand),
+                format_type(from_ty),
+                format_type(to_ty)
             ));
         }
     }
@@ -184,6 +200,39 @@ fn print_terminator(term: &Terminator, out: &mut String) {
                 then_bb,
                 else_bb
             ));
+        }
+        Terminator::BrBreak {
+            exit_bb,
+            args,
+            value,
+        } => {
+            let mut parts = Vec::new();
+            for (val, ty) in args {
+                parts.push(format!("{}: {}", format_value(val), format_type(ty)));
+            }
+            if let Some((val, ty)) = value {
+                parts.push(format!("{}: {}", format_value(val), format_type(ty)));
+            }
+            if parts.is_empty() {
+                out.push_str(&format!("br_break bb{}", exit_bb));
+            } else {
+                out.push_str(&format!("br_break bb{}({})", exit_bb, parts.join(", ")));
+            }
+        }
+        Terminator::BrContinue { header_bb, args } => {
+            if args.is_empty() {
+                out.push_str(&format!("br_continue bb{}", header_bb));
+            } else {
+                let args_str: Vec<String> = args
+                    .iter()
+                    .map(|(val, ty)| format!("{}: {}", format_value(val), format_type(ty)))
+                    .collect();
+                out.push_str(&format!(
+                    "br_continue bb{}({})",
+                    header_bb,
+                    args_str.join(", ")
+                ));
+            }
         }
     }
 }
