@@ -20,46 +20,52 @@ fn bir_type_to_val_type(ty: &BirType) -> Result<ValType> {
     }
 }
 
-fn collect_locals(func: &BirFunction) -> (HashMap<Value, u32>, u32) {
+struct LoopLabels {
+    exit_depth: u32,
+    loop_depth: u32,
+    header_bb: u32,
+}
+
+fn collect_locals(func: &BirFunction) -> (HashMap<Value, u32>, HashMap<Value, BirType>) {
     let mut locals = HashMap::new();
+    let mut value_types = HashMap::new();
     let param_count = func.params.len() as u32;
 
     // Parameters occupy local indices 0..param_count
-    for (i, (val, _)) in func.params.iter().enumerate() {
+    for (i, (val, ty)) in func.params.iter().enumerate() {
         locals.insert(*val, i as u32);
+        value_types.insert(*val, *ty);
     }
 
     // Instruction results get indices starting at param_count
     let mut next_local = param_count;
     for block in &func.blocks {
         // Block params (merge block args, loop header args)
-        for (val, _) in &block.params {
+        for (val, ty) in &block.params {
             if !locals.contains_key(val) {
                 locals.insert(*val, next_local);
                 next_local += 1;
             }
+            value_types.insert(*val, *ty);
         }
         for inst in &block.instructions {
-            let (result, skip) = match inst {
-                Instruction::Literal { result, .. }
-                | Instruction::BinaryOp { result, .. }
-                | Instruction::Compare { result, .. }
-                | Instruction::Not { result, .. }
-                | Instruction::Cast { result, .. } => (result, false),
-                Instruction::Call { result, ty, .. } => {
-                    // Skip local allocation for void calls
-                    (result, *ty == BirType::Unit)
-                }
+            let (result, skip, ty) = match inst {
+                Instruction::Literal { result, ty, .. } => (result, *ty == BirType::Unit, *ty),
+                Instruction::BinaryOp { result, ty, .. } => (result, false, *ty),
+                Instruction::Compare { result, .. } => (result, false, BirType::Bool),
+                Instruction::Not { result, .. } => (result, false, BirType::Bool),
+                Instruction::Cast { result, to_ty, .. } => (result, false, *to_ty),
+                Instruction::Call { result, ty, .. } => (result, *ty == BirType::Unit, *ty),
             };
             if !skip && !locals.contains_key(result) {
                 locals.insert(*result, next_local);
                 next_local += 1;
             }
+            value_types.insert(*result, ty);
         }
     }
 
-    let extra_locals = next_local - param_count;
-    (locals, extra_locals)
+    (locals, value_types)
 }
 
 fn emit_instruction(
@@ -71,9 +77,16 @@ fn emit_instruction(
     match inst {
         Instruction::Literal { result, value, ty } => {
             if *ty == BirType::Unit {
-                return; // Unit literals don't produce WASM values
+                return;
             }
-            func.instruction(&wasm_encoder::Instruction::I32Const(*value as i32));
+            let wasm_const = match ty {
+                BirType::I32 | BirType::Bool => wasm_encoder::Instruction::I32Const(*value as i32),
+                BirType::I64 => wasm_encoder::Instruction::I64Const(*value),
+                BirType::F32 => wasm_encoder::Instruction::F32Const(f32::from_bits(*value as u32)),
+                BirType::F64 => wasm_encoder::Instruction::F64Const(f64::from_bits(*value as u64)),
+                BirType::Unit => return,
+            };
+            func.instruction(&wasm_const);
             func.instruction(&wasm_encoder::Instruction::LocalSet(locals[result]));
         }
         Instruction::BinaryOp {
@@ -81,15 +94,28 @@ fn emit_instruction(
             op,
             lhs,
             rhs,
-            ..
+            ty,
         } => {
             func.instruction(&wasm_encoder::Instruction::LocalGet(locals[lhs]));
             func.instruction(&wasm_encoder::Instruction::LocalGet(locals[rhs]));
-            let wasm_op = match op {
-                BirBinOp::Add => wasm_encoder::Instruction::I32Add,
-                BirBinOp::Sub => wasm_encoder::Instruction::I32Sub,
-                BirBinOp::Mul => wasm_encoder::Instruction::I32Mul,
-                BirBinOp::Div => wasm_encoder::Instruction::I32DivS,
+            let wasm_op = match (op, ty) {
+                (BirBinOp::Add, BirType::I32) => wasm_encoder::Instruction::I32Add,
+                (BirBinOp::Add, BirType::I64) => wasm_encoder::Instruction::I64Add,
+                (BirBinOp::Add, BirType::F32) => wasm_encoder::Instruction::F32Add,
+                (BirBinOp::Add, BirType::F64) => wasm_encoder::Instruction::F64Add,
+                (BirBinOp::Sub, BirType::I32) => wasm_encoder::Instruction::I32Sub,
+                (BirBinOp::Sub, BirType::I64) => wasm_encoder::Instruction::I64Sub,
+                (BirBinOp::Sub, BirType::F32) => wasm_encoder::Instruction::F32Sub,
+                (BirBinOp::Sub, BirType::F64) => wasm_encoder::Instruction::F64Sub,
+                (BirBinOp::Mul, BirType::I32) => wasm_encoder::Instruction::I32Mul,
+                (BirBinOp::Mul, BirType::I64) => wasm_encoder::Instruction::I64Mul,
+                (BirBinOp::Mul, BirType::F32) => wasm_encoder::Instruction::F32Mul,
+                (BirBinOp::Mul, BirType::F64) => wasm_encoder::Instruction::F64Mul,
+                (BirBinOp::Div, BirType::I32) => wasm_encoder::Instruction::I32DivS,
+                (BirBinOp::Div, BirType::I64) => wasm_encoder::Instruction::I64DivS,
+                (BirBinOp::Div, BirType::F32) => wasm_encoder::Instruction::F32Div,
+                (BirBinOp::Div, BirType::F64) => wasm_encoder::Instruction::F64Div,
+                _ => unreachable!(),
             };
             func.instruction(&wasm_op);
             func.instruction(&wasm_encoder::Instruction::LocalSet(locals[result]));
@@ -114,17 +140,36 @@ fn emit_instruction(
             op,
             lhs,
             rhs,
-            ty: _,
+            ty,
         } => {
             func.instruction(&wasm_encoder::Instruction::LocalGet(locals[lhs]));
             func.instruction(&wasm_encoder::Instruction::LocalGet(locals[rhs]));
-            let wasm_op = match op {
-                BirCompareOp::Eq => wasm_encoder::Instruction::I32Eq,
-                BirCompareOp::Ne => wasm_encoder::Instruction::I32Ne,
-                BirCompareOp::Lt => wasm_encoder::Instruction::I32LtS,
-                BirCompareOp::Gt => wasm_encoder::Instruction::I32GtS,
-                BirCompareOp::Le => wasm_encoder::Instruction::I32LeS,
-                BirCompareOp::Ge => wasm_encoder::Instruction::I32GeS,
+            let wasm_op = match (op, ty) {
+                (BirCompareOp::Eq, BirType::I32) => wasm_encoder::Instruction::I32Eq,
+                (BirCompareOp::Eq, BirType::I64) => wasm_encoder::Instruction::I64Eq,
+                (BirCompareOp::Eq, BirType::F32) => wasm_encoder::Instruction::F32Eq,
+                (BirCompareOp::Eq, BirType::F64) => wasm_encoder::Instruction::F64Eq,
+                (BirCompareOp::Ne, BirType::I32) => wasm_encoder::Instruction::I32Ne,
+                (BirCompareOp::Ne, BirType::I64) => wasm_encoder::Instruction::I64Ne,
+                (BirCompareOp::Ne, BirType::F32) => wasm_encoder::Instruction::F32Ne,
+                (BirCompareOp::Ne, BirType::F64) => wasm_encoder::Instruction::F64Ne,
+                (BirCompareOp::Lt, BirType::I32) => wasm_encoder::Instruction::I32LtS,
+                (BirCompareOp::Lt, BirType::I64) => wasm_encoder::Instruction::I64LtS,
+                (BirCompareOp::Lt, BirType::F32) => wasm_encoder::Instruction::F32Lt,
+                (BirCompareOp::Lt, BirType::F64) => wasm_encoder::Instruction::F64Lt,
+                (BirCompareOp::Gt, BirType::I32) => wasm_encoder::Instruction::I32GtS,
+                (BirCompareOp::Gt, BirType::I64) => wasm_encoder::Instruction::I64GtS,
+                (BirCompareOp::Gt, BirType::F32) => wasm_encoder::Instruction::F32Gt,
+                (BirCompareOp::Gt, BirType::F64) => wasm_encoder::Instruction::F64Gt,
+                (BirCompareOp::Le, BirType::I32) => wasm_encoder::Instruction::I32LeS,
+                (BirCompareOp::Le, BirType::I64) => wasm_encoder::Instruction::I64LeS,
+                (BirCompareOp::Le, BirType::F32) => wasm_encoder::Instruction::F32Le,
+                (BirCompareOp::Le, BirType::F64) => wasm_encoder::Instruction::F64Le,
+                (BirCompareOp::Ge, BirType::I32) => wasm_encoder::Instruction::I32GeS,
+                (BirCompareOp::Ge, BirType::I64) => wasm_encoder::Instruction::I64GeS,
+                (BirCompareOp::Ge, BirType::F32) => wasm_encoder::Instruction::F32Ge,
+                (BirCompareOp::Ge, BirType::F64) => wasm_encoder::Instruction::F64Ge,
+                _ => unreachable!(),
             };
             func.instruction(&wasm_op);
             func.instruction(&wasm_encoder::Instruction::LocalSet(locals[result]));
@@ -134,7 +179,37 @@ fn emit_instruction(
             func.instruction(&wasm_encoder::Instruction::I32Eqz);
             func.instruction(&wasm_encoder::Instruction::LocalSet(locals[result]));
         }
-        Instruction::Cast { .. } => todo!("cast codegen"),
+        Instruction::Cast {
+            result,
+            operand,
+            from_ty,
+            to_ty,
+        } => {
+            if from_ty == to_ty {
+                // Same type — just copy
+                func.instruction(&wasm_encoder::Instruction::LocalGet(locals[operand]));
+                func.instruction(&wasm_encoder::Instruction::LocalSet(locals[result]));
+                return;
+            }
+            func.instruction(&wasm_encoder::Instruction::LocalGet(locals[operand]));
+            let wasm_op = match (from_ty, to_ty) {
+                (BirType::I32, BirType::I64) => wasm_encoder::Instruction::I64ExtendI32S,
+                (BirType::I64, BirType::I32) => wasm_encoder::Instruction::I32WrapI64,
+                (BirType::I32, BirType::F32) => wasm_encoder::Instruction::F32ConvertI32S,
+                (BirType::I32, BirType::F64) => wasm_encoder::Instruction::F64ConvertI32S,
+                (BirType::I64, BirType::F32) => wasm_encoder::Instruction::F32ConvertI64S,
+                (BirType::I64, BirType::F64) => wasm_encoder::Instruction::F64ConvertI64S,
+                (BirType::F32, BirType::I32) => wasm_encoder::Instruction::I32TruncF32S,
+                (BirType::F32, BirType::I64) => wasm_encoder::Instruction::I64TruncF32S,
+                (BirType::F64, BirType::I32) => wasm_encoder::Instruction::I32TruncF64S,
+                (BirType::F64, BirType::I64) => wasm_encoder::Instruction::I64TruncF64S,
+                (BirType::F32, BirType::F64) => wasm_encoder::Instruction::F64PromoteF32,
+                (BirType::F64, BirType::F32) => wasm_encoder::Instruction::F32DemoteF64,
+                _ => return,
+            };
+            func.instruction(&wasm_op);
+            func.instruction(&wasm_encoder::Instruction::LocalSet(locals[result]));
+        }
     }
 }
 
@@ -171,9 +246,10 @@ fn emit_regions(
     locals: &HashMap<Value, u32>,
     func_index_map: &HashMap<String, u32>,
     func: &mut Function,
+    loop_labels: Option<&LoopLabels>,
 ) {
     for region in regions {
-        emit_region(region, blocks, locals, func_index_map, func);
+        emit_region(region, blocks, locals, func_index_map, func, loop_labels);
     }
 }
 
@@ -184,6 +260,7 @@ fn emit_region(
     locals: &HashMap<Value, u32>,
     func_index_map: &HashMap<String, u32>,
     func: &mut Function,
+    loop_labels: Option<&LoopLabels>,
 ) {
     match region {
         CfgRegion::Block(label) => {
@@ -200,16 +277,35 @@ fn emit_region(
                     func.instruction(&wasm_encoder::Instruction::Return);
                 }
                 Terminator::Br { args, target } => {
-                    // Emit local.set for block args only (no WASM br)
                     let target_block = find_block(blocks, *target);
                     emit_br_args(args, target_block, locals, func);
                 }
                 Terminator::CondBr { .. } => {
-                    // Should not appear in CfgRegion::Block — handled by parent IfElse/While
                     unreachable!("CondBr in CfgRegion::Block should not happen");
                 }
-                Terminator::BrBreak { .. } => todo!("BrBreak codegen"),
-                Terminator::BrContinue { .. } => todo!("BrContinue codegen"),
+                Terminator::BrBreak { exit_bb, args, value } => {
+                    let ll = loop_labels.expect("BrBreak outside of loop context");
+                    // Copy mutable var values → header_bb param locals (for post-loop reads)
+                    let header_block = find_block(blocks, ll.header_bb);
+                    emit_br_args(args, header_block, locals, func);
+                    // Handle break value → exit_bb block arg local
+                    if let Some((val, _)) = value {
+                        func.instruction(&wasm_encoder::Instruction::LocalGet(locals[val]));
+                        let exit_block = find_block(blocks, *exit_bb);
+                        if !exit_block.params.is_empty() {
+                            let exit_param = exit_block.params[0].0;
+                            func.instruction(&wasm_encoder::Instruction::LocalSet(locals[&exit_param]));
+                        }
+                    }
+                    func.instruction(&wasm_encoder::Instruction::Br(ll.exit_depth));
+                }
+                Terminator::BrContinue { header_bb, args } => {
+                    let ll = loop_labels.expect("BrContinue outside of loop context");
+                    // Set header_bb param locals
+                    let header_block = find_block(blocks, *header_bb);
+                    emit_br_args(args, header_block, locals, func);
+                    func.instruction(&wasm_encoder::Instruction::Br(ll.loop_depth));
+                }
             }
         }
 
@@ -221,32 +317,29 @@ fn emit_region(
             else_region,
             merge_bb,
         } => {
-            // 1. Emit cond_region (short-circuit evaluation, may be empty)
-            emit_regions(cond_region, blocks, locals, func_index_map, func);
+            emit_regions(cond_region, blocks, locals, func_index_map, func, loop_labels);
 
-            // 2. Emit cond_bb instructions only (no CondBr)
             let cond_block = find_block(blocks, *cond_bb);
             emit_block_instructions(cond_block, locals, func_index_map, func);
 
-            // 3. local.get cond_value → if
             func.instruction(&wasm_encoder::Instruction::LocalGet(locals[cond_value]));
             func.instruction(&wasm_encoder::Instruction::If(BlockType::Empty));
 
-            // 4. then_region
-            emit_regions(then_region, blocks, locals, func_index_map, func);
+            // Inside if: depth +1 for loop labels
+            let inner_labels = loop_labels.map(|ll| LoopLabels {
+                exit_depth: ll.exit_depth + 1,
+                loop_depth: ll.loop_depth + 1,
+                header_bb: ll.header_bb,
+            });
+            emit_regions(then_region, blocks, locals, func_index_map, func, inner_labels.as_ref());
 
-            // 5. else
             func.instruction(&wasm_encoder::Instruction::Else);
-            emit_regions(else_region, blocks, locals, func_index_map, func);
+            emit_regions(else_region, blocks, locals, func_index_map, func, inner_labels.as_ref());
 
-            // end
             func.instruction(&wasm_encoder::Instruction::End);
 
-            // 6. merge_bb instructions + terminator
             let merge_block = find_block(blocks, *merge_bb);
             emit_block_instructions(merge_block, locals, func_index_map, func);
-            // merge_bb's terminator is handled as part of the parent region's next Block
-            // (if merge_bb has Return, it will be the next CfgRegion::Block)
         }
 
         CfgRegion::IfOnly {
@@ -256,7 +349,7 @@ fn emit_region(
             then_region,
             merge_bb,
         } => {
-            emit_regions(cond_region, blocks, locals, func_index_map, func);
+            emit_regions(cond_region, blocks, locals, func_index_map, func, loop_labels);
 
             let cond_block = find_block(blocks, *cond_bb);
             emit_block_instructions(cond_block, locals, func_index_map, func);
@@ -264,7 +357,12 @@ fn emit_region(
             func.instruction(&wasm_encoder::Instruction::LocalGet(locals[cond_value]));
             func.instruction(&wasm_encoder::Instruction::If(BlockType::Empty));
 
-            emit_regions(then_region, blocks, locals, func_index_map, func);
+            let inner_labels = loop_labels.map(|ll| LoopLabels {
+                exit_depth: ll.exit_depth + 1,
+                loop_depth: ll.loop_depth + 1,
+                header_bb: ll.header_bb,
+            });
+            emit_regions(then_region, blocks, locals, func_index_map, func, inner_labels.as_ref());
 
             func.instruction(&wasm_encoder::Instruction::End);
 
@@ -278,9 +376,11 @@ fn emit_region(
             header_bb,
             cond_value,
             body_region,
-            nobreak_region: _,
+            nobreak_region,
             exit_bb,
         } => {
+            let has_nobreak = !nobreak_region.is_empty();
+
             // 1. entry_bb instructions
             let entry_block = find_block(blocks, *entry_bb);
             emit_block_instructions(entry_block, locals, func_index_map, func);
@@ -291,31 +391,80 @@ fn emit_region(
                 emit_br_args(args, header_block, locals, func);
             }
 
-            // block $exit { loop $loop {
-            func.instruction(&wasm_encoder::Instruction::Block(BlockType::Empty));
-            func.instruction(&wasm_encoder::Instruction::Loop(BlockType::Empty));
+            if has_nobreak {
+                // block $exit { block $nobreak { loop $loop { ... } } nobreak_region } exit_bb
+                func.instruction(&wasm_encoder::Instruction::Block(BlockType::Empty)); // $exit
+                func.instruction(&wasm_encoder::Instruction::Block(BlockType::Empty)); // $nobreak
+                func.instruction(&wasm_encoder::Instruction::Loop(BlockType::Empty));  // $loop
 
-            // 3. header_region (short-circuit in condition, may be empty)
-            emit_regions(header_region, blocks, locals, func_index_map, func);
+                let while_labels = LoopLabels {
+                    exit_depth: 2,
+                    loop_depth: 0,
+                    header_bb: *header_bb,
+                };
 
-            // 4. header_bb instructions only (no CondBr)
-            let header_block = find_block(blocks, *header_bb);
-            emit_block_instructions(header_block, locals, func_index_map, func);
+                // 3. header_region
+                emit_regions(header_region, blocks, locals, func_index_map, func, Some(&while_labels));
 
-            // 5. local.get cond → i32.eqz → br_if $exit (depth 1 = outer block)
-            func.instruction(&wasm_encoder::Instruction::LocalGet(locals[cond_value]));
-            func.instruction(&wasm_encoder::Instruction::I32Eqz);
-            func.instruction(&wasm_encoder::Instruction::BrIf(1)); // break to outer block
+                // 4. header_bb instructions
+                let header_block = find_block(blocks, *header_bb);
+                emit_block_instructions(header_block, locals, func_index_map, func);
 
-            // 6. body_region
-            emit_regions(body_region, blocks, locals, func_index_map, func);
+                // 5. condition false → br $nobreak (depth 1 from inside loop)
+                func.instruction(&wasm_encoder::Instruction::LocalGet(locals[cond_value]));
+                func.instruction(&wasm_encoder::Instruction::I32Eqz);
+                func.instruction(&wasm_encoder::Instruction::BrIf(1)); // → $nobreak end
 
-            // 7. br $loop (depth 0 = inner loop)
-            func.instruction(&wasm_encoder::Instruction::Br(0));
+                // 6. body_region
+                emit_regions(body_region, blocks, locals, func_index_map, func, Some(&while_labels));
 
-            // end loop, end block
-            func.instruction(&wasm_encoder::Instruction::End);
-            func.instruction(&wasm_encoder::Instruction::End);
+                // 7. br $loop
+                func.instruction(&wasm_encoder::Instruction::Br(0));
+
+                // end loop
+                func.instruction(&wasm_encoder::Instruction::End);
+                // end $nobreak block — condition false lands here
+                func.instruction(&wasm_encoder::Instruction::End);
+
+                // nobreak_region (between $nobreak end and $exit end)
+                // Inside nobreak, loop_labels should point to parent loop if nested
+                emit_regions(nobreak_region, blocks, locals, func_index_map, func, loop_labels);
+
+                // end $exit block — break lands here
+                func.instruction(&wasm_encoder::Instruction::End);
+            } else {
+                // block $exit { loop $loop { ... } } exit_bb
+                func.instruction(&wasm_encoder::Instruction::Block(BlockType::Empty));
+                func.instruction(&wasm_encoder::Instruction::Loop(BlockType::Empty));
+
+                let while_labels = LoopLabels {
+                    exit_depth: 1,
+                    loop_depth: 0,
+                    header_bb: *header_bb,
+                };
+
+                // 3. header_region
+                emit_regions(header_region, blocks, locals, func_index_map, func, Some(&while_labels));
+
+                // 4. header_bb instructions
+                let header_block = find_block(blocks, *header_bb);
+                emit_block_instructions(header_block, locals, func_index_map, func);
+
+                // 5. condition false → br $exit
+                func.instruction(&wasm_encoder::Instruction::LocalGet(locals[cond_value]));
+                func.instruction(&wasm_encoder::Instruction::I32Eqz);
+                func.instruction(&wasm_encoder::Instruction::BrIf(1));
+
+                // 6. body_region
+                emit_regions(body_region, blocks, locals, func_index_map, func, Some(&while_labels));
+
+                // 7. br $loop
+                func.instruction(&wasm_encoder::Instruction::Br(0));
+
+                // end loop, end block
+                func.instruction(&wasm_encoder::Instruction::End);
+                func.instruction(&wasm_encoder::Instruction::End);
+            }
 
             // 8. exit_bb instructions
             let exit_block = find_block(blocks, *exit_bb);
@@ -340,7 +489,7 @@ pub fn compile(bir_module: &BirModule) -> Result<Vec<u8>> {
     for (i, bir_func) in bir_module.functions.iter().enumerate() {
         // Function signature
         let result_types: Vec<ValType> = if bir_func.return_type == BirType::Unit {
-            vec![] // No return value for Unit functions
+            vec![]
         } else {
             vec![bir_type_to_val_type(&bir_func.return_type)?]
         };
@@ -353,30 +502,43 @@ pub fn compile(bir_module: &BirModule) -> Result<Vec<u8>> {
         types.ty().function(param_types, result_types.clone());
         functions.function(i as u32);
 
-        let (locals, extra_locals) = collect_locals(bir_func);
+        let (locals, value_types) = collect_locals(bir_func);
+        let param_count = bir_func.params.len() as u32;
 
-        let local_types: Vec<(u32, ValType)> = if extra_locals > 0 {
-            vec![(extra_locals, ValType::I32)]
-        } else {
-            vec![]
-        };
-        let mut func = Function::new(local_types);
+        // Build local types: each extra local declared individually in index order
+        let mut max_local: u32 = param_count;
+        for idx in locals.values() {
+            if *idx >= param_count && *idx + 1 > max_local {
+                max_local = *idx + 1;
+            }
+        }
+        let extra_locals = max_local - param_count;
+        // Build index → ValType map for extra locals
+        let mut local_valtypes: Vec<ValType> = vec![ValType::I32; extra_locals as usize];
+        for (val, idx) in &locals {
+            if *idx >= param_count {
+                let bir_ty = value_types.get(val).unwrap_or(&BirType::I32);
+                let vt = bir_type_to_val_type(bir_ty).unwrap_or(ValType::I32);
+                local_valtypes[(*idx - param_count) as usize] = vt;
+            }
+        }
+        // Declare each local individually (1, type) to preserve index ordering
+        let local_types_vec: Vec<(u32, ValType)> = local_valtypes.iter().map(|vt| (1, *vt)).collect();
 
-        // Use CfgRegion tree for structured control flow emission
+        let mut func = Function::new(local_types_vec);
+
         emit_regions(
             &bir_func.body,
             &bir_func.blocks,
             &locals,
             &func_index_map,
             &mut func,
+            None,
         );
 
-        // For non-Unit functions, the last Return in the body leaves the value on stack
-        // via the WASM return instruction. But we still need End.
         func.instruction(&wasm_encoder::Instruction::End);
         code.function(&func);
 
-        // Only export main
         if bir_func.name == "main" {
             exports.export(&bir_func.name, ExportKind::Func, i as u32);
         }
@@ -472,6 +634,70 @@ mod tests {
                 "func main() -> i32 { let x: i32 = if 3 > 2 { yield 1; } else { yield 0; }; return x; }"
             ),
             1
+        );
+    }
+
+    // --- Phase 4 tests ---
+
+    #[test]
+    fn compile_break() {
+        assert_eq!(
+            compile_and_run(
+                "func main() -> i32 { var i: i32 = 0; while true { if i == 3 { break; }; i = i + 1; }; return i; }"
+            ),
+            3
+        );
+    }
+
+    #[test]
+    fn compile_continue() {
+        assert_eq!(
+            compile_and_run(
+                "func main() -> i32 { var i: i32 = 0; var s: i32 = 0; while i < 5 { i = i + 1; if i == 3 { continue; }; s = s + i; }; return s; }"
+            ),
+            12
+        );
+    }
+
+    #[test]
+    fn compile_nobreak_with_break() {
+        assert_eq!(
+            compile_and_run(
+                "func main() -> i32 { var i: i32 = 0; let x: i32 = while i < 10 { if i == 5 { break 99; }; i = i + 1; } nobreak { yield 0; }; return x; }"
+            ),
+            99
+        );
+    }
+
+    #[test]
+    fn compile_nobreak_condition_false() {
+        // while with no break in body → while_ty is Unit, so nobreak must also be Unit
+        // Use nobreak to compute a value via a separate variable
+        assert_eq!(
+            compile_and_run(
+                "func main() -> i32 { var i: i32 = 0; while i < 3 { i = i + 1; } nobreak { }; return i; }"
+            ),
+            3
+        );
+    }
+
+    #[test]
+    fn compile_cast_i64() {
+        assert_eq!(
+            compile_and_run(
+                "func main() -> i32 { let x: i64 = 100 as i64; return x as i32; }"
+            ),
+            100
+        );
+    }
+
+    #[test]
+    fn compile_i64_arithmetic() {
+        assert_eq!(
+            compile_and_run(
+                "func main() -> i32 { let x: i64 = 10 as i64; let y: i64 = 20 as i64; return (x + y) as i32; }"
+            ),
+            30
         );
     }
 }

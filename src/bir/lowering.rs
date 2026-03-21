@@ -837,6 +837,9 @@ impl Lowering {
 
         let mut body_region = body_inner_regions;
 
+        // Track the last block in the body (may differ from bb_body if if/while regions exist)
+        let last_body_bb = self.current_block_label;
+
         // Only emit back-edge if body didn't diverge (break/continue/return)
         match body_result {
             Some(StmtResult::Break) | Some(StmtResult::Continue) => {
@@ -863,7 +866,9 @@ impl Lowering {
             }
         }
 
-        body_region.push(CfgRegion::Block(bb_body));
+        // Add the last body block (which may be bb_body if no inner regions,
+        // or the merge/exit block of the last inner region)
+        body_region.push(CfgRegion::Block(last_body_bb));
 
         // Pop loop context and get break type
         let loop_ctx = self.loop_stack.pop().unwrap();
