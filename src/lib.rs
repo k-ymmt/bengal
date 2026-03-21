@@ -11,6 +11,7 @@ use parser::ast::{Program, Stmt};
 pub fn compile_source(source: &str) -> Result<Vec<u8>> {
     let tokens = lexer::tokenize(source)?;
     let program = parser::parse(tokens)?;
+    semantic::analyze(&program)?;
     let expr = extract_main_return_expr(&program)?;
     let bir = bir::lower(expr)?;
     let wasm = codegen::compile(&bir)?;
@@ -20,6 +21,7 @@ pub fn compile_source(source: &str) -> Result<Vec<u8>> {
 pub fn compile_to_bir(source: &str) -> Result<(bir::instruction::BirModule, String)> {
     let tokens = lexer::tokenize(source)?;
     let program = parser::parse(tokens)?;
+    semantic::analyze(&program)?;
     let expr = extract_main_return_expr(&program)?;
     let bir_module = bir::lower(expr)?;
     let bir_text = bir::print_module(&bir_module);
