@@ -8,7 +8,7 @@ pub fn optimize_module(module: &mut BirModule) {
     }
 }
 
-fn fold_constants(blocks: &mut Vec<BasicBlock>) {
+fn fold_constants(blocks: &mut [BasicBlock]) {
     // Track constant values: Value → (raw i64 bits, type)
     let mut value_map: HashMap<Value, (i64, BirType)> = HashMap::new();
 
@@ -27,15 +27,14 @@ fn fold_constants(blocks: &mut Vec<BasicBlock>) {
                 } => {
                     if let (Some(&(lv, _)), Some(&(rv, _))) =
                         (value_map.get(lhs), value_map.get(rhs))
+                        && let Some(folded) = fold_binop(*op, lv, rv, *ty)
                     {
-                        if let Some(folded) = fold_binop(*op, lv, rv, *ty) {
-                            value_map.insert(*result, (folded, *ty));
-                            *inst = Instruction::Literal {
-                                result: *result,
-                                value: folded,
-                                ty: *ty,
-                            };
-                        }
+                        value_map.insert(*result, (folded, *ty));
+                        *inst = Instruction::Literal {
+                            result: *result,
+                            value: folded,
+                            ty: *ty,
+                        };
                     }
                 }
                 Instruction::Compare {
@@ -47,16 +46,15 @@ fn fold_constants(blocks: &mut Vec<BasicBlock>) {
                 } => {
                     if let (Some(&(lv, _)), Some(&(rv, _))) =
                         (value_map.get(lhs), value_map.get(rhs))
+                        && let Some(folded) = fold_compare(*op, lv, rv, *ty)
                     {
-                        if let Some(folded) = fold_compare(*op, lv, rv, *ty) {
-                            let bool_val = if folded { 1i64 } else { 0i64 };
-                            value_map.insert(*result, (bool_val, BirType::Bool));
-                            *inst = Instruction::Literal {
-                                result: *result,
-                                value: bool_val,
-                                ty: BirType::Bool,
-                            };
-                        }
+                        let bool_val = if folded { 1i64 } else { 0i64 };
+                        value_map.insert(*result, (bool_val, BirType::Bool));
+                        *inst = Instruction::Literal {
+                            result: *result,
+                            value: bool_val,
+                            ty: BirType::Bool,
+                        };
                     }
                 }
                 _ => {}

@@ -83,7 +83,7 @@ fn analyze_function(func: &Function, resolver: &mut Resolver) -> Result<()> {
         )));
     }
 
-    for (_i, stmt) in stmts.iter().enumerate() {
+    for stmt in stmts.iter() {
         // Yield is not allowed in function bodies
         if matches!(stmt, Stmt::Yield(_)) {
             return Err(sem_err(
@@ -279,23 +279,23 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
         }
         Stmt::Return(Some(expr)) => {
             let ty = analyze_expr(expr, resolver)?;
-            if let Some(ref return_type) = resolver.current_return_type {
-                if ty != *return_type {
-                    return Err(sem_err(format!(
-                        "return type mismatch: expected `{}`, found `{}`",
-                        return_type, ty
-                    )));
-                }
+            if let Some(ref return_type) = resolver.current_return_type
+                && ty != *return_type
+            {
+                return Err(sem_err(format!(
+                    "return type mismatch: expected `{}`, found `{}`",
+                    return_type, ty
+                )));
             }
         }
         Stmt::Return(None) => {
-            if let Some(ref return_type) = resolver.current_return_type {
-                if *return_type != Type::Unit {
-                    return Err(sem_err(format!(
-                        "return type mismatch: expected `{}`, found `()`",
-                        return_type
-                    )));
-                }
+            if let Some(ref return_type) = resolver.current_return_type
+                && *return_type != Type::Unit
+            {
+                return Err(sem_err(format!(
+                    "return type mismatch: expected `{}`, found `()`",
+                    return_type
+                )));
             }
         }
         Stmt::Yield(expr) => {
@@ -439,12 +439,12 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                 }
                 None => {
                     // if without else: type is Unit
-                    if let Some(ref ty) = then_ty {
-                        if *ty != Type::Unit {
-                            return Err(sem_err(
-                                "if without else must have unit type (use `yield` in both branches for a value)",
-                            ));
-                        }
+                    if let Some(ref ty) = then_ty
+                        && *ty != Type::Unit
+                    {
+                        return Err(sem_err(
+                            "if without else must have unit type (use `yield` in both branches for a value)",
+                        ));
                     }
                     Ok(Type::Unit)
                 }

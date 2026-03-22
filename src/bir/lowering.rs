@@ -320,7 +320,7 @@ impl Lowering {
                 let result = self.fresh_value();
                 self.emit(Instruction::Literal {
                     result,
-                    value: *n as i64,
+                    value: *n,
                     ty: BirType::I32,
                 });
                 self.value_types.insert(result, BirType::I32);

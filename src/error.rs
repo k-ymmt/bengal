@@ -1,3 +1,5 @@
+#![allow(unused_assignments)]
+
 use miette::{Diagnostic, NamedSource, SourceSpan};
 use thiserror::Error;
 

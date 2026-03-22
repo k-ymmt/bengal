@@ -15,6 +15,7 @@ pub struct FuncSig {
     pub return_type: Type,
 }
 
+#[derive(Default)]
 pub struct Resolver {
     scopes: Vec<HashMap<String, VarInfo>>,
     functions: HashMap<String, FuncSig>,
@@ -25,13 +26,7 @@ pub struct Resolver {
 
 impl Resolver {
     pub fn new() -> Self {
-        Self {
-            scopes: Vec::new(),
-            functions: HashMap::new(),
-            current_return_type: None,
-            loop_depth: 0,
-            loop_break_types: Vec::new(),
-        }
+        Self::default()
     }
 
     pub fn push_scope(&mut self) {
