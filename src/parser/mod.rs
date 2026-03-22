@@ -51,14 +51,16 @@ impl Parser {
     // --- Program / Function ---
 
     fn parse_program(&mut self) -> Result<Program> {
+        let mut structs = Vec::new();
         let mut functions = Vec::new();
         while self.peek().node != Token::Eof {
-            functions.push(self.parse_function()?);
+            if self.peek().node == Token::Struct {
+                structs.push(self.parse_struct_def()?);
+            } else {
+                functions.push(self.parse_function()?);
+            }
         }
-        Ok(Program {
-            structs: vec![],
-            functions,
-        })
+        Ok(Program { structs, functions })
     }
 
     fn parse_function(&mut self) -> Result<Function> {
@@ -82,6 +84,92 @@ impl Parser {
             return_type,
             body,
         })
+    }
+
+    fn parse_struct_def(&mut self) -> Result<StructDef> {
+        self.expect(Token::Struct)?;
+        let name = self.expect_ident()?;
+        self.expect(Token::LBrace)?;
+        let mut members = Vec::new();
+        while self.peek().node != Token::RBrace {
+            members.push(self.parse_struct_member()?);
+        }
+        self.expect(Token::RBrace)?;
+        Ok(StructDef { name, members })
+    }
+
+    fn parse_struct_member(&mut self) -> Result<StructMember> {
+        match &self.peek().node {
+            Token::Var => {
+                self.advance();
+                let name = self.expect_ident()?;
+                self.expect(Token::Colon)?;
+                let ty = self.parse_type()?;
+                if self.peek().node == Token::LBrace {
+                    // Computed property: var name: Type { get { ... } set { ... } };
+                    self.advance(); // consume `{`
+                    let getter = self.parse_getter()?;
+                    let setter = if self.peek().node == Token::RBrace {
+                        None
+                    } else {
+                        Some(self.parse_setter()?)
+                    };
+                    self.expect(Token::RBrace)?;
+                    self.expect(Token::Semicolon)?;
+                    Ok(StructMember::ComputedProperty {
+                        name,
+                        ty,
+                        getter,
+                        setter,
+                    })
+                } else {
+                    // Stored property: var name: Type;
+                    self.expect(Token::Semicolon)?;
+                    Ok(StructMember::StoredProperty { name, ty })
+                }
+            }
+            Token::Init => {
+                self.advance();
+                let params = self.parse_param_list()?;
+                let body = self.parse_block()?;
+                Ok(StructMember::Initializer { params, body })
+            }
+            _ => {
+                let tok = self.peek();
+                Err(BengalError::ParseError {
+                    message: format!("expected struct member, found `{}`", tok.node),
+                    span: tok.span,
+                })
+            }
+        }
+    }
+
+    fn parse_getter(&mut self) -> Result<Block> {
+        let tok = self.expect(Token::Ident(String::new()))?;
+        match &tok.node {
+            Token::Ident(s) if s == "get" => {}
+            _ => {
+                return Err(BengalError::ParseError {
+                    message: format!("expected `get`, found `{}`", tok.node),
+                    span: tok.span,
+                });
+            }
+        }
+        self.parse_block()
+    }
+
+    fn parse_setter(&mut self) -> Result<Block> {
+        let tok = self.expect(Token::Ident(String::new()))?;
+        match &tok.node {
+            Token::Ident(s) if s == "set" => {}
+            _ => {
+                return Err(BengalError::ParseError {
+                    message: format!("expected `set`, found `{}`", tok.node),
+                    span: tok.span,
+                });
+            }
+        }
+        self.parse_block()
     }
 
     fn parse_param_list(&mut self) -> Result<Vec<Param>> {
@@ -123,10 +211,8 @@ impl Parser {
             Token::Ident(s) if s == "Float64" => Ok(TypeAnnotation::F64),
             Token::Ident(s) if s == "Bool" => Ok(TypeAnnotation::Bool),
             Token::Ident(s) if s == "Void" => Ok(TypeAnnotation::Unit),
-            _ => Err(BengalError::ParseError {
-                message: format!("unknown type `{}`", tok.node),
-                span: tok.span,
-            }),
+            Token::Ident(s) => Ok(TypeAnnotation::Named(s.clone())),
+            _ => unreachable!(),
         }
     }
 
@@ -197,21 +283,31 @@ impl Parser {
                 let expr = self.parse_expr()?;
                 Stmt::Yield(expr)
             }
-            Token::Ident(_) => {
-                // Lookahead: Ident followed by `=` → Assign, otherwise → Expr stmt
-                if self.tokens.get(self.pos + 1).map(|t| &t.node) == Some(&Token::Eq) {
-                    let name = self.expect_ident()?;
-                    self.advance(); // consume `=`
-                    let value = self.parse_expr()?;
-                    Stmt::Assign { name, value }
-                } else {
-                    let expr = self.parse_expr()?;
-                    Stmt::Expr(expr)
-                }
-            }
             _ => {
-                let expr = self.parse_expr()?;
-                Stmt::Expr(expr)
+                let lhs = self.parse_expr()?;
+                if self.peek().node == Token::Eq {
+                    self.advance();
+                    let value = self.parse_expr()?;
+                    match &lhs.kind {
+                        ExprKind::Ident(name) => Stmt::Assign {
+                            name: name.clone(),
+                            value,
+                        },
+                        ExprKind::FieldAccess { object, field } => Stmt::FieldAssign {
+                            object: Box::new((**object).clone()),
+                            field: field.clone(),
+                            value,
+                        },
+                        _ => {
+                            return Err(BengalError::ParseError {
+                                message: "invalid assignment target".to_string(),
+                                span: self.tokens[self.pos - 1].span,
+                            });
+                        }
+                    }
+                } else {
+                    Stmt::Expr(lhs)
+                }
             }
         };
         self.expect(Token::Semicolon)?;
@@ -375,6 +471,31 @@ impl Parser {
     }
 
     fn parse_factor(&mut self) -> Result<Expr> {
+        self.parse_postfix()
+    }
+
+    fn parse_postfix(&mut self) -> Result<Expr> {
+        let mut expr = self.parse_primary()?;
+        loop {
+            match &self.peek().node {
+                Token::Dot => {
+                    self.advance();
+                    let field = self.expect_ident()?;
+                    expr = self.expr(ExprKind::FieldAccess {
+                        object: Box::new(expr),
+                        field,
+                    });
+                }
+                Token::LParen => {
+                    expr = self.parse_postfix_call(expr)?;
+                }
+                _ => break,
+            }
+        }
+        Ok(expr)
+    }
+
+    fn parse_primary(&mut self) -> Result<Expr> {
         let tok = self.peek();
         match &tok.node {
             Token::Number(n) => {
@@ -403,11 +524,7 @@ impl Parser {
             }
             Token::Ident(_) => {
                 let name = self.expect_ident()?;
-                if self.peek().node == Token::LParen {
-                    self.parse_call(name)
-                } else {
-                    Ok(self.expr(ExprKind::Ident(name)))
-                }
+                Ok(self.expr(ExprKind::Ident(name)))
             }
             Token::LBrace => {
                 let block = self.parse_block()?;
@@ -415,10 +532,64 @@ impl Parser {
             }
             Token::If => self.parse_if_expr(),
             Token::While => self.parse_while_expr(),
+            Token::SelfKw => {
+                self.advance();
+                Ok(self.expr(ExprKind::SelfRef))
+            }
             _ => Err(BengalError::ParseError {
                 message: format!("unexpected token `{}`", tok.node),
                 span: tok.span,
             }),
+        }
+    }
+
+    fn parse_postfix_call(&mut self, callee: Expr) -> Result<Expr> {
+        self.expect(Token::LParen)?;
+
+        let name = match &callee.kind {
+            ExprKind::Ident(name) => name.clone(),
+            _ => {
+                return Err(BengalError::ParseError {
+                    message: "expected function or struct name".to_string(),
+                    span: self.tokens[self.pos - 1].span,
+                });
+            }
+        };
+
+        // Empty args → Call (semantic layer resolves if it's a struct init)
+        if self.peek().node == Token::RParen {
+            self.advance();
+            return Ok(self.expr(ExprKind::Call { name, args: vec![] }));
+        }
+
+        // Lookahead: IDENT followed by `:` → named args → StructInit
+        let is_named = matches!(self.peek().node, Token::Ident(_))
+            && self.tokens.get(self.pos + 1).map(|t| &t.node) == Some(&Token::Colon);
+
+        if is_named {
+            let mut args = Vec::new();
+            let label = self.expect_ident()?;
+            self.expect(Token::Colon)?;
+            let value = self.parse_expr()?;
+            args.push((label, value));
+            while self.peek().node == Token::Comma {
+                self.advance();
+                let label = self.expect_ident()?;
+                self.expect(Token::Colon)?;
+                let value = self.parse_expr()?;
+                args.push((label, value));
+            }
+            self.expect(Token::RParen)?;
+            Ok(self.expr(ExprKind::StructInit { name, args }))
+        } else {
+            let mut args = Vec::new();
+            args.push(self.parse_expr()?);
+            while self.peek().node == Token::Comma {
+                self.advance();
+                args.push(self.parse_expr()?);
+            }
+            self.expect(Token::RParen)?;
+            Ok(self.expr(ExprKind::Call { name, args }))
         }
     }
 
@@ -455,27 +626,13 @@ impl Parser {
             nobreak,
         }))
     }
-
-    fn parse_call(&mut self, name: String) -> Result<Expr> {
-        self.expect(Token::LParen)?;
-        let mut args = Vec::new();
-        if self.peek().node != Token::RParen {
-            args.push(self.parse_expr()?);
-            while self.peek().node == Token::Comma {
-                self.advance();
-                args.push(self.parse_expr()?);
-            }
-        }
-        self.expect(Token::RParen)?;
-        Ok(self.expr(ExprKind::Call { name, args }))
-    }
 }
 
 pub fn parse(tokens: Vec<SpannedToken>) -> Result<Program> {
     let mut parser = Parser::new(tokens);
 
     // Phase 1 compatibility: if the first token is not `func`, treat as a bare expression
-    if parser.peek().node == Token::Func {
+    if matches!(parser.peek().node, Token::Func | Token::Struct) {
         let program = parser.parse_program()?;
         let next = parser.peek();
         if next.node != Token::Eof {
@@ -1124,5 +1281,191 @@ mod tests {
         } else {
             panic!("expected return");
         }
+    }
+
+    // --- Phase 3 (struct) tests ---
+
+    #[test]
+    fn parse_struct_stored_properties() {
+        let program = parse_str(
+            "struct Point { var x: Int32; var y: Int32; } func main() -> Int32 { return 0; }",
+        )
+        .unwrap();
+        assert_eq!(program.structs.len(), 1);
+        let s = &program.structs[0];
+        assert_eq!(s.name, "Point");
+        assert_eq!(s.members.len(), 2);
+        assert!(matches!(
+            &s.members[0],
+            StructMember::StoredProperty { name, ty } if name == "x" && *ty == TypeAnnotation::I32
+        ));
+        assert!(matches!(
+            &s.members[1],
+            StructMember::StoredProperty { name, ty } if name == "y" && *ty == TypeAnnotation::I32
+        ));
+    }
+
+    #[test]
+    fn parse_struct_computed_property() {
+        let program = parse_str(
+            "struct Foo { var x: Int32; var bar: Int32 { get { return 0; } set { self.x = newValue; } }; } func main() -> Int32 { return 0; }",
+        )
+        .unwrap();
+        let s = &program.structs[0];
+        assert_eq!(s.members.len(), 2);
+        assert!(matches!(
+            &s.members[1],
+            StructMember::ComputedProperty { name, setter: Some(_), .. } if name == "bar"
+        ));
+    }
+
+    #[test]
+    fn parse_struct_computed_property_readonly() {
+        let program = parse_str(
+            "struct Foo { var bar: Int32 { get { return 0; } }; } func main() -> Int32 { return 0; }",
+        )
+        .unwrap();
+        let s = &program.structs[0];
+        assert!(matches!(
+            &s.members[0],
+            StructMember::ComputedProperty { setter: None, .. }
+        ));
+    }
+
+    #[test]
+    fn parse_struct_initializer() {
+        let program = parse_str(
+            "struct Foo { var x: Int32; init(x: Int32) { self.x = x; } } func main() -> Int32 { return 0; }",
+        )
+        .unwrap();
+        let s = &program.structs[0];
+        assert_eq!(s.members.len(), 2);
+        assert!(matches!(
+            &s.members[1],
+            StructMember::Initializer { params, .. } if params.len() == 1
+        ));
+    }
+
+    #[test]
+    fn parse_field_access() {
+        let expr = parse_expr_str("f.x");
+        assert_eq!(
+            expr,
+            e(ExprKind::FieldAccess {
+                object: Box::new(e(ExprKind::Ident("f".to_string()))),
+                field: "x".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_field_access_chain() {
+        let expr = parse_expr_str("a.b.c");
+        assert_eq!(
+            expr,
+            e(ExprKind::FieldAccess {
+                object: Box::new(e(ExprKind::FieldAccess {
+                    object: Box::new(e(ExprKind::Ident("a".to_string()))),
+                    field: "b".to_string(),
+                })),
+                field: "c".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_self_field_access() {
+        let expr = parse_expr_str("self.foo");
+        assert_eq!(
+            expr,
+            e(ExprKind::FieldAccess {
+                object: Box::new(e(ExprKind::SelfRef)),
+                field: "foo".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_struct_init() {
+        let expr = parse_expr_str("Foo(x: 1, y: 2)");
+        assert_eq!(
+            expr,
+            e(ExprKind::StructInit {
+                name: "Foo".to_string(),
+                args: vec![
+                    ("x".to_string(), e(ExprKind::Number(1))),
+                    ("y".to_string(), e(ExprKind::Number(2))),
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn parse_empty_call_remains_call() {
+        let expr = parse_expr_str("Foo()");
+        assert_eq!(
+            expr,
+            e(ExprKind::Call {
+                name: "Foo".to_string(),
+                args: vec![],
+            })
+        );
+    }
+
+    #[test]
+    fn parse_field_assign() {
+        let program =
+            parse_str("func main() -> Int32 { var f: Int32 = 0; f.x = 10; return 0; }").unwrap();
+        let stmts = &program.functions[0].body.stmts;
+        assert!(matches!(
+            normalize_stmt(&stmts[1]),
+            Stmt::FieldAssign { field, .. } if field == "x"
+        ));
+    }
+
+    #[test]
+    fn parse_self_field_assign() {
+        let program = parse_str("func main() -> Int32 { self.foo = 42; return 0; }").unwrap();
+        let stmts = &program.functions[0].body.stmts;
+        let s = normalize_stmt(&stmts[0]);
+        if let Stmt::FieldAssign {
+            object,
+            field,
+            value,
+        } = &s
+        {
+            assert_eq!(object.kind, ExprKind::SelfRef);
+            assert_eq!(field, "foo");
+            assert_eq!(value.kind, ExprKind::Number(42));
+        } else {
+            panic!("expected FieldAssign");
+        }
+    }
+
+    #[test]
+    fn parse_named_type_annotation() {
+        let program =
+            parse_str("func main() -> Int32 { var f: Foo = Foo(x: 1); return 0; }").unwrap();
+        let stmts = &program.functions[0].body.stmts;
+        if let Stmt::Var { ty: Some(ty), .. } = &stmts[0] {
+            assert_eq!(*ty, TypeAnnotation::Named("Foo".to_string()));
+        } else {
+            panic!("expected Var with Named type");
+        }
+    }
+
+    #[test]
+    fn parse_call_then_field_access() {
+        let expr = parse_expr_str("get_foo().x");
+        assert_eq!(
+            expr,
+            e(ExprKind::FieldAccess {
+                object: Box::new(e(ExprKind::Call {
+                    name: "get_foo".to_string(),
+                    args: vec![],
+                })),
+                field: "x".to_string(),
+            })
+        );
     }
 }
