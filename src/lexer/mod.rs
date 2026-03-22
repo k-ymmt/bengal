@@ -279,6 +279,162 @@ mod tests {
     }
 
     #[test]
+    fn struct_keywords() {
+        assert_eq!(token_nodes("struct"), vec![Token::Struct, Token::Eof]);
+        assert_eq!(token_nodes("init"), vec![Token::Init, Token::Eof]);
+        assert_eq!(token_nodes("self"), vec![Token::SelfKw, Token::Eof]);
+    }
+
+    #[test]
+    fn get_set_are_identifiers() {
+        // get / set はコンテキストキーワード。レキサーでは Ident として扱う
+        assert_eq!(
+            token_nodes("get"),
+            vec![Token::Ident("get".to_string()), Token::Eof]
+        );
+        assert_eq!(
+            token_nodes("set"),
+            vec![Token::Ident("set".to_string()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn dot_token() {
+        assert_eq!(
+            token_nodes("f.x"),
+            vec![
+                Token::Ident("f".to_string()),
+                Token::Dot,
+                Token::Ident("x".to_string()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn dot_does_not_conflict_with_float() {
+        // 3.14 は Float、f.x は Ident.Ident
+        assert_eq!(token_nodes("3.14"), vec![Token::Float(3.14), Token::Eof]);
+        assert_eq!(
+            token_nodes("a.b"),
+            vec![
+                Token::Ident("a".to_string()),
+                Token::Dot,
+                Token::Ident("b".to_string()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn struct_keyword_prefix() {
+        // "structure" は Ident であり Struct + "ure" にならない
+        assert_eq!(
+            token_nodes("structure"),
+            vec![Token::Ident("structure".to_string()), Token::Eof]
+        );
+        assert_eq!(
+            token_nodes("initial"),
+            vec![Token::Ident("initial".to_string()), Token::Eof]
+        );
+        assert_eq!(
+            token_nodes("selfie"),
+            vec![Token::Ident("selfie".to_string()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn struct_definition_tokens() {
+        assert_eq!(
+            token_nodes("struct Foo { var x: Int32; }"),
+            vec![
+                Token::Struct,
+                Token::Ident("Foo".to_string()),
+                Token::LBrace,
+                Token::Var,
+                Token::Ident("x".to_string()),
+                Token::Colon,
+                Token::Ident("Int32".to_string()),
+                Token::Semicolon,
+                Token::RBrace,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn self_dot_field_tokens() {
+        assert_eq!(
+            token_nodes("self.foo = newValue;"),
+            vec![
+                Token::SelfKw,
+                Token::Dot,
+                Token::Ident("foo".to_string()),
+                Token::Eq,
+                Token::Ident("newValue".to_string()),
+                Token::Semicolon,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn init_definition_tokens() {
+        assert_eq!(
+            token_nodes("init(x: Int32) { self.x = x; }"),
+            vec![
+                Token::Init,
+                Token::LParen,
+                Token::Ident("x".to_string()),
+                Token::Colon,
+                Token::Ident("Int32".to_string()),
+                Token::RParen,
+                Token::LBrace,
+                Token::SelfKw,
+                Token::Dot,
+                Token::Ident("x".to_string()),
+                Token::Eq,
+                Token::Ident("x".to_string()),
+                Token::Semicolon,
+                Token::RBrace,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn computed_property_tokens() {
+        assert_eq!(
+            token_nodes("var bar: Int32 { get { return 0; } set { self.foo = newValue; } };"),
+            vec![
+                Token::Var,
+                Token::Ident("bar".to_string()),
+                Token::Colon,
+                Token::Ident("Int32".to_string()),
+                Token::LBrace,
+                Token::Ident("get".to_string()),
+                Token::LBrace,
+                Token::Return,
+                Token::Number(0),
+                Token::Semicolon,
+                Token::RBrace,
+                Token::Ident("set".to_string()),
+                Token::LBrace,
+                Token::SelfKw,
+                Token::Dot,
+                Token::Ident("foo".to_string()),
+                Token::Eq,
+                Token::Ident("newValue".to_string()),
+                Token::Semicolon,
+                Token::RBrace,
+                Token::RBrace,
+                Token::Semicolon,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
     fn lex_error_on_invalid_character() {
         let err = tokenize("2 @ 3").unwrap_err();
         match err {

@@ -60,6 +60,14 @@ pub enum Token {
     #[token("nobreak")]
     Nobreak,
 
+    // Struct: keywords
+    #[token("struct")]
+    Struct,
+    #[token("init")]
+    Init,
+    #[token("self")]
+    SelfKw,
+
     // Phase 2: symbols
     #[token("->")]
     Arrow,
@@ -89,6 +97,10 @@ pub enum Token {
     Lt,
     #[token(">")]
     Gt,
+
+    // Struct: symbols
+    #[token(".")]
+    Dot,
 
     // Phase 3: logical operators
     #[token("&&")]
@@ -137,6 +149,10 @@ impl fmt::Display for Token {
             Token::Continue => write!(f, "continue"),
             Token::As => write!(f, "as"),
             Token::Nobreak => write!(f, "nobreak"),
+            Token::Struct => write!(f, "struct"),
+            Token::Init => write!(f, "init"),
+            Token::SelfKw => write!(f, "self"),
+            Token::Dot => write!(f, "."),
             Token::EqEq => write!(f, "=="),
             Token::NotEq => write!(f, "!="),
             Token::Lt => write!(f, "<"),
