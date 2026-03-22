@@ -7,11 +7,22 @@ use ast::*;
 struct Parser {
     tokens: Vec<SpannedToken>,
     pos: usize,
+    next_id: u32,
 }
 
 impl Parser {
     fn new(tokens: Vec<SpannedToken>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            next_id: 0,
+        }
+    }
+
+    fn expr(&mut self, kind: ExprKind) -> Expr {
+        let id = NodeId(self.next_id);
+        self.next_id += 1;
+        Expr { id, kind }
     }
 
     fn peek(&self) -> &SpannedToken {
@@ -44,7 +55,10 @@ impl Parser {
         while self.peek().node != Token::Eof {
             functions.push(self.parse_function()?);
         }
-        Ok(Program { functions })
+        Ok(Program {
+            structs: vec![],
+            functions,
+        })
     }
 
     fn parse_function(&mut self) -> Result<Function> {
@@ -223,11 +237,11 @@ impl Parser {
             }
             self.advance();
             let right = self.parse_and()?;
-            left = Expr::BinaryOp {
+            left = self.expr(ExprKind::BinaryOp {
                 op: BinOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
-            };
+            });
         }
         Ok(left)
     }
@@ -241,11 +255,11 @@ impl Parser {
             }
             self.advance();
             let right = self.parse_equality()?;
-            left = Expr::BinaryOp {
+            left = self.expr(ExprKind::BinaryOp {
                 op: BinOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
-            };
+            });
         }
         Ok(left)
     }
@@ -261,11 +275,11 @@ impl Parser {
             };
             self.advance();
             let right = self.parse_comparison()?;
-            left = Expr::BinaryOp {
+            left = self.expr(ExprKind::BinaryOp {
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
-            };
+            });
         }
         Ok(left)
     }
@@ -283,11 +297,11 @@ impl Parser {
             };
             self.advance();
             let right = self.parse_additive()?;
-            left = Expr::BinaryOp {
+            left = self.expr(ExprKind::BinaryOp {
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
-            };
+            });
         }
         Ok(left)
     }
@@ -303,11 +317,11 @@ impl Parser {
             };
             self.advance();
             let right = self.parse_term()?;
-            left = Expr::BinaryOp {
+            left = self.expr(ExprKind::BinaryOp {
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
-            };
+            });
         }
         Ok(left)
     }
@@ -323,11 +337,11 @@ impl Parser {
             };
             self.advance();
             let right = self.parse_cast()?;
-            left = Expr::BinaryOp {
+            left = self.expr(ExprKind::BinaryOp {
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
-            };
+            });
         }
         Ok(left)
     }
@@ -338,10 +352,10 @@ impl Parser {
         while self.peek().node == Token::As {
             self.advance();
             let target_type = self.parse_type()?;
-            expr = Expr::Cast {
+            expr = self.expr(ExprKind::Cast {
                 expr: Box::new(expr),
                 target_type,
-            };
+            });
         }
         Ok(expr)
     }
@@ -351,10 +365,11 @@ impl Parser {
         if self.peek().node == Token::Bang {
             self.advance();
             let operand = self.parse_unary()?;
-            return Ok(Expr::UnaryOp {
+            let e = self.expr(ExprKind::UnaryOp {
                 op: UnaryOp::Not,
                 operand: Box::new(operand),
             });
+            return Ok(e);
         }
         self.parse_factor()
     }
@@ -365,20 +380,20 @@ impl Parser {
             Token::Number(n) => {
                 let n = *n;
                 self.advance();
-                Ok(Expr::Number(n))
+                Ok(self.expr(ExprKind::Number(n)))
             }
             Token::Float(f) => {
                 let f = *f;
                 self.advance();
-                Ok(Expr::Float(f))
+                Ok(self.expr(ExprKind::Float(f)))
             }
             Token::True => {
                 self.advance();
-                Ok(Expr::Bool(true))
+                Ok(self.expr(ExprKind::Bool(true)))
             }
             Token::False => {
                 self.advance();
-                Ok(Expr::Bool(false))
+                Ok(self.expr(ExprKind::Bool(false)))
             }
             Token::LParen => {
                 self.advance();
@@ -391,12 +406,12 @@ impl Parser {
                 if self.peek().node == Token::LParen {
                     self.parse_call(name)
                 } else {
-                    Ok(Expr::Ident(name))
+                    Ok(self.expr(ExprKind::Ident(name)))
                 }
             }
             Token::LBrace => {
                 let block = self.parse_block()?;
-                Ok(Expr::Block(block))
+                Ok(self.expr(ExprKind::Block(block)))
             }
             Token::If => self.parse_if_expr(),
             Token::While => self.parse_while_expr(),
@@ -417,11 +432,11 @@ impl Parser {
         } else {
             None
         };
-        Ok(Expr::If {
+        Ok(self.expr(ExprKind::If {
             condition: Box::new(condition),
             then_block,
             else_block,
-        })
+        }))
     }
 
     fn parse_while_expr(&mut self) -> Result<Expr> {
@@ -434,11 +449,11 @@ impl Parser {
         } else {
             None
         };
-        Ok(Expr::While {
+        Ok(self.expr(ExprKind::While {
             condition: Box::new(condition),
             body,
             nobreak,
-        })
+        }))
     }
 
     fn parse_call(&mut self, name: String) -> Result<Expr> {
@@ -452,7 +467,7 @@ impl Parser {
             }
         }
         self.expect(Token::RParen)?;
-        Ok(Expr::Call { name, args })
+        Ok(self.expr(ExprKind::Call { name, args }))
     }
 }
 
@@ -480,6 +495,7 @@ pub fn parse(tokens: Vec<SpannedToken>) -> Result<Program> {
             });
         }
         Ok(Program {
+            structs: vec![],
             functions: vec![Function {
                 name: "main".to_string(),
                 params: vec![],
@@ -502,12 +518,190 @@ mod tests {
         parse(tokens)
     }
 
-    /// Helper: extract the return expr from the implicit main (Phase 1 compat)
+    fn e(kind: ExprKind) -> Expr {
+        Expr {
+            id: NodeId(0),
+            kind,
+        }
+    }
+
+    fn normalize_expr(expr: &Expr) -> Expr {
+        let kind = match &expr.kind {
+            ExprKind::Number(n) => ExprKind::Number(*n),
+            ExprKind::Float(f) => ExprKind::Float(*f),
+            ExprKind::Bool(b) => ExprKind::Bool(*b),
+            ExprKind::Ident(s) => ExprKind::Ident(s.clone()),
+            ExprKind::BinaryOp { op, left, right } => ExprKind::BinaryOp {
+                op: *op,
+                left: Box::new(normalize_expr(left)),
+                right: Box::new(normalize_expr(right)),
+            },
+            ExprKind::UnaryOp { op, operand } => ExprKind::UnaryOp {
+                op: *op,
+                operand: Box::new(normalize_expr(operand)),
+            },
+            ExprKind::Call { name, args } => ExprKind::Call {
+                name: name.clone(),
+                args: args.iter().map(normalize_expr).collect(),
+            },
+            ExprKind::Block(block) => ExprKind::Block(normalize_block(block)),
+            ExprKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => ExprKind::If {
+                condition: Box::new(normalize_expr(condition)),
+                then_block: normalize_block(then_block),
+                else_block: else_block.as_ref().map(|b| normalize_block(b)),
+            },
+            ExprKind::While {
+                condition,
+                body,
+                nobreak,
+            } => ExprKind::While {
+                condition: Box::new(normalize_expr(condition)),
+                body: normalize_block(body),
+                nobreak: nobreak.as_ref().map(|b| normalize_block(b)),
+            },
+            ExprKind::Cast { expr, target_type } => ExprKind::Cast {
+                expr: Box::new(normalize_expr(expr)),
+                target_type: target_type.clone(),
+            },
+            ExprKind::StructInit { name, args } => ExprKind::StructInit {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|(l, e)| (l.clone(), normalize_expr(e)))
+                    .collect(),
+            },
+            ExprKind::FieldAccess { object, field } => ExprKind::FieldAccess {
+                object: Box::new(normalize_expr(object)),
+                field: field.clone(),
+            },
+            ExprKind::SelfRef => ExprKind::SelfRef,
+        };
+        Expr {
+            id: NodeId(0),
+            kind,
+        }
+    }
+
+    fn normalize_stmt(stmt: &Stmt) -> Stmt {
+        match stmt {
+            Stmt::Let { name, ty, value } => Stmt::Let {
+                name: name.clone(),
+                ty: ty.clone(),
+                value: normalize_expr(value),
+            },
+            Stmt::Var { name, ty, value } => Stmt::Var {
+                name: name.clone(),
+                ty: ty.clone(),
+                value: normalize_expr(value),
+            },
+            Stmt::Assign { name, value } => Stmt::Assign {
+                name: name.clone(),
+                value: normalize_expr(value),
+            },
+            Stmt::Return(opt) => Stmt::Return(opt.as_ref().map(normalize_expr)),
+            Stmt::Yield(expr) => Stmt::Yield(normalize_expr(expr)),
+            Stmt::Break(opt) => Stmt::Break(opt.as_ref().map(normalize_expr)),
+            Stmt::Continue => Stmt::Continue,
+            Stmt::Expr(expr) => Stmt::Expr(normalize_expr(expr)),
+            Stmt::FieldAssign {
+                object,
+                field,
+                value,
+            } => Stmt::FieldAssign {
+                object: Box::new(normalize_expr(object)),
+                field: field.clone(),
+                value: normalize_expr(value),
+            },
+        }
+    }
+
+    fn normalize_block(block: &Block) -> Block {
+        Block {
+            stmts: block.stmts.iter().map(normalize_stmt).collect(),
+        }
+    }
+
     fn parse_expr_str(input: &str) -> Expr {
         let program = parse_str(input).unwrap();
-        match program.functions[0].body.stmts.last().unwrap() {
+        let expr = match program.functions[0].body.stmts.last().unwrap() {
             Stmt::Return(Some(expr)) => expr.clone(),
             _ => panic!("expected Return statement"),
+        };
+        normalize_expr(&expr)
+    }
+
+    fn collect_expr_ids(expr: &Expr, ids: &mut Vec<NodeId>) {
+        ids.push(expr.id);
+        match &expr.kind {
+            ExprKind::BinaryOp { left, right, .. } => {
+                collect_expr_ids(left, ids);
+                collect_expr_ids(right, ids);
+            }
+            ExprKind::UnaryOp { operand, .. } => {
+                collect_expr_ids(operand, ids);
+            }
+            ExprKind::Call { args, .. } => {
+                for arg in args {
+                    collect_expr_ids(arg, ids);
+                }
+            }
+            ExprKind::Cast { expr, .. } => {
+                collect_expr_ids(expr, ids);
+            }
+            ExprKind::Block(block) => collect_block_expr_ids(block, ids),
+            ExprKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                collect_expr_ids(condition, ids);
+                collect_block_expr_ids(then_block, ids);
+                if let Some(b) = else_block {
+                    collect_block_expr_ids(b, ids);
+                }
+            }
+            ExprKind::While {
+                condition,
+                body,
+                nobreak,
+            } => {
+                collect_expr_ids(condition, ids);
+                collect_block_expr_ids(body, ids);
+                if let Some(b) = nobreak {
+                    collect_block_expr_ids(b, ids);
+                }
+            }
+            ExprKind::StructInit { args, .. } => {
+                for (_, arg) in args {
+                    collect_expr_ids(arg, ids);
+                }
+            }
+            ExprKind::FieldAccess { object, .. } => {
+                collect_expr_ids(object, ids);
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_block_expr_ids(block: &Block, ids: &mut Vec<NodeId>) {
+        for stmt in &block.stmts {
+            match stmt {
+                Stmt::Let { value, .. } | Stmt::Var { value, .. } | Stmt::Assign { value, .. } => {
+                    collect_expr_ids(value, ids);
+                }
+                Stmt::Return(Some(e)) | Stmt::Yield(e) | Stmt::Break(Some(e)) | Stmt::Expr(e) => {
+                    collect_expr_ids(e, ids);
+                }
+                Stmt::FieldAssign { object, value, .. } => {
+                    collect_expr_ids(object, ids);
+                    collect_expr_ids(value, ids);
+                }
+                _ => {}
+            }
         }
     }
 
@@ -518,15 +712,15 @@ mod tests {
         let expr = parse_expr_str("2 + 3 * 4");
         assert_eq!(
             expr,
-            Expr::BinaryOp {
+            e(ExprKind::BinaryOp {
                 op: BinOp::Add,
-                left: Box::new(Expr::Number(2)),
-                right: Box::new(Expr::BinaryOp {
+                left: Box::new(e(ExprKind::Number(2))),
+                right: Box::new(e(ExprKind::BinaryOp {
                     op: BinOp::Mul,
-                    left: Box::new(Expr::Number(3)),
-                    right: Box::new(Expr::Number(4)),
-                }),
-            }
+                    left: Box::new(e(ExprKind::Number(3))),
+                    right: Box::new(e(ExprKind::Number(4))),
+                })),
+            })
         );
     }
 
@@ -535,21 +729,21 @@ mod tests {
         let expr = parse_expr_str("(2 + 3) * 4");
         assert_eq!(
             expr,
-            Expr::BinaryOp {
+            e(ExprKind::BinaryOp {
                 op: BinOp::Mul,
-                left: Box::new(Expr::BinaryOp {
+                left: Box::new(e(ExprKind::BinaryOp {
                     op: BinOp::Add,
-                    left: Box::new(Expr::Number(2)),
-                    right: Box::new(Expr::Number(3)),
-                }),
-                right: Box::new(Expr::Number(4)),
-            }
+                    left: Box::new(e(ExprKind::Number(2))),
+                    right: Box::new(e(ExprKind::Number(3))),
+                })),
+                right: Box::new(e(ExprKind::Number(4))),
+            })
         );
     }
 
     #[test]
     fn single_number() {
-        assert_eq!(parse_expr_str("10"), Expr::Number(10));
+        assert_eq!(parse_expr_str("10"), e(ExprKind::Number(10)));
     }
 
     #[test]
@@ -586,7 +780,10 @@ mod tests {
         assert_eq!(f.name, "main");
         assert_eq!(f.params, vec![]);
         assert_eq!(f.return_type, TypeAnnotation::I32);
-        assert_eq!(f.body.stmts, vec![Stmt::Return(Some(Expr::Number(42)))]);
+        assert_eq!(
+            normalize_stmt(&f.body.stmts[0]),
+            Stmt::Return(Some(e(ExprKind::Number(42))))
+        );
     }
 
     #[test]
@@ -595,14 +792,17 @@ mod tests {
         let stmts = &program.functions[0].body.stmts;
         assert_eq!(stmts.len(), 2);
         assert_eq!(
-            stmts[0],
+            normalize_stmt(&stmts[0]),
             Stmt::Let {
                 name: "x".to_string(),
                 ty: Some(TypeAnnotation::I32),
-                value: Expr::Number(10),
+                value: e(ExprKind::Number(10)),
             }
         );
-        assert_eq!(stmts[1], Stmt::Return(Some(Expr::Ident("x".to_string()))));
+        assert_eq!(
+            normalize_stmt(&stmts[1]),
+            Stmt::Return(Some(e(ExprKind::Ident("x".to_string()))))
+        );
     }
 
     #[test]
@@ -624,12 +824,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            f.body.stmts[0],
-            Stmt::Return(Some(Expr::BinaryOp {
+            normalize_stmt(&f.body.stmts[0]),
+            Stmt::Return(Some(e(ExprKind::BinaryOp {
                 op: BinOp::Add,
-                left: Box::new(Expr::Ident("a".to_string())),
-                right: Box::new(Expr::Ident("b".to_string())),
-            }))
+                left: Box::new(e(ExprKind::Ident("a".to_string()))),
+                right: Box::new(e(ExprKind::Ident("b".to_string()))),
+            })))
         );
     }
 
@@ -640,16 +840,19 @@ mod tests {
         let stmts = &program.functions[0].body.stmts;
         assert_eq!(stmts.len(), 2);
         assert_eq!(
-            stmts[0],
+            normalize_stmt(&stmts[0]),
             Stmt::Let {
                 name: "x".to_string(),
                 ty: Some(TypeAnnotation::I32),
-                value: Expr::Block(Block {
-                    stmts: vec![Stmt::Yield(Expr::Number(10))],
-                }),
+                value: e(ExprKind::Block(Block {
+                    stmts: vec![Stmt::Yield(e(ExprKind::Number(10)))],
+                })),
             }
         );
-        assert_eq!(stmts[1], Stmt::Return(Some(Expr::Ident("x".to_string()))));
+        assert_eq!(
+            normalize_stmt(&stmts[1]),
+            Stmt::Return(Some(e(ExprKind::Ident("x".to_string()))))
+        );
     }
 
     #[test]
@@ -663,7 +866,10 @@ mod tests {
         assert_eq!(f.body.stmts.len(), 1);
         assert!(matches!(
             &f.body.stmts[0],
-            Stmt::Return(Some(Expr::BinaryOp { .. }))
+            Stmt::Return(Some(Expr {
+                kind: ExprKind::BinaryOp { .. },
+                ..
+            }))
         ));
     }
 
@@ -686,8 +892,11 @@ mod tests {
         assert_eq!(stmts.len(), 2);
         assert!(matches!(
             &stmts[0],
-            Stmt::Expr(Expr::If {
-                else_block: Some(_),
+            Stmt::Expr(Expr {
+                kind: ExprKind::If {
+                    else_block: Some(_),
+                    ..
+                },
                 ..
             })
         ));
@@ -698,7 +907,13 @@ mod tests {
         let program = parse_str("func main() -> Int32 { while false { }; return 0; }").unwrap();
         let stmts = &program.functions[0].body.stmts;
         assert_eq!(stmts.len(), 2);
-        assert!(matches!(&stmts[0], Stmt::Expr(Expr::While { .. })));
+        assert!(matches!(
+            &stmts[0],
+            Stmt::Expr(Expr {
+                kind: ExprKind::While { .. },
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -706,11 +921,11 @@ mod tests {
         let expr = parse_expr_str("1 < 2");
         assert_eq!(
             expr,
-            Expr::BinaryOp {
+            e(ExprKind::BinaryOp {
                 op: BinOp::Lt,
-                left: Box::new(Expr::Number(1)),
-                right: Box::new(Expr::Number(2)),
-            }
+                left: Box::new(e(ExprKind::Number(1))),
+                right: Box::new(e(ExprKind::Number(2))),
+            })
         );
     }
 
@@ -720,27 +935,26 @@ mod tests {
         let f = &program.functions[0];
         assert_eq!(f.name, "foo");
         assert_eq!(f.return_type, TypeAnnotation::Unit);
-        assert_eq!(f.body.stmts, vec![Stmt::Return(None)]);
+        assert_eq!(normalize_stmt(&f.body.stmts[0]), Stmt::Return(None));
     }
 
     #[test]
     fn parse_logical_precedence() {
-        // true && false || !true → Or(And(true, false), Not(true))
         let expr = parse_expr_str("true && false || !true");
         assert_eq!(
             expr,
-            Expr::BinaryOp {
+            e(ExprKind::BinaryOp {
                 op: BinOp::Or,
-                left: Box::new(Expr::BinaryOp {
+                left: Box::new(e(ExprKind::BinaryOp {
                     op: BinOp::And,
-                    left: Box::new(Expr::Bool(true)),
-                    right: Box::new(Expr::Bool(false)),
-                }),
-                right: Box::new(Expr::UnaryOp {
+                    left: Box::new(e(ExprKind::Bool(true))),
+                    right: Box::new(e(ExprKind::Bool(false))),
+                })),
+                right: Box::new(e(ExprKind::UnaryOp {
                     op: UnaryOp::Not,
-                    operand: Box::new(Expr::Bool(true)),
-                }),
-            }
+                    operand: Box::new(e(ExprKind::Bool(true))),
+                })),
+            })
         );
     }
 
@@ -751,11 +965,11 @@ mod tests {
         let program = parse_str("func main() -> Int32 { let x = 42; return x; }").unwrap();
         let stmts = &program.functions[0].body.stmts;
         assert_eq!(
-            stmts[0],
+            normalize_stmt(&stmts[0]),
             Stmt::Let {
                 name: "x".to_string(),
                 ty: None,
-                value: Expr::Number(42),
+                value: e(ExprKind::Number(42)),
             }
         );
     }
@@ -765,11 +979,11 @@ mod tests {
         let program = parse_str("func main() -> Int32 { let x: Int64 = 42; return 0; }").unwrap();
         let stmts = &program.functions[0].body.stmts;
         assert_eq!(
-            stmts[0],
+            normalize_stmt(&stmts[0]),
             Stmt::Let {
                 name: "x".to_string(),
                 ty: Some(TypeAnnotation::I64),
-                value: Expr::Number(42),
+                value: e(ExprKind::Number(42)),
             }
         );
     }
@@ -779,10 +993,10 @@ mod tests {
         let expr = parse_expr_str("42 as Int64");
         assert_eq!(
             expr,
-            Expr::Cast {
-                expr: Box::new(Expr::Number(42)),
+            e(ExprKind::Cast {
+                expr: Box::new(e(ExprKind::Number(42))),
                 target_type: TypeAnnotation::I64,
-            }
+            })
         );
     }
 
@@ -791,7 +1005,11 @@ mod tests {
         let program =
             parse_str("func main() -> Int32 { while true { break; }; return 0; }").unwrap();
         let stmts = &program.functions[0].body.stmts;
-        if let Stmt::Expr(Expr::While { body, .. }) = &stmts[0] {
+        if let Stmt::Expr(Expr {
+            kind: ExprKind::While { body, .. },
+            ..
+        }) = &stmts[0]
+        {
             assert_eq!(body.stmts[0], Stmt::Break(None));
         } else {
             panic!("expected while");
@@ -803,8 +1021,15 @@ mod tests {
         let program =
             parse_str("func main() -> Int32 { while true { break 10; }; return 0; }").unwrap();
         let stmts = &program.functions[0].body.stmts;
-        if let Stmt::Expr(Expr::While { body, .. }) = &stmts[0] {
-            assert_eq!(body.stmts[0], Stmt::Break(Some(Expr::Number(10))));
+        if let Stmt::Expr(Expr {
+            kind: ExprKind::While { body, .. },
+            ..
+        }) = &stmts[0]
+        {
+            assert_eq!(
+                normalize_stmt(&body.stmts[0]),
+                Stmt::Break(Some(e(ExprKind::Number(10))))
+            );
         } else {
             panic!("expected while");
         }
@@ -815,7 +1040,11 @@ mod tests {
         let program =
             parse_str("func main() -> Int32 { while true { continue; }; return 0; }").unwrap();
         let stmts = &program.functions[0].body.stmts;
-        if let Stmt::Expr(Expr::While { body, .. }) = &stmts[0] {
+        if let Stmt::Expr(Expr {
+            kind: ExprKind::While { body, .. },
+            ..
+        }) = &stmts[0]
+        {
             assert_eq!(body.stmts[0], Stmt::Continue);
         } else {
             panic!("expected while");
@@ -825,23 +1054,22 @@ mod tests {
     #[test]
     fn parse_float_literal() {
         let expr = parse_expr_str("3.14");
-        assert_eq!(expr, Expr::Float(3.14));
+        assert_eq!(expr, e(ExprKind::Float(3.14)));
     }
 
     #[test]
     fn parse_cast_precedence() {
-        // 1 + 2 as Int64 → Add(1, Cast(2, I64))
         let expr = parse_expr_str("1 + 2 as Int64");
         assert_eq!(
             expr,
-            Expr::BinaryOp {
+            e(ExprKind::BinaryOp {
                 op: BinOp::Add,
-                left: Box::new(Expr::Number(1)),
-                right: Box::new(Expr::Cast {
-                    expr: Box::new(Expr::Number(2)),
+                left: Box::new(e(ExprKind::Number(1))),
+                right: Box::new(e(ExprKind::Cast {
+                    expr: Box::new(e(ExprKind::Number(2))),
                     target_type: TypeAnnotation::I64,
-                }),
-            }
+                })),
+            })
         );
     }
 
@@ -852,12 +1080,49 @@ mod tests {
         )
         .unwrap();
         let stmts = &program.functions[0].body.stmts;
-        if let Stmt::Expr(Expr::While { nobreak, .. }) = &stmts[0] {
+        if let Stmt::Expr(Expr {
+            kind: ExprKind::While { nobreak, .. },
+            ..
+        }) = &stmts[0]
+        {
             assert!(nobreak.is_some());
             let nb = nobreak.as_ref().unwrap();
-            assert_eq!(nb.stmts[0], Stmt::Yield(Expr::Number(2)));
+            assert_eq!(
+                normalize_stmt(&nb.stmts[0]),
+                Stmt::Yield(e(ExprKind::Number(2)))
+            );
         } else {
             panic!("expected while");
+        }
+    }
+
+    // --- NodeId allocation tests ---
+
+    #[test]
+    fn node_ids_are_unique() {
+        let program = parse_str("func main() -> Int32 { return 1 + 2 * 3; }").unwrap();
+        if let Stmt::Return(Some(expr)) = &program.functions[0].body.stmts[0] {
+            let mut ids = Vec::new();
+            collect_expr_ids(expr, &mut ids);
+            assert_eq!(ids.len(), 5);
+            let unique: std::collections::HashSet<_> = ids.iter().collect();
+            assert_eq!(unique.len(), ids.len(), "all NodeIds must be unique");
+        } else {
+            panic!("expected return");
+        }
+    }
+
+    #[test]
+    fn node_ids_are_sequential() {
+        let program = parse_str("func main() -> Int32 { return a + b; }").unwrap();
+        if let Stmt::Return(Some(expr)) = &program.functions[0].body.stmts[0] {
+            let mut ids = Vec::new();
+            collect_expr_ids(expr, &mut ids);
+            let mut sorted: Vec<u32> = ids.iter().map(|id| id.0).collect();
+            sorted.sort();
+            assert_eq!(sorted, vec![0, 1, 2]);
+        } else {
+            panic!("expected return");
         }
     }
 }

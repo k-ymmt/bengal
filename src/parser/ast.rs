@@ -1,6 +1,34 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeId(pub u32);
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
+    pub structs: Vec<StructDef>,
     pub functions: Vec<Function>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructDef {
+    pub name: String,
+    pub members: Vec<StructMember>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum StructMember {
+    StoredProperty {
+        name: String,
+        ty: TypeAnnotation,
+    },
+    ComputedProperty {
+        name: String,
+        ty: TypeAnnotation,
+        getter: Block,
+        setter: Option<Block>,
+    },
+    Initializer {
+        params: Vec<Param>,
+        body: Block,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -17,7 +45,7 @@ pub struct Param {
     pub ty: TypeAnnotation,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeAnnotation {
     I32,
     I64,
@@ -25,6 +53,7 @@ pub enum TypeAnnotation {
     F64,
     Bool,
     Unit,
+    Named(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +82,11 @@ pub enum Stmt {
     Break(Option<Expr>),
     Continue,
     Expr(Expr),
+    FieldAssign {
+        object: Box<Expr>,
+        field: String,
+        value: Expr,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +111,7 @@ pub enum UnaryOp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Expr {
+pub enum ExprKind {
     Number(i64),
     Float(f64),
     Ident(String),
@@ -110,4 +144,20 @@ pub enum Expr {
         expr: Box<Expr>,
         target_type: TypeAnnotation,
     },
+    // Struct: expressions
+    StructInit {
+        name: String,
+        args: Vec<(String, Expr)>,
+    },
+    FieldAccess {
+        object: Box<Expr>,
+        field: String,
+    },
+    SelfRef,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Expr {
+    pub id: NodeId,
+    pub kind: ExprKind,
 }

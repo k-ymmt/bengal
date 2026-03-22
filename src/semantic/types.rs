@@ -45,5 +45,8 @@ pub fn resolve_type(annotation: &TypeAnnotation) -> Type {
         TypeAnnotation::F64 => Type::F64,
         TypeAnnotation::Bool => Type::Bool,
         TypeAnnotation::Unit => Type::Unit,
+        TypeAnnotation::Named(name) => {
+            panic!("Named type `{}` not yet supported in resolve_type", name)
+        }
     }
 }

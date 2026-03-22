@@ -309,14 +309,17 @@ impl Lowering {
                 self.start_block(dummy_bb, vec![]);
                 StmtResult::Continue
             }
+            Stmt::FieldAssign { .. } => {
+                todo!("FieldAssign lowering not yet implemented")
+            }
         }
     }
 
     // ========== Expr ==========
 
     fn lower_expr(&mut self, expr: &Expr) -> Value {
-        match expr {
-            Expr::Number(n) => {
+        match &expr.kind {
+            ExprKind::Number(n) => {
                 let result = self.fresh_value();
                 self.emit(Instruction::Literal {
                     result,
@@ -326,7 +329,7 @@ impl Lowering {
                 self.value_types.insert(result, BirType::I32);
                 result
             }
-            Expr::Float(f) => {
+            ExprKind::Float(f) => {
                 let result = self.fresh_value();
                 self.emit(Instruction::Literal {
                     result,
@@ -336,7 +339,7 @@ impl Lowering {
                 self.value_types.insert(result, BirType::F64);
                 result
             }
-            Expr::Bool(b) => {
+            ExprKind::Bool(b) => {
                 let result = self.fresh_value();
                 self.emit(Instruction::Literal {
                     result,
@@ -346,8 +349,8 @@ impl Lowering {
                 self.value_types.insert(result, BirType::Bool);
                 result
             }
-            Expr::Ident(name) => self.lookup_var(name),
-            Expr::UnaryOp { op, operand } => {
+            ExprKind::Ident(name) => self.lookup_var(name),
+            ExprKind::UnaryOp { op, operand } => {
                 let operand_val = self.lower_expr(operand);
                 match op {
                     UnaryOp::Not => {
@@ -361,7 +364,7 @@ impl Lowering {
                     }
                 }
             }
-            Expr::BinaryOp { op, left, right } => match op {
+            ExprKind::BinaryOp { op, left, right } => match op {
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
                     let lhs = self.lower_expr(left);
                     let rhs = self.lower_expr(right);
@@ -403,7 +406,7 @@ impl Lowering {
                     result
                 }
             },
-            Expr::Call { name, args } => {
+            ExprKind::Call { name, args } => {
                 let arg_vals: Vec<Value> = args.iter().map(|a| self.lower_expr(a)).collect();
                 let ty = self.func_sigs.get(name).copied().unwrap_or(BirType::I32);
                 let result = self.fresh_value();
@@ -416,7 +419,7 @@ impl Lowering {
                 self.value_types.insert(result, ty);
                 result
             }
-            Expr::Block(block) => {
+            ExprKind::Block(block) => {
                 self.push_scope();
                 let (result, mut inner_regions) = self.lower_block_stmts(block);
                 self.pop_scope();
@@ -428,17 +431,17 @@ impl Lowering {
                     ),
                 }
             }
-            Expr::If {
+            ExprKind::If {
                 condition,
                 then_block,
                 else_block,
             } => self.lower_if(condition, then_block, else_block.as_ref()),
-            Expr::While {
+            ExprKind::While {
                 condition,
                 body,
                 nobreak,
             } => self.lower_while(condition, body, nobreak.as_ref()),
-            Expr::Cast { expr, target_type } => {
+            ExprKind::Cast { expr, target_type } => {
                 let operand = self.lower_expr(expr);
                 let from_ty = self
                     .value_types
@@ -455,6 +458,15 @@ impl Lowering {
                 });
                 self.value_types.insert(result, to_ty);
                 result
+            }
+            ExprKind::StructInit { .. } => {
+                todo!("StructInit lowering not yet implemented")
+            }
+            ExprKind::FieldAccess { .. } => {
+                todo!("FieldAccess lowering not yet implemented")
+            }
+            ExprKind::SelfRef => {
+                todo!("SelfRef lowering not yet implemented")
             }
         }
     }
@@ -1009,6 +1021,9 @@ fn convert_type(ty: &TypeAnnotation) -> BirType {
         TypeAnnotation::F64 => BirType::F64,
         TypeAnnotation::Bool => BirType::Bool,
         TypeAnnotation::Unit => BirType::Unit,
+        TypeAnnotation::Named(name) => {
+            panic!("Named type `{}` not yet supported in convert_type", name)
+        }
     }
 }
 

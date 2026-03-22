@@ -319,13 +319,16 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
                 return Err(sem_err("continue outside of loop"));
             }
         }
+        Stmt::FieldAssign { .. } => {
+            todo!("FieldAssign analysis not yet implemented")
+        }
     }
     Ok(())
 }
 
 fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
-    match expr {
-        Expr::Number(n) => {
+    match &expr.kind {
+        ExprKind::Number(n) => {
             if *n < i32::MIN as i64 || *n > i32::MAX as i64 {
                 return Err(sem_err(format!(
                     "integer literal `{}` is out of range for `Int32`",
@@ -334,12 +337,12 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             }
             Ok(Type::I32)
         }
-        Expr::Bool(_) => Ok(Type::Bool),
-        Expr::Ident(name) => match resolver.lookup_var(name) {
+        ExprKind::Bool(_) => Ok(Type::Bool),
+        ExprKind::Ident(name) => match resolver.lookup_var(name) {
             Some(info) => Ok(info.ty.clone()),
             None => Err(sem_err(format!("undefined variable `{}`", name))),
         },
-        Expr::UnaryOp { op, operand } => {
+        ExprKind::UnaryOp { op, operand } => {
             let operand_ty = analyze_expr(operand, resolver)?;
             match op {
                 UnaryOp::Not => {
@@ -350,7 +353,7 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                 }
             }
         }
-        Expr::BinaryOp { op, left, right } => {
+        ExprKind::BinaryOp { op, left, right } => {
             let left_ty = analyze_expr(left, resolver)?;
             let right_ty = analyze_expr(right, resolver)?;
             match op {
@@ -381,7 +384,7 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                 }
             }
         }
-        Expr::Call { name, args } => {
+        ExprKind::Call { name, args } => {
             let sig = resolver
                 .lookup_func(name)
                 .ok_or_else(|| sem_err(format!("undefined function `{}`", name)))?
@@ -405,8 +408,8 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             }
             Ok(sig.return_type.clone())
         }
-        Expr::Block(block) => analyze_block_expr(block, resolver),
-        Expr::If {
+        ExprKind::Block(block) => analyze_block_expr(block, resolver),
+        ExprKind::If {
             condition,
             then_block,
             else_block,
@@ -450,7 +453,7 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                 }
             }
         }
-        Expr::While {
+        ExprKind::While {
             condition,
             body,
             nobreak,
@@ -459,7 +462,7 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             if cond_ty != Type::Bool {
                 return Err(sem_err("while condition must be `Bool`"));
             }
-            let is_while_true = **condition == Expr::Bool(true);
+            let is_while_true = condition.kind == ExprKind::Bool(true);
 
             resolver.enter_loop();
             analyze_loop_block(body, resolver)?;
@@ -493,8 +496,17 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
 
             Ok(while_ty)
         }
-        Expr::Float(_) => Ok(Type::F64),
-        Expr::Cast { expr, target_type } => {
+        ExprKind::Float(_) => Ok(Type::F64),
+        ExprKind::StructInit { .. } => {
+            todo!("StructInit analysis not yet implemented")
+        }
+        ExprKind::FieldAccess { .. } => {
+            todo!("FieldAccess analysis not yet implemented")
+        }
+        ExprKind::SelfRef => {
+            todo!("SelfRef analysis not yet implemented")
+        }
+        ExprKind::Cast { expr, target_type } => {
             let source_ty = analyze_expr(expr, resolver)?;
             let target_ty = resolve_type(target_type);
             if !source_ty.is_numeric() || !target_ty.is_numeric() {
