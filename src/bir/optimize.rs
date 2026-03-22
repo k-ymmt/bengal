@@ -198,33 +198,33 @@ mod tests {
 
     #[test]
     fn fold_add() {
-        let text = bir_text("func main() -> i32 { return 2 + 3; }");
+        let text = bir_text("func main() -> Int32 { return 2 + 3; }");
         // 2 + 3 should be folded to literal 5
-        assert!(text.contains("literal 5 : i32"), "BIR:\n{}", text);
+        assert!(text.contains("literal 5 : Int32"), "BIR:\n{}", text);
         assert!(!text.contains("binary_op add"), "BIR:\n{}", text);
     }
 
     #[test]
     fn fold_chain() {
-        let text = bir_text("func main() -> i32 { return 2 + 3 * 4; }");
+        let text = bir_text("func main() -> Int32 { return 2 + 3 * 4; }");
         // 3 * 4 = 12, then 2 + 12 = 14
-        assert!(text.contains("literal 14 : i32"), "BIR:\n{}", text);
+        assert!(text.contains("literal 14 : Int32"), "BIR:\n{}", text);
     }
 
     #[test]
     fn fold_compare() {
         let text = bir_text(
-            "func main() -> i32 { let x: i32 = if 1 < 2 { yield 10; } else { yield 20; }; return x; }",
+            "func main() -> Int32 { let x: Int32 = if 1 < 2 { yield 10; } else { yield 20; }; return x; }",
         );
-        // 1 < 2 should be folded to literal 1 : bool
-        assert!(text.contains("literal 1 : bool"), "BIR:\n{}", text);
+        // 1 < 2 should be folded to literal 1 : Bool
+        assert!(text.contains("literal 1 : Bool"), "BIR:\n{}", text);
         assert!(!text.contains("compare lt"), "BIR:\n{}", text);
     }
 
     #[test]
     fn no_fold_param() {
         let text = bir_text(
-            "func add1(x: i32) -> i32 { return x + 1; } func main() -> i32 { return add1(5); }",
+            "func add1(x: Int32) -> Int32 { return x + 1; } func main() -> Int32 { return add1(5); }",
         );
         // x + 1 should NOT be folded (x is a parameter, not a constant)
         assert!(text.contains("binary_op add"), "BIR:\n{}", text);

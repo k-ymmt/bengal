@@ -1036,11 +1036,11 @@ mod tests {
 
     #[test]
     fn lower_simple_return() {
-        let output = lower_str("func main() -> i32 { return 42; }");
+        let output = lower_str("func main() -> Int32 { return 42; }");
         let expected = "\
-bir @main() -> i32 {
+bir @main() -> Int32 {
 bb0:
-    %0 = literal 42 : i32
+    %0 = literal 42 : Int32
     return %0
 }
 ";
@@ -1049,11 +1049,11 @@ bb0:
 
     #[test]
     fn lower_let_return() {
-        let output = lower_str("func main() -> i32 { let x: i32 = 10; return x; }");
+        let output = lower_str("func main() -> Int32 { let x: Int32 = 10; return x; }");
         let expected = "\
-bir @main() -> i32 {
+bir @main() -> Int32 {
 bb0:
-    %0 = literal 10 : i32
+    %0 = literal 10 : Int32
     return %0
 }
 ";
@@ -1063,19 +1063,19 @@ bb0:
     #[test]
     fn lower_call() {
         let output = lower_str(
-            "func add(a: i32, b: i32) -> i32 { return a + b; } func main() -> i32 { return add(3, 4); }",
+            "func add(a: Int32, b: Int32) -> Int32 { return a + b; } func main() -> Int32 { return add(3, 4); }",
         );
         let expected = "\
-bir @add(%0: i32, %1: i32) -> i32 {
+bir @add(%0: Int32, %1: Int32) -> Int32 {
 bb0:
-    %2 = binary_op add %0, %1 : i32
+    %2 = binary_op add %0, %1 : Int32
     return %2
 }
-bir @main() -> i32 {
+bir @main() -> Int32 {
 bb0:
-    %0 = literal 3 : i32
-    %1 = literal 4 : i32
-    %2 = call @add(%0, %1) : i32
+    %0 = literal 3 : Int32
+    %1 = literal 4 : Int32
+    %2 = call @add(%0, %1) : Int32
     return %2
 }
 ";
@@ -1085,16 +1085,16 @@ bb0:
     #[test]
     fn lower_block_scope() {
         let output = lower_str(
-            "func main() -> i32 { let x: i32 = 1; let y: i32 = { let x: i32 = 10; yield x + 1; }; return x + y; }",
+            "func main() -> Int32 { let x: Int32 = 1; let y: Int32 = { let x: Int32 = 10; yield x + 1; }; return x + y; }",
         );
         let expected = "\
-bir @main() -> i32 {
+bir @main() -> Int32 {
 bb0:
-    %0 = literal 1 : i32
-    %1 = literal 10 : i32
-    %2 = literal 1 : i32
-    %3 = binary_op add %1, %2 : i32
-    %4 = binary_op add %0, %3 : i32
+    %0 = literal 1 : Int32
+    %1 = literal 10 : Int32
+    %2 = literal 1 : Int32
+    %3 = binary_op add %1, %2 : Int32
+    %4 = binary_op add %0, %3 : Int32
     return %4
 }
 ";
@@ -1106,7 +1106,7 @@ bb0:
     #[test]
     fn lower_if_else() {
         let output = lower_str(
-            "func main() -> i32 { let x: i32 = if true { yield 1; } else { yield 2; }; return x; }",
+            "func main() -> Int32 { let x: Int32 = if true { yield 1; } else { yield 2; }; return x; }",
         );
         // Should have 4 blocks with cond_br
         assert!(output.contains("cond_br"));
@@ -1118,7 +1118,7 @@ bb0:
     #[test]
     fn lower_while() {
         let output = lower_str(
-            "func main() -> i32 { var i: i32 = 0; while i < 3 { i = i + 1; }; return i; }",
+            "func main() -> Int32 { var i: Int32 = 0; while i < 3 { i = i + 1; }; return i; }",
         );
         // Should have blocks for entry, header, body, exit
         assert!(output.contains("cond_br"));
@@ -1128,10 +1128,10 @@ bb0:
     #[test]
     fn lower_short_circuit_and() {
         let output = lower_str(
-            "func main() -> i32 { let b: bool = true && false; if b { yield 1; } else { yield 0; }; return 0; }",
+            "func main() -> Int32 { let b: Bool = true && false; if b { yield 1; } else { yield 0; }; return 0; }",
         );
         // Should have cond_br for && short-circuit
         assert!(output.contains("cond_br"));
-        assert!(output.contains("literal 0 : bool"));
+        assert!(output.contains("literal 0 : Bool"));
     }
 }

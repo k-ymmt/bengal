@@ -88,14 +88,14 @@ mod tests {
     #[test]
     fn func_declaration_tokens() {
         assert_eq!(
-            token_nodes("func main() -> i32 { return 42; }"),
+            token_nodes("func main() -> Int32 { return 42; }"),
             vec![
                 Token::Func,
                 Token::Ident("main".to_string()),
                 Token::LParen,
                 Token::RParen,
                 Token::Arrow,
-                Token::Ident("i32".to_string()),
+                Token::Ident("Int32".to_string()),
                 Token::LBrace,
                 Token::Return,
                 Token::Number(42),
@@ -109,12 +109,12 @@ mod tests {
     #[test]
     fn let_binding_tokens() {
         assert_eq!(
-            token_nodes("let x: i32 = 10;"),
+            token_nodes("let x: Int32 = 10;"),
             vec![
                 Token::Let,
                 Token::Ident("x".to_string()),
                 Token::Colon,
-                Token::Ident("i32".to_string()),
+                Token::Ident("Int32".to_string()),
                 Token::Eq,
                 Token::Number(10),
                 Token::Semicolon,
@@ -259,11 +259,11 @@ mod tests {
     #[test]
     fn as_keyword() {
         assert_eq!(
-            token_nodes("42 as i64"),
+            token_nodes("42 as Int64"),
             vec![
                 Token::Number(42),
                 Token::As,
-                Token::Ident("i64".to_string()),
+                Token::Ident("Int64".to_string()),
                 Token::Eof,
             ]
         );

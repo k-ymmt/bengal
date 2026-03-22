@@ -103,11 +103,12 @@ impl Parser {
         }
         let tok = self.expect(Token::Ident(String::new()))?;
         match &tok.node {
-            Token::Ident(s) if s == "i32" => Ok(TypeAnnotation::I32),
-            Token::Ident(s) if s == "i64" => Ok(TypeAnnotation::I64),
-            Token::Ident(s) if s == "f32" => Ok(TypeAnnotation::F32),
-            Token::Ident(s) if s == "f64" => Ok(TypeAnnotation::F64),
-            Token::Ident(s) if s == "bool" => Ok(TypeAnnotation::Bool),
+            Token::Ident(s) if s == "Int32" => Ok(TypeAnnotation::I32),
+            Token::Ident(s) if s == "Int64" => Ok(TypeAnnotation::I64),
+            Token::Ident(s) if s == "Float32" => Ok(TypeAnnotation::F32),
+            Token::Ident(s) if s == "Float64" => Ok(TypeAnnotation::F64),
+            Token::Ident(s) if s == "Bool" => Ok(TypeAnnotation::Bool),
+            Token::Ident(s) if s == "Void" => Ok(TypeAnnotation::Unit),
             _ => Err(BengalError::ParseError {
                 message: format!("unknown type `{}`", tok.node),
                 span: tok.span,
@@ -579,7 +580,7 @@ mod tests {
 
     #[test]
     fn parse_func_return() {
-        let program = parse_str("func main() -> i32 { return 42; }").unwrap();
+        let program = parse_str("func main() -> Int32 { return 42; }").unwrap();
         assert_eq!(program.functions.len(), 1);
         let f = &program.functions[0];
         assert_eq!(f.name, "main");
@@ -591,7 +592,7 @@ mod tests {
     #[test]
     fn parse_let_return() {
         let program =
-            parse_str("func main() -> i32 { let x: i32 = 10; return x; }").unwrap();
+            parse_str("func main() -> Int32 { let x: Int32 = 10; return x; }").unwrap();
         let stmts = &program.functions[0].body.stmts;
         assert_eq!(stmts.len(), 2);
         assert_eq!(
@@ -608,7 +609,7 @@ mod tests {
     #[test]
     fn parse_func_with_params() {
         let program =
-            parse_str("func add(a: i32, b: i32) -> i32 { return a + b; }").unwrap();
+            parse_str("func add(a: Int32, b: Int32) -> Int32 { return a + b; }").unwrap();
         let f = &program.functions[0];
         assert_eq!(f.name, "add");
         assert_eq!(
@@ -631,7 +632,7 @@ mod tests {
     #[test]
     fn parse_block_expr_yield() {
         let program = parse_str(
-            "func main() -> i32 { let x: i32 = { yield 10; }; return x; }",
+            "func main() -> Int32 { let x: Int32 = { yield 10; }; return x; }",
         )
         .unwrap();
         let stmts = &program.functions[0].body.stmts;
@@ -664,7 +665,7 @@ mod tests {
     #[test]
     fn error_missing_type_annotation() {
         assert!(matches!(
-            parse_str("func main() -> i32 { let x: = 10; }"),
+            parse_str("func main() -> Int32 { let x: = 10; }"),
             Err(BengalError::ParseError { .. })
         ));
     }
@@ -674,7 +675,7 @@ mod tests {
     #[test]
     fn parse_if_else() {
         let program = parse_str(
-            "func main() -> i32 { if true { yield 1; } else { yield 2; }; return 0; }",
+            "func main() -> Int32 { if true { yield 1; } else { yield 2; }; return 0; }",
         )
         .unwrap();
         let stmts = &program.functions[0].body.stmts;
@@ -685,7 +686,7 @@ mod tests {
     #[test]
     fn parse_while() {
         let program =
-            parse_str("func main() -> i32 { while false { }; return 0; }").unwrap();
+            parse_str("func main() -> Int32 { while false { }; return 0; }").unwrap();
         let stmts = &program.functions[0].body.stmts;
         assert_eq!(stmts.len(), 2);
         assert!(matches!(&stmts[0], Stmt::Expr(Expr::While { .. })));
@@ -739,7 +740,7 @@ mod tests {
     #[test]
     fn parse_let_type_inference() {
         let program =
-            parse_str("func main() -> i32 { let x = 42; return x; }").unwrap();
+            parse_str("func main() -> Int32 { let x = 42; return x; }").unwrap();
         let stmts = &program.functions[0].body.stmts;
         assert_eq!(
             stmts[0],
@@ -754,7 +755,7 @@ mod tests {
     #[test]
     fn parse_let_with_i64() {
         let program =
-            parse_str("func main() -> i32 { let x: i64 = 42; return 0; }").unwrap();
+            parse_str("func main() -> Int32 { let x: Int64 = 42; return 0; }").unwrap();
         let stmts = &program.functions[0].body.stmts;
         assert_eq!(
             stmts[0],
@@ -768,7 +769,7 @@ mod tests {
 
     #[test]
     fn parse_cast_expr() {
-        let expr = parse_expr_str("42 as i64");
+        let expr = parse_expr_str("42 as Int64");
         assert_eq!(
             expr,
             Expr::Cast {
@@ -781,7 +782,7 @@ mod tests {
     #[test]
     fn parse_break_no_value() {
         let program =
-            parse_str("func main() -> i32 { while true { break; }; return 0; }")
+            parse_str("func main() -> Int32 { while true { break; }; return 0; }")
                 .unwrap();
         let stmts = &program.functions[0].body.stmts;
         if let Stmt::Expr(Expr::While { body, .. }) = &stmts[0] {
@@ -794,7 +795,7 @@ mod tests {
     #[test]
     fn parse_break_with_value() {
         let program =
-            parse_str("func main() -> i32 { while true { break 10; }; return 0; }")
+            parse_str("func main() -> Int32 { while true { break 10; }; return 0; }")
                 .unwrap();
         let stmts = &program.functions[0].body.stmts;
         if let Stmt::Expr(Expr::While { body, .. }) = &stmts[0] {
@@ -807,7 +808,7 @@ mod tests {
     #[test]
     fn parse_continue() {
         let program =
-            parse_str("func main() -> i32 { while true { continue; }; return 0; }")
+            parse_str("func main() -> Int32 { while true { continue; }; return 0; }")
                 .unwrap();
         let stmts = &program.functions[0].body.stmts;
         if let Stmt::Expr(Expr::While { body, .. }) = &stmts[0] {
@@ -825,8 +826,8 @@ mod tests {
 
     #[test]
     fn parse_cast_precedence() {
-        // 1 + 2 as i64 → Add(1, Cast(2, I64))
-        let expr = parse_expr_str("1 + 2 as i64");
+        // 1 + 2 as Int64 → Add(1, Cast(2, I64))
+        let expr = parse_expr_str("1 + 2 as Int64");
         assert_eq!(
             expr,
             Expr::BinaryOp {
@@ -843,7 +844,7 @@ mod tests {
     #[test]
     fn parse_while_nobreak() {
         let program = parse_str(
-            "func main() -> i32 { while true { break 1; } nobreak { yield 2; }; return 0; }",
+            "func main() -> Int32 { while true { break 1; } nobreak { yield 2; }; return 0; }",
         )
         .unwrap();
         let stmts = &program.functions[0].body.stmts;

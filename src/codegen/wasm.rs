@@ -582,7 +582,7 @@ mod tests {
     #[test]
     fn compile_simple_return() {
         assert_eq!(
-            compile_and_run("func main() -> i32 { return 42; }"),
+            compile_and_run("func main() -> Int32 { return 42; }"),
             42
         );
     }
@@ -591,7 +591,7 @@ mod tests {
     fn compile_call() {
         assert_eq!(
             compile_and_run(
-                "func add(a: i32, b: i32) -> i32 { return a + b; } func main() -> i32 { return add(3, 4); }"
+                "func add(a: Int32, b: Int32) -> Int32 { return a + b; } func main() -> Int32 { return add(3, 4); }"
             ),
             7
         );
@@ -600,7 +600,7 @@ mod tests {
     #[test]
     fn compile_let_variable() {
         assert_eq!(
-            compile_and_run("func main() -> i32 { let x: i32 = 10; return x + 1; }"),
+            compile_and_run("func main() -> Int32 { let x: Int32 = 10; return x + 1; }"),
             11
         );
     }
@@ -611,7 +611,7 @@ mod tests {
     fn compile_if_else() {
         assert_eq!(
             compile_and_run(
-                "func main() -> i32 { let x: i32 = if true { yield 1; } else { yield 2; }; return x; }"
+                "func main() -> Int32 { let x: Int32 = if true { yield 1; } else { yield 2; }; return x; }"
             ),
             1
         );
@@ -621,7 +621,7 @@ mod tests {
     fn compile_while() {
         assert_eq!(
             compile_and_run(
-                "func main() -> i32 { var s: i32 = 0; var i: i32 = 0; while i < 3 { s = s + i; i = i + 1; }; return s; }"
+                "func main() -> Int32 { var s: Int32 = 0; var i: Int32 = 0; while i < 3 { s = s + i; i = i + 1; }; return s; }"
             ),
             3
         );
@@ -631,7 +631,7 @@ mod tests {
     fn compile_comparison() {
         assert_eq!(
             compile_and_run(
-                "func main() -> i32 { let x: i32 = if 3 > 2 { yield 1; } else { yield 0; }; return x; }"
+                "func main() -> Int32 { let x: Int32 = if 3 > 2 { yield 1; } else { yield 0; }; return x; }"
             ),
             1
         );
@@ -643,7 +643,7 @@ mod tests {
     fn compile_break() {
         assert_eq!(
             compile_and_run(
-                "func main() -> i32 { var i: i32 = 0; while true { if i == 3 { break; }; i = i + 1; }; return i; }"
+                "func main() -> Int32 { var i: Int32 = 0; while true { if i == 3 { break; }; i = i + 1; }; return i; }"
             ),
             3
         );
@@ -653,7 +653,7 @@ mod tests {
     fn compile_continue() {
         assert_eq!(
             compile_and_run(
-                "func main() -> i32 { var i: i32 = 0; var s: i32 = 0; while i < 5 { i = i + 1; if i == 3 { continue; }; s = s + i; }; return s; }"
+                "func main() -> Int32 { var i: Int32 = 0; var s: Int32 = 0; while i < 5 { i = i + 1; if i == 3 { continue; }; s = s + i; }; return s; }"
             ),
             12
         );
@@ -663,7 +663,7 @@ mod tests {
     fn compile_nobreak_with_break() {
         assert_eq!(
             compile_and_run(
-                "func main() -> i32 { var i: i32 = 0; let x: i32 = while i < 10 { if i == 5 { break 99; }; i = i + 1; } nobreak { yield 0; }; return x; }"
+                "func main() -> Int32 { var i: Int32 = 0; let x: Int32 = while i < 10 { if i == 5 { break 99; }; i = i + 1; } nobreak { yield 0; }; return x; }"
             ),
             99
         );
@@ -675,7 +675,7 @@ mod tests {
         // Use nobreak to compute a value via a separate variable
         assert_eq!(
             compile_and_run(
-                "func main() -> i32 { var i: i32 = 0; while i < 3 { i = i + 1; } nobreak { }; return i; }"
+                "func main() -> Int32 { var i: Int32 = 0; while i < 3 { i = i + 1; } nobreak { }; return i; }"
             ),
             3
         );
@@ -685,7 +685,7 @@ mod tests {
     fn compile_cast_i64() {
         assert_eq!(
             compile_and_run(
-                "func main() -> i32 { let x: i64 = 100 as i64; return x as i32; }"
+                "func main() -> Int32 { let x: Int64 = 100 as Int64; return x as Int32; }"
             ),
             100
         );
@@ -695,7 +695,7 @@ mod tests {
     fn compile_i64_arithmetic() {
         assert_eq!(
             compile_and_run(
-                "func main() -> i32 { let x: i64 = 10 as i64; let y: i64 = 20 as i64; return (x + y) as i32; }"
+                "func main() -> Int32 { let x: Int64 = 10 as Int64; let y: Int64 = 20 as Int64; return (x + y) as Int32; }"
             ),
             30
         );

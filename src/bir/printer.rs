@@ -3,11 +3,11 @@ use super::instruction::*;
 fn format_type(ty: &BirType) -> &str {
     match ty {
         BirType::Unit => "()",
-        BirType::I32 => "i32",
-        BirType::I64 => "i64",
-        BirType::F32 => "f32",
-        BirType::F64 => "f64",
-        BirType::Bool => "bool",
+        BirType::I32 => "Int32",
+        BirType::I64 => "Int64",
+        BirType::F32 => "Float32",
+        BirType::F64 => "Float64",
+        BirType::Bool => "Bool",
     }
 }
 
@@ -148,7 +148,7 @@ fn print_instruction(inst: &Instruction, out: &mut String) {
         }
         Instruction::Not { result, operand } => {
             out.push_str(&format!(
-                "{} = not {} : bool",
+                "{} = not {} : Bool",
                 format_value(result),
                 format_value(operand)
             ));
@@ -253,11 +253,11 @@ mod tests {
 
     #[test]
     fn print_literal() {
-        let output = print_str("func main() -> i32 { return 42; }");
+        let output = print_str("func main() -> Int32 { return 42; }");
         let expected = "\
-bir @main() -> i32 {
+bir @main() -> Int32 {
 bb0:
-    %0 = literal 42 : i32
+    %0 = literal 42 : Int32
     return %0
 }
 ";
@@ -268,13 +268,13 @@ bb0:
     fn print_binary_expr() {
         let output = print_str("2 + 3 * 4");
         let expected = "\
-bir @main() -> i32 {
+bir @main() -> Int32 {
 bb0:
-    %0 = literal 2 : i32
-    %1 = literal 3 : i32
-    %2 = literal 4 : i32
-    %3 = binary_op mul %1, %2 : i32
-    %4 = binary_op add %0, %3 : i32
+    %0 = literal 2 : Int32
+    %1 = literal 3 : Int32
+    %2 = literal 4 : Int32
+    %3 = binary_op mul %1, %2 : Int32
+    %4 = binary_op add %0, %3 : Int32
     return %4
 }
 ";
@@ -284,8 +284,8 @@ bb0:
     #[test]
     fn print_call() {
         let output = print_str(
-            "func add(a: i32, b: i32) -> i32 { return a + b; } func main() -> i32 { return add(1, 2); }",
+            "func add(a: Int32, b: Int32) -> Int32 { return a + b; } func main() -> Int32 { return add(1, 2); }",
         );
-        assert!(output.contains("call @add(%0, %1) : i32"));
+        assert!(output.contains("call @add(%0, %1) : Int32"));
     }
 }

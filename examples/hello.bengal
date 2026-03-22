@@ -1,4 +1,4 @@
-func fibonacci(n: i32) -> i32 {
+func fibonacci(n: Int32) -> Int32 {
     var a = 0;
     var b = 1;
     var i = 0;
@@ -11,7 +11,7 @@ func fibonacci(n: i32) -> i32 {
     return a;
 }
 
-func sum_evens(n: i32) -> i32 {
+func sum_evens(n: Int32) -> Int32 {
     var i = 0;
     var s = 0;
     while i < n {
@@ -24,6 +24,6 @@ func sum_evens(n: i32) -> i32 {
     return s;
 }
 
-func main() -> i32 {
+func main() -> Int32 {
     return fibonacci(10) + sum_evens(10);
 }

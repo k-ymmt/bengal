@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::parser::ast::TypeAnnotation;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8,6 +10,19 @@ pub enum Type {
     F64,
     Bool,
     Unit,
+}
+
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Type::I32 => write!(f, "Int32"),
+            Type::I64 => write!(f, "Int64"),
+            Type::F32 => write!(f, "Float32"),
+            Type::F64 => write!(f, "Float64"),
+            Type::Bool => write!(f, "Bool"),
+            Type::Unit => write!(f, "()"),
+        }
+    }
 }
 
 impl Type {

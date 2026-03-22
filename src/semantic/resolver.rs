@@ -85,7 +85,7 @@ impl Resolver {
             Some(existing) if *existing != ty => {
                 Err(BengalError::SemanticError {
                     message: format!(
-                        "break type mismatch: expected `{:?}`, found `{:?}`",
+                        "break type mismatch: expected `{}`, found `{}`",
                         existing, ty
                     ),
                     span: Span { start: 0, end: 0 },

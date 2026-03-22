@@ -3,7 +3,7 @@
 ## Overview
 
 Bengal is an expression-oriented language that compiles to WebAssembly.
-Phase 4 adds loop control (`break`/`continue`), multiple numeric types (`i64`, `f32`, `f64`), local type inference, `as` casts, `while` expressions with `break` values and `nobreak` blocks, and constant folding optimization.
+Phase 4 adds loop control (`break`/`continue`), multiple numeric types (`Int64`, `Float32`, `Float64`), local type inference, `as` casts, `while` expressions with `break` values and `nobreak` blocks, and constant folding optimization.
 
 Key design principles:
 
@@ -70,7 +70,7 @@ function   = "func" , identifier , param_list , [ "->" , type ] , block ;
 
 param_list = "(" , [ param , { "," , param } ] , ")" ;
 param      = identifier , ":" , type ;
-type       = "i32" | "i64" | "f32" | "f64" | "bool" | "(" , ")" ;
+type       = "Int32" | "Int64" | "Float32" | "Float64" | "Bool" | "Void" | "(" , ")" ;
 
 block      = "{" , { statement } , "}" ;
 
@@ -126,21 +126,21 @@ while_expr = "while" , expression , block , [ "nobreak" , block ] ;
 
 | Type | Description | Phase |
 |---|---|---|
-| `i32` | 32-bit signed integer | 1 |
-| `bool` | Boolean (`true` / `false`) | 3 |
-| `()` | Unit type (no value) | 3 |
-| `i64` | 64-bit signed integer | 4 |
-| `f32` | 32-bit floating point | 4 |
-| `f64` | 64-bit floating point | 4 |
+| `Int32` | 32-bit signed integer | 1 |
+| `Bool` | Boolean (`true` / `false`) | 3 |
+| `()` / `Void` | Unit type (no value) | 3 |
+| `Int64` | 64-bit signed integer | 4 |
+| `Float32` | 32-bit floating point | 4 |
+| `Float64` | 64-bit floating point | 4 |
 
 ### Default literal types
-- Integer literals (`42`) default to `i32`.
-- Float literals (`3.14`) default to `f64`.
+- Integer literals (`42`) default to `Int32`.
+- Float literals (`3.14`) default to `Float64`.
 
 ## Semantic Rules
 
 ### Functions
-- `main` function must exist, take no parameters, and return `i32`.
+- `main` function must exist, take no parameters, and return `Int32`.
 - Function return type defaults to `()` if `->` is omitted.
 - All functions must end with a `return` statement.
 - `return` may appear at any position (early return is allowed).
@@ -158,13 +158,13 @@ while_expr = "while" , expression , block , [ "nobreak" , block ] ;
 - All block expressions must end with a `yield` statement.
 
 ### if/else
-- `if` condition must be `bool`.
+- `if` condition must be `Bool`.
 - `if`/`else` with both branches: then and else types must match (or one may diverge via `return`, `break`, or `continue`).
 - `if` without `else`: type is `()`.
 - When one branch diverges, the other branch's type is used.
 
 ### while, break, continue
-- `while` condition must be `bool`.
+- `while` condition must be `Bool`.
 - `break` and `continue` are only allowed inside a `while` loop body.
 - `break;` exits the innermost loop. `break expr;` exits and provides a value.
 - `continue;` jumps to the loop header (re-evaluates condition).
@@ -187,17 +187,17 @@ The type of a `while` expression is determined by its `break` statements:
 
 ### Operators
 - Arithmetic (`+`, `-`, `*`, `/`): both operands must be the same numeric type. Result is that type.
-- Comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`): both operands must be the same numeric type. Result is `bool`.
-- Logical (`&&`, `||`): both operands `bool`, result `bool`. Short-circuit evaluation.
-- Logical not (`!`): operand `bool`, result `bool`.
+- Comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`): both operands must be the same numeric type. Result is `Bool`.
+- Logical (`&&`, `||`): both operands `Bool`, result `Bool`. Short-circuit evaluation.
+- Logical not (`!`): operand `Bool`, result `Bool`.
 
 ### Type conversion (as)
-- `expr as type` converts between numeric types (`i32`, `i64`, `f32`, `f64`).
-- Casting to/from `bool` is not allowed.
+- `expr as type` converts between numeric types (`Int32`, `Int64`, `Float32`, `Float64`).
+- Casting to/from `Bool` is not allowed.
 - `as` binds tighter than all binary operators but lower than `!` (prefix).
 
 ### Integer literal range
-- Integer literals default to `i32`. Values outside `i32` range (`-2147483648` to `2147483647`) are a compile error.
+- Integer literals default to `Int32`. Values outside `Int32` range (`-2147483648` to `2147483647`) are a compile error.
 
 ## Optimizations
 
@@ -209,4 +209,4 @@ The type of a `while` expression is determined by its `break` statements:
 - **String type**: string literals and operations
 - **Arrays/structs**: composite data types
 - **Closures/first-class functions**
-- **Integer literal suffixes**: `42i64` (use `42 as i64` instead)
+- **Integer literal suffixes**: `42i64` (use `42 as Int64` instead)
