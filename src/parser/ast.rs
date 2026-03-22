@@ -34,9 +34,20 @@ pub struct Block {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    Let { name: String, ty: Option<TypeAnnotation>, value: Expr },
-    Var { name: String, ty: Option<TypeAnnotation>, value: Expr },
-    Assign { name: String, value: Expr },
+    Let {
+        name: String,
+        ty: Option<TypeAnnotation>,
+        value: Expr,
+    },
+    Var {
+        name: String,
+        ty: Option<TypeAnnotation>,
+        value: Expr,
+    },
+    Assign {
+        name: String,
+        value: Expr,
+    },
     Return(Option<Expr>),
     Yield(Expr),
     Break(Option<Expr>),
@@ -75,11 +86,28 @@ pub enum Expr {
         left: Box<Expr>,
         right: Box<Expr>,
     },
-    Call { name: String, args: Vec<Expr> },
+    Call {
+        name: String,
+        args: Vec<Expr>,
+    },
     Block(Block),
     Bool(bool),
-    UnaryOp { op: UnaryOp, operand: Box<Expr> },
-    If { condition: Box<Expr>, then_block: Block, else_block: Option<Block> },
-    While { condition: Box<Expr>, body: Block, nobreak: Option<Block> },
-    Cast { expr: Box<Expr>, target_type: TypeAnnotation },
+    UnaryOp {
+        op: UnaryOp,
+        operand: Box<Expr>,
+    },
+    If {
+        condition: Box<Expr>,
+        then_block: Block,
+        else_block: Option<Block>,
+    },
+    While {
+        condition: Box<Expr>,
+        body: Block,
+        nobreak: Option<Block>,
+    },
+    Cast {
+        expr: Box<Expr>,
+        target_type: TypeAnnotation,
+    },
 }

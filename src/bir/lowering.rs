@@ -177,9 +177,7 @@ impl Lowering {
             Some(StmtResult::ReturnVoid) => {
                 self.seal_block(Terminator::ReturnVoid);
             }
-            _ => unreachable!(
-                "function must end with return (semantic analysis guarantees this)"
-            ),
+            _ => unreachable!("function must end with return (semantic analysis guarantees this)"),
         }
 
         // Build CfgRegion body: body_regions + final block (which was just sealed)
@@ -291,7 +289,11 @@ impl Lowering {
                     }
                     None => None,
                 };
-                self.seal_block(Terminator::BrBreak { exit_bb, args, value });
+                self.seal_block(Terminator::BrBreak {
+                    exit_bb,
+                    args,
+                    value,
+                });
                 let dummy_bb = self.fresh_block();
                 self.start_block(dummy_bb, vec![]);
                 StmtResult::Break
@@ -402,13 +404,8 @@ impl Lowering {
                 }
             },
             Expr::Call { name, args } => {
-                let arg_vals: Vec<Value> =
-                    args.iter().map(|a| self.lower_expr(a)).collect();
-                let ty = self
-                    .func_sigs
-                    .get(name)
-                    .copied()
-                    .unwrap_or(BirType::I32);
+                let arg_vals: Vec<Value> = args.iter().map(|a| self.lower_expr(a)).collect();
+                let ty = self.func_sigs.get(name).copied().unwrap_or(BirType::I32);
                 let result = self.fresh_value();
                 self.emit(Instruction::Call {
                     result,
@@ -436,10 +433,18 @@ impl Lowering {
                 then_block,
                 else_block,
             } => self.lower_if(condition, then_block, else_block.as_ref()),
-            Expr::While { condition, body, nobreak } => self.lower_while(condition, body, nobreak.as_ref()),
+            Expr::While {
+                condition,
+                body,
+                nobreak,
+            } => self.lower_while(condition, body, nobreak.as_ref()),
             Expr::Cast { expr, target_type } => {
                 let operand = self.lower_expr(expr);
-                let from_ty = self.value_types.get(&operand).copied().unwrap_or(BirType::I32);
+                let from_ty = self
+                    .value_types
+                    .get(&operand)
+                    .copied()
+                    .unwrap_or(BirType::I32);
                 let to_ty = convert_type(target_type);
                 let result = self.fresh_value();
                 self.emit(Instruction::Cast {
@@ -625,8 +630,12 @@ impl Lowering {
                 let has_merge_value = then_yields || else_yields;
                 // Infer merge type from yield values
                 let merge_type = match (&then_result, &else_result) {
-                    (Some(StmtResult::Yield(v)), _) => self.value_types.get(v).copied().unwrap_or(BirType::I32),
-                    (_, Some(StmtResult::Yield(v))) => self.value_types.get(v).copied().unwrap_or(BirType::I32),
+                    (Some(StmtResult::Yield(v)), _) => {
+                        self.value_types.get(v).copied().unwrap_or(BirType::I32)
+                    }
+                    (_, Some(StmtResult::Yield(v))) => {
+                        self.value_types.get(v).copied().unwrap_or(BirType::I32)
+                    }
                     _ => BirType::I32,
                 };
 
@@ -873,7 +882,10 @@ impl Lowering {
         //   inside the first region (e.g., IfOnly), so we add last_body_bb instead
         let body_diverged = matches!(
             body_result,
-            Some(StmtResult::Break) | Some(StmtResult::Continue) | Some(StmtResult::Return(_)) | Some(StmtResult::ReturnVoid)
+            Some(StmtResult::Break)
+                | Some(StmtResult::Continue)
+                | Some(StmtResult::Return(_))
+                | Some(StmtResult::ReturnVoid)
         );
         if has_inner_regions {
             // bb_body is used as cond_bb inside the first inner region (IfOnly etc.)

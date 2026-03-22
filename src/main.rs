@@ -39,15 +39,13 @@ fn run() -> miette::Result<()> {
             let filename = file.display().to_string();
 
             if emit_bir {
-                let (_module, bir_text) = bengal::compile_to_bir(&source).map_err(|e| {
-                    Report::new(e.into_diagnostic(&filename, &source))
-                })?;
+                let (_module, bir_text) = bengal::compile_to_bir(&source)
+                    .map_err(|e| Report::new(e.into_diagnostic(&filename, &source)))?;
                 println!("{bir_text}");
             }
 
-            let wasm = bengal::compile_source(&source).map_err(|e| {
-                Report::new(e.into_diagnostic(&filename, &source))
-            })?;
+            let wasm = bengal::compile_source(&source)
+                .map_err(|e| Report::new(e.into_diagnostic(&filename, &source)))?;
 
             let out_path = file.with_extension("wasm");
             std::fs::write(&out_path, &wasm).map_err(|e| miette::miette!("{e}"))?;
@@ -58,15 +56,13 @@ fn run() -> miette::Result<()> {
             let filename = "<eval>";
 
             if emit_bir {
-                let (_module, bir_text) = bengal::compile_to_bir(source).map_err(|e| {
-                    Report::new(e.into_diagnostic(filename, source))
-                })?;
+                let (_module, bir_text) = bengal::compile_to_bir(source)
+                    .map_err(|e| Report::new(e.into_diagnostic(filename, source)))?;
                 println!("{bir_text}");
             }
 
-            let wasm = bengal::compile_source(source).map_err(|e| {
-                Report::new(e.into_diagnostic(filename, source))
-            })?;
+            let wasm = bengal::compile_source(source)
+                .map_err(|e| Report::new(e.into_diagnostic(filename, source)))?;
 
             let engine = wasmtime::Engine::default();
             let module = wasmtime::Module::new(&engine, &wasm)

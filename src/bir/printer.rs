@@ -239,8 +239,8 @@ fn print_terminator(term: &Terminator, out: &mut String) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::lowering::lower_program;
+    use super::*;
     use crate::lexer::tokenize;
     use crate::parser::parse;
 

@@ -61,10 +61,7 @@ pub enum Instruction {
         ty: BirType,
     },
     /// %result = not %operand : bool
-    Not {
-        result: Value,
-        operand: Value,
-    },
+    Not { result: Value, operand: Value },
     /// %result = cast %operand : <from_ty> -> <to_ty>
     Cast {
         result: Value,

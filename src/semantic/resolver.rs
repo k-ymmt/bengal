@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::error::{BengalError, Result, Span};
 use super::types::Type;
+use crate::error::{BengalError, Result, Span};
 
 #[derive(Debug, Clone)]
 pub struct VarInfo {
@@ -82,15 +82,13 @@ impl Resolver {
     pub fn set_break_type(&mut self, ty: Type) -> Result<()> {
         let current = self.loop_break_types.last_mut().unwrap();
         match current {
-            Some(existing) if *existing != ty => {
-                Err(BengalError::SemanticError {
-                    message: format!(
-                        "break type mismatch: expected `{}`, found `{}`",
-                        existing, ty
-                    ),
-                    span: Span { start: 0, end: 0 },
-                })
-            }
+            Some(existing) if *existing != ty => Err(BengalError::SemanticError {
+                message: format!(
+                    "break type mismatch: expected `{}`, found `{}`",
+                    existing, ty
+                ),
+                span: Span { start: 0, end: 0 },
+            }),
             Some(_) => Ok(()),
             None => {
                 *current = Some(ty);

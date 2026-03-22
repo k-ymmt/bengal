@@ -3,7 +3,7 @@ pub mod token;
 use logos::Logos;
 
 use crate::error::{BengalError, Result, Span};
-use token::{SpannedToken, Spanned, Token};
+use token::{Spanned, SpannedToken, Token};
 
 pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>> {
     let mut tokens = Vec::new();
@@ -234,26 +234,14 @@ mod tests {
 
     #[test]
     fn float_literal() {
-        assert_eq!(
-            token_nodes("3.14"),
-            vec![Token::Float(3.14), Token::Eof]
-        );
-        assert_eq!(
-            token_nodes("42.0"),
-            vec![Token::Float(42.0), Token::Eof]
-        );
+        assert_eq!(token_nodes("3.14"), vec![Token::Float(3.14), Token::Eof]);
+        assert_eq!(token_nodes("42.0"), vec![Token::Float(42.0), Token::Eof]);
     }
 
     #[test]
     fn break_continue_keywords() {
-        assert_eq!(
-            token_nodes("break"),
-            vec![Token::Break, Token::Eof]
-        );
-        assert_eq!(
-            token_nodes("continue"),
-            vec![Token::Continue, Token::Eof]
-        );
+        assert_eq!(token_nodes("break"), vec![Token::Break, Token::Eof]);
+        assert_eq!(token_nodes("continue"), vec![Token::Continue, Token::Eof]);
     }
 
     #[test]
@@ -271,10 +259,7 @@ mod tests {
 
     #[test]
     fn nobreak_keyword() {
-        assert_eq!(
-            token_nodes("nobreak"),
-            vec![Token::Nobreak, Token::Eof]
-        );
+        assert_eq!(token_nodes("nobreak"), vec![Token::Nobreak, Token::Eof]);
     }
 
     #[test]

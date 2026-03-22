@@ -4,7 +4,7 @@ pub mod types;
 use crate::error::{BengalError, Result, Span};
 use crate::parser::ast::*;
 use resolver::{FuncSig, Resolver, VarInfo};
-use types::{resolve_type, Type};
+use types::{Type, resolve_type};
 
 fn sem_err(message: impl Into<String>) -> BengalError {
     BengalError::SemanticError {
@@ -20,7 +20,13 @@ pub fn analyze(program: &Program) -> Result<()> {
     for func in &program.functions {
         let params: Vec<Type> = func.params.iter().map(|p| resolve_type(&p.ty)).collect();
         let return_type = resolve_type(&func.return_type);
-        resolver.define_func(func.name.clone(), FuncSig { params, return_type });
+        resolver.define_func(
+            func.name.clone(),
+            FuncSig {
+                params,
+                return_type,
+            },
+        );
     }
 
     // Pass 2: verify main function exists with correct signature
@@ -100,12 +106,16 @@ fn analyze_block_expr(block: &Block, resolver: &mut Resolver) -> Result<Type> {
     let stmts = &block.stmts;
 
     if stmts.is_empty() {
-        return Err(sem_err("block expression must end with a `yield` statement"));
+        return Err(sem_err(
+            "block expression must end with a `yield` statement",
+        ));
     }
 
     // Check that the last statement is Yield
     if !matches!(stmts.last(), Some(Stmt::Yield(_))) {
-        return Err(sem_err("block expression must end with a `yield` statement"));
+        return Err(sem_err(
+            "block expression must end with a `yield` statement",
+        ));
     }
 
     let mut yield_type = Type::I32; // will be overwritten
@@ -115,9 +125,7 @@ fn analyze_block_expr(block: &Block, resolver: &mut Resolver) -> Result<Type> {
 
         // Return is not allowed in block expressions
         if matches!(stmt, Stmt::Return(_)) {
-            return Err(sem_err(
-                "`return` cannot be used inside a block expression",
-            ));
+            return Err(sem_err("`return` cannot be used inside a block expression"));
         }
 
         // Yield is only allowed as the last statement
@@ -158,9 +166,7 @@ fn analyze_control_block(block: &Block, resolver: &mut Resolver) -> Result<Optio
 
         // Yield is only allowed as the last statement
         if matches!(stmt, Stmt::Yield(_)) && !is_last {
-            return Err(sem_err(
-                "`yield` must be the last statement in the block",
-            ));
+            return Err(sem_err("`yield` must be the last statement in the block"));
         }
 
         analyze_stmt(stmt, resolver)?;
@@ -192,9 +198,7 @@ fn analyze_loop_block(block: &Block, resolver: &mut Resolver) -> Result<()> {
 
     for stmt in &block.stmts {
         if matches!(stmt, Stmt::Yield(_)) {
-            return Err(sem_err(
-                "`yield` cannot be used in a while loop body",
-            ));
+            return Err(sem_err("`yield` cannot be used in a while loop body"));
         }
         analyze_stmt(stmt, resolver)?;
     }
@@ -446,7 +450,11 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                 }
             }
         }
-        Expr::While { condition, body, nobreak } => {
+        Expr::While {
+            condition,
+            body,
+            nobreak,
+        } => {
             let cond_ty = analyze_expr(condition, resolver)?;
             if cond_ty != Type::Bool {
                 return Err(sem_err("while condition must be `Bool`"));
@@ -521,16 +529,13 @@ mod tests {
 
     #[test]
     fn ok_var_and_assign() {
-        assert!(
-            analyze_str("func main() -> Int32 { var x: Int32 = 1; x = 2; return x; }").is_ok()
-        );
+        assert!(analyze_str("func main() -> Int32 { var x: Int32 = 1; x = 2; return x; }").is_ok());
     }
 
     #[test]
     fn ok_block_expr_yield() {
         assert!(
-            analyze_str("func main() -> Int32 { let x: Int32 = { yield 10; }; return x; }")
-                .is_ok()
+            analyze_str("func main() -> Int32 { let x: Int32 = { yield 10; }; return x; }").is_ok()
         );
     }
 
@@ -571,9 +576,9 @@ mod tests {
 
     #[test]
     fn ok_unit_func() {
-        assert!(analyze_str(
-            "func foo() { return; } func main() -> Int32 { foo(); return 0; }"
-        ).is_ok());
+        assert!(
+            analyze_str("func foo() { return; } func main() -> Int32 { foo(); return 0; }").is_ok()
+        );
     }
 
     #[test]
@@ -606,10 +611,9 @@ mod tests {
 
     #[test]
     fn err_no_yield_in_block() {
-        let err = analyze_str(
-            "func main() -> Int32 { let x: Int32 = { let a: Int32 = 1; }; return x; }",
-        )
-        .unwrap_err();
+        let err =
+            analyze_str("func main() -> Int32 { let x: Int32 = { let a: Int32 = 1; }; return x; }")
+                .unwrap_err();
         assert!(matches!(err, BengalError::SemanticError { .. }));
     }
 
@@ -621,10 +625,8 @@ mod tests {
 
     #[test]
     fn err_return_in_block_expr() {
-        let err = analyze_str(
-            "func main() -> Int32 { let x: Int32 = { return 1; }; return x; }",
-        )
-        .unwrap_err();
+        let err = analyze_str("func main() -> Int32 { let x: Int32 = { return 1; }; return x; }")
+            .unwrap_err();
         assert!(matches!(err, BengalError::SemanticError { .. }));
     }
 
@@ -654,7 +656,8 @@ mod tests {
 
     #[test]
     fn err_no_main() {
-        let err = analyze_str("func add(a: Int32, b: Int32) -> Int32 { return a + b; }").unwrap_err();
+        let err =
+            analyze_str("func add(a: Int32, b: Int32) -> Int32 { return a + b; }").unwrap_err();
         assert!(matches!(err, BengalError::SemanticError { .. }));
     }
 
@@ -668,10 +671,9 @@ mod tests {
 
     #[test]
     fn err_if_non_bool_condition() {
-        let err = analyze_str(
-            "func main() -> Int32 { if 1 { yield 1; } else { yield 2; }; return 0; }",
-        )
-        .unwrap_err();
+        let err =
+            analyze_str("func main() -> Int32 { if 1 { yield 1; } else { yield 2; }; return 0; }")
+                .unwrap_err();
         assert!(matches!(err, BengalError::SemanticError { .. }));
     }
 
@@ -692,10 +694,8 @@ mod tests {
 
     #[test]
     fn err_yield_in_while() {
-        let err = analyze_str(
-            "func main() -> Int32 { while true { yield 1; }; return 0; }",
-        )
-        .unwrap_err();
+        let err =
+            analyze_str("func main() -> Int32 { while true { yield 1; }; return 0; }").unwrap_err();
         assert!(matches!(err, BengalError::SemanticError { .. }));
     }
 
@@ -708,17 +708,14 @@ mod tests {
 
     #[test]
     fn err_let_type_mismatch_i32_to_bool() {
-        let err =
-            analyze_str("func main() -> Int32 { let x: Bool = 42; return 0; }").unwrap_err();
+        let err = analyze_str("func main() -> Int32 { let x: Bool = 42; return 0; }").unwrap_err();
         assert!(matches!(err, BengalError::SemanticError { .. }));
     }
 
     #[test]
     fn err_assign_type_mismatch() {
-        let err = analyze_str(
-            "func main() -> Int32 { var x: Int32 = 0; x = false; return x; }",
-        )
-        .unwrap_err();
+        let err = analyze_str("func main() -> Int32 { var x: Int32 = 0; x = false; return x; }")
+            .unwrap_err();
         assert!(matches!(err, BengalError::SemanticError { .. }));
     }
 
@@ -731,18 +728,13 @@ mod tests {
 
     #[test]
     fn ok_cast_i64() {
-        analyze_str(
-            "func main() -> Int32 { let x: Int64 = 42 as Int64; return x as Int32; }",
-        )
-        .unwrap();
+        analyze_str("func main() -> Int32 { let x: Int64 = 42 as Int64; return x as Int32; }")
+            .unwrap();
     }
 
     #[test]
     fn ok_float_literal() {
-        analyze_str(
-            "func main() -> Int32 { let x = 3.14; let y: Int32 = 0; return y; }",
-        )
-        .unwrap();
+        analyze_str("func main() -> Int32 { let x = 3.14; let y: Int32 = 0; return y; }").unwrap();
     }
 
     #[test]
@@ -779,18 +771,13 @@ mod tests {
 
     #[test]
     fn ok_while_true_break_value() {
-        analyze_str(
-            "func main() -> Int32 { let x: Int32 = while true { break 10; }; return x; }",
-        )
-        .unwrap();
+        analyze_str("func main() -> Int32 { let x: Int32 = while true { break 10; }; return x; }")
+            .unwrap();
     }
 
     #[test]
     fn ok_while_true_break_unit() {
-        analyze_str(
-            "func main() -> Int32 { while true { break; }; return 42; }",
-        )
-        .unwrap();
+        analyze_str("func main() -> Int32 { while true { break; }; return 42; }").unwrap();
     }
 
     #[test]
@@ -811,10 +798,7 @@ mod tests {
 
     #[test]
     fn ok_i32_max() {
-        analyze_str(
-            "func main() -> Int32 { let x = 2147483647; return x; }",
-        )
-        .unwrap();
+        analyze_str("func main() -> Int32 { let x = 2147483647; return x; }").unwrap();
     }
 
     // --- Phase 4 error cases ---
@@ -860,10 +844,8 @@ mod tests {
 
     #[test]
     fn err_cast_type_mismatch() {
-        let err = analyze_str(
-            "func main() -> Int32 { let x: Int32 = 42 as Int64; return x; }",
-        )
-        .unwrap_err();
+        let err = analyze_str("func main() -> Int32 { let x: Int32 = 42 as Int64; return x; }")
+            .unwrap_err();
         assert!(matches!(err, BengalError::SemanticError { .. }));
     }
 
@@ -887,28 +869,21 @@ mod tests {
 
     #[test]
     fn err_float_to_i32() {
-        let err = analyze_str(
-            "func main() -> Int32 { let x: Int32 = 3.14; return x; }",
-        )
-        .unwrap_err();
+        let err =
+            analyze_str("func main() -> Int32 { let x: Int32 = 3.14; return x; }").unwrap_err();
         assert!(matches!(err, BengalError::SemanticError { .. }));
     }
 
     #[test]
     fn err_integer_out_of_range() {
-        let err = analyze_str(
-            "func main() -> Int32 { let x = 3000000000; return 0; }",
-        )
-        .unwrap_err();
+        let err =
+            analyze_str("func main() -> Int32 { let x = 3000000000; return 0; }").unwrap_err();
         assert!(matches!(err, BengalError::SemanticError { .. }));
     }
 
     #[test]
     fn err_integer_out_of_range_with_cast() {
-        let err = analyze_str(
-            "func main() -> Int32 { return 3000000000 as Int64; }",
-        )
-        .unwrap_err();
+        let err = analyze_str("func main() -> Int32 { return 3000000000 as Int64; }").unwrap_err();
         assert!(matches!(err, BengalError::SemanticError { .. }));
     }
 }
