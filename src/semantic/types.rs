@@ -10,6 +10,7 @@ pub enum Type {
     F64,
     Bool,
     Unit,
+    Struct(String),
 }
 
 impl fmt::Display for Type {
@@ -21,6 +22,7 @@ impl fmt::Display for Type {
             Type::F64 => write!(f, "Float64"),
             Type::Bool => write!(f, "Bool"),
             Type::Unit => write!(f, "()"),
+            Type::Struct(name) => write!(f, "{}", name),
         }
     }
 }
@@ -45,8 +47,6 @@ pub fn resolve_type(annotation: &TypeAnnotation) -> Type {
         TypeAnnotation::F64 => Type::F64,
         TypeAnnotation::Bool => Type::Bool,
         TypeAnnotation::Unit => Type::Unit,
-        TypeAnnotation::Named(name) => {
-            panic!("Named type `{}` not yet supported in resolve_type", name)
-        }
+        TypeAnnotation::Named(name) => Type::Struct(name.clone()),
     }
 }

@@ -1,10 +1,18 @@
 pub mod resolver;
 pub mod types;
 
+use std::collections::{HashMap, HashSet};
+
 use crate::error::{BengalError, Result, Span};
 use crate::parser::ast::*;
-use resolver::{FuncSig, Resolver, VarInfo};
+use resolver::{FuncSig, Resolver, StructInfo, VarInfo};
 use types::{Type, resolve_type};
+
+#[derive(Debug)]
+pub struct SemanticInfo {
+    pub struct_defs: HashMap<String, StructInfo>,
+    pub struct_init_calls: HashSet<NodeId>,
+}
 
 fn sem_err(message: impl Into<String>) -> BengalError {
     BengalError::SemanticError {
@@ -13,13 +21,33 @@ fn sem_err(message: impl Into<String>) -> BengalError {
     }
 }
 
-pub fn analyze(program: &Program) -> Result<()> {
+pub fn analyze(program: &Program) -> Result<SemanticInfo> {
     let mut resolver = Resolver::new();
 
-    // Pass 1: collect all function signatures
+    // Pass 1a: register all struct and function names (for forward reference)
+    for struct_def in &program.structs {
+        if resolver.lookup_func(&struct_def.name).is_some()
+            || resolver.lookup_struct(&struct_def.name).is_some()
+        {
+            return Err(sem_err(format!(
+                "duplicate definition `{}`",
+                struct_def.name
+            )));
+        }
+        resolver.reserve_struct(struct_def.name.clone());
+    }
     for func in &program.functions {
-        let params: Vec<Type> = func.params.iter().map(|p| resolve_type(&p.ty)).collect();
-        let return_type = resolve_type(&func.return_type);
+        if resolver.lookup_struct(&func.name).is_some()
+            || resolver.lookup_func(&func.name).is_some()
+        {
+            return Err(sem_err(format!("duplicate definition `{}`", func.name)));
+        }
+        let params: Vec<Type> = func
+            .params
+            .iter()
+            .map(|p| resolve_type_checked(&p.ty, &resolver))
+            .collect::<Result<Vec<_>>>()?;
+        let return_type = resolve_type_checked(&func.return_type, &resolver)?;
         resolver.define_func(
             func.name.clone(),
             FuncSig {
@@ -27,6 +55,11 @@ pub fn analyze(program: &Program) -> Result<()> {
                 return_type,
             },
         );
+    }
+
+    // Pass 1b: resolve struct member types (all names now registered)
+    for struct_def in &program.structs {
+        resolve_struct_members(struct_def, &mut resolver)?;
     }
 
     // Pass 2: verify main function exists with correct signature
@@ -42,16 +75,125 @@ pub fn analyze(program: &Program) -> Result<()> {
         }
     }
 
-    // Pass 3: analyze each function body
+    // Pass 3: analyze struct member bodies and function bodies
+    for struct_def in &program.structs {
+        analyze_struct_members(struct_def, &mut resolver)?;
+    }
     for func in &program.functions {
         analyze_function(func, &mut resolver)?;
     }
+
+    Ok(SemanticInfo {
+        struct_defs: resolver.take_struct_defs(),
+        struct_init_calls: resolver.take_struct_init_calls(),
+    })
+}
+
+fn resolve_type_checked(ty: &TypeAnnotation, resolver: &Resolver) -> Result<Type> {
+    match ty {
+        TypeAnnotation::Named(name) => {
+            if resolver.lookup_struct(name).is_none() {
+                return Err(sem_err(format!("undefined type `{}`", name)));
+            }
+            Ok(Type::Struct(name.clone()))
+        }
+        other => Ok(resolve_type(other)),
+    }
+}
+
+fn resolve_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Result<()> {
+    let name = &struct_def.name;
+
+    let mut fields: Vec<(String, Type)> = Vec::new();
+    let mut field_index: HashMap<String, usize> = HashMap::new();
+    let mut computed: Vec<resolver::ComputedPropInfo> = Vec::new();
+    let mut computed_index: HashMap<String, usize> = HashMap::new();
+    let mut explicit_init: Option<&StructMember> = None;
+
+    for member in &struct_def.members {
+        match member {
+            StructMember::StoredProperty { name: fname, ty } => {
+                if field_index.contains_key(fname) || computed_index.contains_key(fname) {
+                    return Err(sem_err(format!(
+                        "duplicate field `{}` in struct `{}`",
+                        fname, name
+                    )));
+                }
+                let resolved_ty = resolve_type_checked(ty, resolver)?;
+                let idx = fields.len();
+                fields.push((fname.clone(), resolved_ty));
+                field_index.insert(fname.clone(), idx);
+            }
+            StructMember::ComputedProperty {
+                name: pname, ty, ..
+            } => {
+                if field_index.contains_key(pname) || computed_index.contains_key(pname) {
+                    return Err(sem_err(format!(
+                        "duplicate field `{}` in struct `{}`",
+                        pname, name
+                    )));
+                }
+                let resolved_ty = resolve_type_checked(ty, resolver)?;
+                let has_setter = matches!(
+                    member,
+                    StructMember::ComputedProperty {
+                        setter: Some(_),
+                        ..
+                    }
+                );
+                let idx = computed.len();
+                computed.push(resolver::ComputedPropInfo {
+                    name: pname.clone(),
+                    ty: resolved_ty,
+                    has_setter,
+                });
+                computed_index.insert(pname.clone(), idx);
+            }
+            StructMember::Initializer { .. } => {
+                if explicit_init.is_some() {
+                    return Err(sem_err(format!(
+                        "multiple initializers defined for struct `{}`",
+                        name
+                    )));
+                }
+                explicit_init = Some(member);
+            }
+        }
+    }
+
+    let init = match explicit_init {
+        Some(StructMember::Initializer { params, body }) => {
+            let resolved_params: Vec<(String, Type)> = params
+                .iter()
+                .map(|p| Ok((p.name.clone(), resolve_type_checked(&p.ty, resolver)?)))
+                .collect::<Result<Vec<_>>>()?;
+            resolver::InitializerInfo {
+                params: resolved_params,
+                body: Some(body.clone()),
+            }
+        }
+        _ => {
+            let params = fields.clone();
+            resolver::InitializerInfo { params, body: None }
+        }
+    };
+
+    resolver.define_struct(
+        name.clone(),
+        resolver::StructInfo {
+            fields,
+            field_index,
+            computed,
+            computed_index,
+            init,
+        },
+    );
 
     Ok(())
 }
 
 fn analyze_function(func: &Function, resolver: &mut Resolver) -> Result<()> {
-    let return_type = resolve_type(&func.return_type);
+    let return_type = resolve_type_checked(&func.return_type, resolver)?;
     resolver.current_return_type = Some(return_type.clone());
     resolver.push_scope();
 
@@ -60,7 +202,7 @@ fn analyze_function(func: &Function, resolver: &mut Resolver) -> Result<()> {
         resolver.define_var(
             param.name.clone(),
             VarInfo {
-                ty: resolve_type(&param.ty),
+                ty: resolve_type_checked(&param.ty, resolver)?,
                 mutable: false,
             },
         );
@@ -213,7 +355,7 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
             let val_ty = analyze_expr(value, resolver)?;
             let var_ty = match ty {
                 Some(ann) => {
-                    let declared = resolve_type(ann);
+                    let declared = resolve_type_checked(ann, resolver)?;
                     if val_ty != declared {
                         return Err(sem_err(format!(
                             "type mismatch: expected `{}`, found `{}`",
@@ -236,7 +378,7 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
             let val_ty = analyze_expr(value, resolver)?;
             let var_ty = match ty {
                 Some(ann) => {
-                    let declared = resolve_type(ann);
+                    let declared = resolve_type_checked(ann, resolver)?;
                     if val_ty != declared {
                         return Err(sem_err(format!(
                             "type mismatch: expected `{}`, found `{}`",
@@ -319,8 +461,51 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
                 return Err(sem_err("continue outside of loop"));
             }
         }
-        Stmt::FieldAssign { .. } => {
-            todo!("FieldAssign analysis not yet implemented")
+        Stmt::FieldAssign {
+            object,
+            field,
+            value,
+        } => {
+            let obj_ty = analyze_expr(object, resolver)?;
+            let val_ty = analyze_expr(value, resolver)?;
+            match &obj_ty {
+                Type::Struct(struct_name) => {
+                    let struct_info = resolver
+                        .lookup_struct(struct_name)
+                        .ok_or_else(|| sem_err(format!("undefined struct `{}`", struct_name)))?
+                        .clone();
+                    let field_ty = if let Some(&idx) = struct_info.field_index.get(field.as_str()) {
+                        struct_info.fields[idx].1.clone()
+                    } else if let Some(&idx) = struct_info.computed_index.get(field.as_str()) {
+                        let prop = &struct_info.computed[idx];
+                        if !prop.has_setter {
+                            return Err(sem_err(format!(
+                                "computed property `{}` is read-only (no setter)",
+                                field
+                            )));
+                        }
+                        prop.ty.clone()
+                    } else {
+                        return Err(sem_err(format!(
+                            "struct `{}` has no field `{}`",
+                            struct_name, field
+                        )));
+                    };
+                    if val_ty != field_ty {
+                        return Err(sem_err(format!(
+                            "type mismatch in field assignment: expected `{}`, found `{}`",
+                            field_ty, val_ty
+                        )));
+                    }
+                    check_assignment_target_mutable(object, resolver)?;
+                }
+                _ => {
+                    return Err(sem_err(format!(
+                        "field assignment on non-struct type `{}`",
+                        obj_ty
+                    )));
+                }
+            }
         }
     }
     Ok(())
@@ -385,6 +570,22 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             }
         }
         ExprKind::Call { name, args } => {
+            // Empty-arg call may be a struct init
+            if args.is_empty()
+                && let Some(struct_info) = resolver.lookup_struct(name)
+            {
+                let struct_info = struct_info.clone();
+                if struct_info.init.params.is_empty() {
+                    resolver.record_struct_init_call(expr.id);
+                    return Ok(Type::Struct(name.clone()));
+                } else {
+                    return Err(sem_err(format!(
+                        "struct `{}` initializer expects {} arguments, but 0 were given",
+                        name,
+                        struct_info.init.params.len()
+                    )));
+                }
+            }
             let sig = resolver
                 .lookup_func(name)
                 .ok_or_else(|| sem_err(format!("undefined function `{}`", name)))?
@@ -497,18 +698,71 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             Ok(while_ty)
         }
         ExprKind::Float(_) => Ok(Type::F64),
-        ExprKind::StructInit { .. } => {
-            todo!("StructInit analysis not yet implemented")
+        ExprKind::StructInit { name, args } => {
+            let struct_info = resolver
+                .lookup_struct(name)
+                .ok_or_else(|| sem_err(format!("undefined struct `{}`", name)))?
+                .clone();
+            let init = &struct_info.init;
+            if args.len() != init.params.len() {
+                return Err(sem_err(format!(
+                    "struct `{}` initializer expects {} arguments, but {} were given",
+                    name,
+                    init.params.len(),
+                    args.len()
+                )));
+            }
+            for ((label, arg_expr), (param_name, param_ty)) in args.iter().zip(init.params.iter()) {
+                if label != param_name {
+                    return Err(sem_err(format!(
+                        "expected argument label `{}`, found `{}`",
+                        param_name, label
+                    )));
+                }
+                let arg_ty = analyze_expr(arg_expr, resolver)?;
+                if arg_ty != *param_ty {
+                    return Err(sem_err(format!(
+                        "argument type mismatch: expected `{}`, found `{}`",
+                        param_ty, arg_ty
+                    )));
+                }
+            }
+            Ok(Type::Struct(name.clone()))
         }
-        ExprKind::FieldAccess { .. } => {
-            todo!("FieldAccess analysis not yet implemented")
+        ExprKind::FieldAccess { object, field } => {
+            let obj_ty = analyze_expr(object, resolver)?;
+            match &obj_ty {
+                Type::Struct(struct_name) => {
+                    let struct_info = resolver
+                        .lookup_struct(struct_name)
+                        .ok_or_else(|| sem_err(format!("undefined struct `{}`", struct_name)))?
+                        .clone();
+                    if let Some(&idx) = struct_info.field_index.get(field.as_str()) {
+                        Ok(struct_info.fields[idx].1.clone())
+                    } else if let Some(&idx) = struct_info.computed_index.get(field.as_str()) {
+                        Ok(struct_info.computed[idx].ty.clone())
+                    } else {
+                        Err(sem_err(format!(
+                            "struct `{}` has no field `{}`",
+                            struct_name, field
+                        )))
+                    }
+                }
+                _ => Err(sem_err(format!(
+                    "field access on non-struct type `{}`",
+                    obj_ty
+                ))),
+            }
         }
-        ExprKind::SelfRef => {
-            todo!("SelfRef analysis not yet implemented")
-        }
+        ExprKind::SelfRef => match &resolver.self_context {
+            Some(ctx) => Ok(Type::Struct(ctx.struct_name.clone())),
+            None => Err(sem_err(
+                "`self` can only be used inside struct initializers or computed properties",
+            )),
+        },
         ExprKind::Cast { expr, target_type } => {
             let source_ty = analyze_expr(expr, resolver)?;
-            let target_ty = resolve_type(target_type);
+            let target_ty = resolve_type_checked(target_type, resolver)?;
             if !source_ty.is_numeric() || !target_ty.is_numeric() {
                 return Err(sem_err(format!(
                     "cannot cast `{}` to `{}`",
@@ -520,13 +774,167 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
     }
 }
 
+fn analyze_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Result<()> {
+    use resolver::SelfContext;
+
+    for member in &struct_def.members {
+        match member {
+            StructMember::Initializer { params, body } => {
+                let prev_self = resolver.self_context.clone();
+                resolver.self_context = Some(SelfContext {
+                    struct_name: struct_def.name.clone(),
+                    mutable: true,
+                });
+                let prev_return = resolver.current_return_type.clone();
+                resolver.current_return_type = Some(Type::Unit);
+
+                resolver.push_scope();
+                for param in params {
+                    resolver.define_var(
+                        param.name.clone(),
+                        VarInfo {
+                            ty: resolve_type_checked(&param.ty, resolver)?,
+                            mutable: false,
+                        },
+                    );
+                }
+                for stmt in &body.stmts {
+                    analyze_stmt(stmt, resolver)?;
+                }
+                resolver.pop_scope();
+
+                check_all_fields_initialized(&struct_def.name, body, resolver)?;
+
+                resolver.current_return_type = prev_return;
+                resolver.self_context = prev_self;
+            }
+            StructMember::ComputedProperty {
+                ty, getter, setter, ..
+            } => {
+                let resolved_ty = resolve_type_checked(ty, resolver)?;
+
+                // Analyze getter
+                {
+                    let prev_self = resolver.self_context.clone();
+                    resolver.self_context = Some(SelfContext {
+                        struct_name: struct_def.name.clone(),
+                        mutable: false,
+                    });
+                    let prev_return = resolver.current_return_type.clone();
+                    resolver.current_return_type = Some(resolved_ty.clone());
+
+                    resolver.push_scope();
+                    analyze_getter_block(getter, resolver)?;
+                    resolver.pop_scope();
+
+                    resolver.current_return_type = prev_return;
+                    resolver.self_context = prev_self;
+                }
+
+                // Analyze setter
+                if let Some(setter_block) = setter {
+                    let prev_self = resolver.self_context.clone();
+                    resolver.self_context = Some(SelfContext {
+                        struct_name: struct_def.name.clone(),
+                        mutable: true,
+                    });
+                    let prev_return = resolver.current_return_type.clone();
+                    resolver.current_return_type = Some(Type::Unit);
+
+                    resolver.push_scope();
+                    resolver.define_var(
+                        "newValue".to_string(),
+                        VarInfo {
+                            ty: resolved_ty.clone(),
+                            mutable: false,
+                        },
+                    );
+                    for stmt in &setter_block.stmts {
+                        analyze_stmt(stmt, resolver)?;
+                    }
+                    resolver.pop_scope();
+
+                    resolver.current_return_type = prev_return;
+                    resolver.self_context = prev_self;
+                }
+            }
+            StructMember::StoredProperty { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+fn check_all_fields_initialized(
+    struct_name: &str,
+    body: &Block,
+    resolver: &Resolver,
+) -> Result<()> {
+    let struct_info = resolver
+        .lookup_struct(struct_name)
+        .ok_or_else(|| sem_err(format!("undefined struct `{}`", struct_name)))?
+        .clone();
+
+    let mut initialized: HashSet<String> = HashSet::new();
+    for stmt in &body.stmts {
+        if matches!(stmt, Stmt::Return(_)) {
+            break;
+        }
+        if let Stmt::FieldAssign { object, field, .. } = stmt
+            && matches!(object.kind, ExprKind::SelfRef)
+        {
+            initialized.insert(field.clone());
+        }
+    }
+
+    for (field_name, _) in &struct_info.fields {
+        if !initialized.contains(field_name) {
+            return Err(sem_err(format!(
+                "stored property `{}` not initialized in `{}` initializer",
+                field_name, struct_name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn analyze_getter_block(block: &Block, resolver: &mut Resolver) -> Result<()> {
+    let stmts = &block.stmts;
+    if stmts.is_empty() || !matches!(stmts.last(), Some(Stmt::Return(_))) {
+        return Err(sem_err("getter must end with a `return` statement"));
+    }
+    for stmt in stmts {
+        analyze_stmt(stmt, resolver)?;
+    }
+    Ok(())
+}
+
+fn check_assignment_target_mutable(expr: &Expr, resolver: &Resolver) -> Result<()> {
+    match &expr.kind {
+        ExprKind::Ident(name) => match resolver.lookup_var(name) {
+            Some(info) if !info.mutable => Err(sem_err(format!(
+                "cannot assign to field of immutable variable `{}`",
+                name
+            ))),
+            Some(_) => Ok(()),
+            None => Err(sem_err(format!("undefined variable `{}`", name))),
+        },
+        ExprKind::FieldAccess { object, .. } => check_assignment_target_mutable(object, resolver),
+        ExprKind::SelfRef => match &resolver.self_context {
+            Some(ctx) if ctx.mutable => Ok(()),
+            _ => Err(sem_err("`self` is not mutable in this context")),
+        },
+        _ => Err(sem_err("invalid assignment target")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lexer::tokenize;
     use crate::parser::parse;
 
-    fn analyze_str(input: &str) -> Result<()> {
+    fn analyze_str(input: &str) -> Result<SemanticInfo> {
         let tokens = tokenize(input).unwrap();
         let program = parse(tokens).unwrap();
         analyze(&program)
@@ -896,6 +1304,172 @@ mod tests {
     #[test]
     fn err_integer_out_of_range_with_cast() {
         let err = analyze_str("func main() -> Int32 { return 3000000000 as Int64; }").unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    // --- Struct tests ---
+
+    #[test]
+    fn ok_struct_basic() {
+        analyze_str(
+            "struct Point { var x: Int32; var y: Int32; } func main() -> Int32 { var p = Point(x: 1, y: 2); return p.x; }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ok_struct_field_assign() {
+        analyze_str(
+            "struct Point { var x: Int32; } func main() -> Int32 { var p = Point(x: 1); p.x = 10; return p.x; }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ok_struct_explicit_init() {
+        analyze_str(
+            "struct Foo { var x: Int32; init(val: Int32) { self.x = val; } } func main() -> Int32 { var f = Foo(val: 42); return f.x; }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ok_struct_computed_getter() {
+        analyze_str(
+            "struct Foo { var x: Int32; var double: Int32 { get { return self.x; } }; } func main() -> Int32 { var f = Foo(x: 1); return f.double; }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ok_struct_computed_setter() {
+        analyze_str(
+            "struct Foo { var x: Int32; var bar: Int32 { get { return 0; } set { self.x = newValue; } }; } func main() -> Int32 { var f = Foo(x: 1); f.bar = 10; return f.x; }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ok_struct_empty_init() {
+        analyze_str("struct Empty { } func main() -> Int32 { var e = Empty(); return 0; }")
+            .unwrap();
+    }
+
+    #[test]
+    fn err_undefined_struct() {
+        let err = analyze_str("func main() -> Int32 { var f = Foo(x: 1); return 0; }").unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_duplicate_field() {
+        let err = analyze_str(
+            "struct Foo { var x: Int32; var x: Int32; } func main() -> Int32 { return 0; }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_multiple_init() {
+        let err = analyze_str(
+            "struct Foo { var x: Int32; init(x: Int32) { self.x = x; } init(y: Int32) { self.x = y; } } func main() -> Int32 { return 0; }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_init_arg_label_mismatch() {
+        let err = analyze_str(
+            "struct Point { var x: Int32; var y: Int32; } func main() -> Int32 { var p = Point(a: 1, b: 2); return 0; }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_init_arg_type_mismatch() {
+        let err = analyze_str(
+            "struct Point { var x: Int32; } func main() -> Int32 { var p = Point(x: true); return 0; }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_init_arg_count_mismatch() {
+        let err = analyze_str(
+            "struct Point { var x: Int32; var y: Int32; } func main() -> Int32 { var p = Point(x: 1); return 0; }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_no_such_field() {
+        let err = analyze_str(
+            "struct Point { var x: Int32; } func main() -> Int32 { var p = Point(x: 1); return p.y; }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_field_access_on_non_struct() {
+        let err =
+            analyze_str("func main() -> Int32 { let x: Int32 = 1; return x.y; }").unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_immutable_field_assign() {
+        let err = analyze_str(
+            "struct Point { var x: Int32; } func main() -> Int32 { let p = Point(x: 1); p.x = 10; return 0; }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_readonly_computed_assign() {
+        let err = analyze_str(
+            "struct Foo { var bar: Int32 { get { return 0; } }; } func main() -> Int32 { var f = Foo(); f.bar = 10; return 0; }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_self_outside_struct() {
+        let err = analyze_str("func main() -> Int32 { return self.x; }").unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_duplicate_definition_struct_func() {
+        let err = analyze_str(
+            "struct Foo { var x: Int32; } func Foo() -> Int32 { return 0; } func main() -> Int32 { return 0; }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_memberwise_unavailable_with_explicit_init() {
+        let err = analyze_str(
+            "struct Foo { var x: Int32; init(val: Int32) { self.x = val; } } func main() -> Int32 { var f = Foo(x: 1); return 0; }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+
+    #[test]
+    fn err_init_missing_field_initialization() {
+        let err = analyze_str(
+            "struct Foo { var x: Int32; var y: Int32; init(val: Int32) { self.x = val; } } func main() -> Int32 { return 0; }",
+        )
+        .unwrap_err();
         assert!(matches!(err, BengalError::SemanticError { .. }));
     }
 }

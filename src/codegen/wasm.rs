@@ -645,8 +645,8 @@ mod tests {
     fn compile_and_run(source: &str) -> i32 {
         let tokens = tokenize(source).unwrap();
         let program = parse(tokens).unwrap();
-        semantic::analyze(&program).unwrap();
-        let bir_module = lower_program(&program).unwrap();
+        let sem_info = semantic::analyze(&program).unwrap();
+        let bir_module = lower_program(&program, &sem_info).unwrap();
         let wasm_bytes = compile(&bir_module).unwrap();
 
         let engine = wasmtime::Engine::default();

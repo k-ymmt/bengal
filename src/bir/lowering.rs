@@ -1027,7 +1027,10 @@ fn convert_type(ty: &TypeAnnotation) -> BirType {
     }
 }
 
-pub fn lower_program(program: &Program) -> Result<BirModule> {
+pub fn lower_program(
+    program: &Program,
+    _sem_info: &crate::semantic::SemanticInfo,
+) -> Result<BirModule> {
     // Pre-collect function signatures
     let mut func_sigs = HashMap::new();
     for func in &program.functions {
@@ -1054,8 +1057,8 @@ mod tests {
     fn lower_str(input: &str) -> String {
         let tokens = tokenize(input).unwrap();
         let program = parse(tokens).unwrap();
-        semantic::analyze(&program).unwrap();
-        let module = lower_program(&program).unwrap();
+        let sem_info = semantic::analyze(&program).unwrap();
+        let module = lower_program(&program, &sem_info).unwrap();
         print_module(&module)
     }
 

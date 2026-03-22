@@ -183,8 +183,8 @@ mod tests {
     fn lower_and_optimize(source: &str) -> BirModule {
         let tokens = tokenize(source).unwrap();
         let program = parse(tokens).unwrap();
-        semantic::analyze(&program).unwrap();
-        let mut module = lower_program(&program).unwrap();
+        let sem_info = semantic::analyze(&program).unwrap();
+        let mut module = lower_program(&program, &sem_info).unwrap();
         optimize_module(&mut module);
         module
     }

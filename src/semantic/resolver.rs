@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::types::Type;
 use crate::error::{BengalError, Result, Span};
+use crate::parser::ast::{Block, NodeId};
 
 #[derive(Debug, Clone)]
 pub struct VarInfo {
@@ -15,6 +16,34 @@ pub struct FuncSig {
     pub return_type: Type,
 }
 
+#[derive(Debug, Clone)]
+pub struct StructInfo {
+    pub fields: Vec<(String, Type)>,
+    pub field_index: HashMap<String, usize>,
+    pub computed: Vec<ComputedPropInfo>,
+    pub computed_index: HashMap<String, usize>,
+    pub init: InitializerInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct ComputedPropInfo {
+    pub name: String,
+    pub ty: Type,
+    pub has_setter: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct InitializerInfo {
+    pub params: Vec<(String, Type)>,
+    pub body: Option<Block>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SelfContext {
+    pub struct_name: String,
+    pub mutable: bool,
+}
+
 #[derive(Default)]
 pub struct Resolver {
     scopes: Vec<HashMap<String, VarInfo>>,
@@ -22,6 +51,9 @@ pub struct Resolver {
     pub current_return_type: Option<Type>,
     loop_depth: u32,
     loop_break_types: Vec<Option<Type>>,
+    struct_defs: HashMap<String, StructInfo>,
+    pub self_context: Option<SelfContext>,
+    pub struct_init_calls: HashSet<NodeId>,
 }
 
 impl Resolver {
@@ -58,6 +90,42 @@ impl Resolver {
 
     pub fn lookup_func(&self, name: &str) -> Option<&FuncSig> {
         self.functions.get(name)
+    }
+
+    pub fn define_struct(&mut self, name: String, info: StructInfo) {
+        self.struct_defs.insert(name, info);
+    }
+
+    pub fn lookup_struct(&self, name: &str) -> Option<&StructInfo> {
+        self.struct_defs.get(name)
+    }
+
+    pub fn reserve_struct(&mut self, name: String) {
+        self.struct_defs.insert(
+            name,
+            StructInfo {
+                fields: vec![],
+                field_index: HashMap::new(),
+                computed: vec![],
+                computed_index: HashMap::new(),
+                init: InitializerInfo {
+                    params: vec![],
+                    body: None,
+                },
+            },
+        );
+    }
+
+    pub fn record_struct_init_call(&mut self, id: NodeId) {
+        self.struct_init_calls.insert(id);
+    }
+
+    pub fn take_struct_defs(&mut self) -> HashMap<String, StructInfo> {
+        std::mem::take(&mut self.struct_defs)
+    }
+
+    pub fn take_struct_init_calls(&mut self) -> HashSet<NodeId> {
+        std::mem::take(&mut self.struct_init_calls)
     }
 
     pub fn enter_loop(&mut self) {
