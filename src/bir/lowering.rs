@@ -1296,6 +1296,15 @@ impl Lowering {
         let loop_ctx = self.loop_stack.pop().unwrap();
         let break_ty = loop_ctx.break_ty;
 
+        // Restore mutable var scope to header params.
+        // The body may have reassigned vars (e.g., `a = b` makes a point to b's value).
+        // After the loop, mutable vars should map to their header block parameters,
+        // which hold the correct values at loop exit.
+        for (i, (name, _, _)) in mutable_vars.iter().enumerate() {
+            let (param_val, _) = header_params[i];
+            self.assign_var(name, param_val);
+        }
+
         // Nobreak block
         let nobreak_region = if let Some(nobreak_blk) = nobreak {
             self.start_block(bb_nobreak, vec![]);

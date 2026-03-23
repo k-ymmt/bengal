@@ -930,11 +930,8 @@ fn native_diverging_if() {
 
 // --- Known bug regression tests ---
 
-/// Fibonacci codegen bug: `let next = a + b; a = b; b = next;` pattern
-/// returns 89 instead of 55 for fib(10). See Plan.md "既知の問題" section.
 #[test]
-#[ignore]
-fn fibonacci_known_bug() {
+fn fibonacci() {
     assert_eq!(
         compile_and_run(
             "func fibonacci(n: Int32) -> Int32 { var a: Int32 = 0; var b: Int32 = 1; var i: Int32 = 0; while i < n { let next: Int32 = a + b; a = b; b = next; i = i + 1; }; return a; } func main() -> Int32 { return fibonacci(10); }"
