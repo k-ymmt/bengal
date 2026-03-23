@@ -117,14 +117,14 @@ Adjust the number of phases and sub-steps to match the complexity of the task. S
 
 ### 6. Review the plan
 
-After writing Plan.md, review it yourself:
+After writing Plan.md, review it using an external reviewer in a loop:
 
-- Are all referenced files and functions correct and currently existing in the codebase?
-- Is the phasing order logical — does each phase build on the previous?
-- Are there missing steps or unstated assumptions?
-- Could someone follow this plan and implement it without further clarification?
-
-Fix any issues found during review.
+1. Run `codex e --sandbox read-only --full-auto -o /tmp/codex-plan-review.md '$review-plan-md' >/dev/null 2>&1` via Bash
+    a. Timeout after 10 minutes
+    b. `$review-plan-md` is not environment variable. Do not change.
+2. Read /tmp/codex-plan-review.md to check the review result
+3. If the reviewer reports issues, fix them in Plan.md
+4. Repeat steps 1-3 until the reviewer reports no issues
 
 ## Important rules
 
