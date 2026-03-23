@@ -605,7 +605,6 @@ pub fn compile_to_module<'ctx>(
 }
 
 /// Compile BIR module to native object code bytes.
-#[allow(dead_code)]
 pub fn compile(bir_module: &BirModule) -> Result<Vec<u8>> {
     let context = Context::create();
     let module = compile_to_module(&context, bir_module)?;
@@ -790,5 +789,18 @@ mod tests {
             ),
             5
         );
+    }
+
+    #[test]
+    fn test_object_emit() {
+        let source = "func main() -> Int32 { return 42; }";
+        let tokens = tokenize(source).unwrap();
+        let program = parse(tokens).unwrap();
+        let sem_info = semantic::analyze(&program).unwrap();
+        let mut bir_module = bir::lower_program(&program, &sem_info).unwrap();
+        bir::optimize_module(&mut bir_module);
+
+        let obj_bytes = compile(&bir_module).unwrap();
+        assert!(!obj_bytes.is_empty(), "object output must not be empty");
     }
 }

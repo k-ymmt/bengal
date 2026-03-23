@@ -1,4 +1,4 @@
 pub mod llvm;
-pub mod wasm;
+mod wasm;
 
-pub use wasm::compile;
+pub use llvm::{compile, compile_to_module};
