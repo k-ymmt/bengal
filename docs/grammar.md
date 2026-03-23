@@ -2,7 +2,7 @@
 
 ## Overview
 
-Bengal is an expression-oriented language that compiles to WebAssembly.
+Bengal is an expression-oriented language that compiles to native code via LLVM.
 Phase 4 adds loop control (`break`/`continue`), multiple numeric types (`Int64`, `Float32`, `Float64`), local type inference, `as` casts, `while` expressions with `break` values and `nobreak` blocks, and constant folding optimization.
 
 Key design principles:
