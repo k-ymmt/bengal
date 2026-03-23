@@ -1,14 +1,28 @@
-fn compile_and_run(source: &str) -> i32 {
-    let wasm_bytes = bengal::compile_source(source).unwrap();
+use bengal::bir;
+use bengal::codegen;
+use bengal::lexer::tokenize;
+use bengal::parser::parse;
+use bengal::semantic;
+use inkwell::OptimizationLevel;
+use inkwell::context::Context;
 
-    let engine = wasmtime::Engine::default();
-    let module = wasmtime::Module::new(&engine, &wasm_bytes).unwrap();
-    let mut store = wasmtime::Store::new(&engine, ());
-    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
-    let main = instance
-        .get_typed_func::<(), i32>(&mut store, "main")
+fn compile_and_run(source: &str) -> i32 {
+    let tokens = tokenize(source).unwrap();
+    let program = parse(tokens).unwrap();
+    let sem_info = semantic::analyze(&program).unwrap();
+    let mut bir_module = bir::lower_program(&program, &sem_info).unwrap();
+    bir::optimize_module(&mut bir_module);
+
+    let context = Context::create();
+    let module = codegen::compile_to_module(&context, &bir_module).unwrap();
+    let ee = module
+        .create_jit_execution_engine(OptimizationLevel::None)
         .unwrap();
-    main.call(&mut store, ()).unwrap()
+    let main_fn = unsafe {
+        ee.get_function::<unsafe extern "C" fn() -> i32>("main")
+            .unwrap()
+    };
+    unsafe { main_fn.call() }
 }
 
 #[test]
@@ -748,4 +762,183 @@ fn err_nobreak_in_while_true() {
 #[test]
 fn err_nobreak_type_mismatch() {
     assert!(bengal::compile_source("func main() -> Int32 { var i: Int32 = 0; let x: Int32 = while i < 10 { break 1; } nobreak { yield true; }; return x; }").is_err());
+}
+
+// --- Native object emit path tests ---
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn compile_to_native_and_run(source: &str) -> i32 {
+    let obj_bytes = bengal::compile_source(source).unwrap();
+
+    let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("bengal_test_{}_{}", std::process::id(), id));
+    std::fs::create_dir_all(&dir).unwrap();
+    let obj_path = dir.join("test.o");
+    let exe_path = dir.join("test");
+    std::fs::write(&obj_path, &obj_bytes).unwrap();
+
+    let link = std::process::Command::new("cc")
+        .arg(&obj_path)
+        .arg("-o")
+        .arg(&exe_path)
+        .output()
+        .expect("cc not found - C compiler/linker required for native tests");
+    assert!(
+        link.status.success(),
+        "link failed: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+
+    let run = std::process::Command::new(&exe_path)
+        .output()
+        .expect("failed to execute compiled binary");
+
+    let _ = std::fs::remove_dir_all(&dir);
+
+    match run.status.code() {
+        Some(code) => code,
+        None => panic!(
+            "process terminated by signal, stderr: {}",
+            String::from_utf8_lossy(&run.stderr)
+        ),
+    }
+}
+
+#[test]
+fn native_bare_expression() {
+    assert_eq!(compile_to_native_and_run("42"), 42);
+}
+
+#[test]
+fn native_simple_return() {
+    assert_eq!(
+        compile_to_native_and_run("func main() -> Int32 { return 42; }"),
+        42
+    );
+}
+
+#[test]
+fn native_arithmetic() {
+    assert_eq!(
+        compile_to_native_and_run("func main() -> Int32 { return 2 + 3 * 4; }"),
+        14
+    );
+}
+
+#[test]
+fn native_control_flow() {
+    assert_eq!(
+        compile_to_native_and_run(
+            "func main() -> Int32 { var i: Int32 = 0; while i < 10 { i = i + 1; }; return i; }"
+        ),
+        10
+    );
+}
+
+#[test]
+fn native_function_call() {
+    assert_eq!(
+        compile_to_native_and_run(
+            "func add(a: Int32, b: Int32) -> Int32 { return a + b; } func main() -> Int32 { return add(3, 4); }"
+        ),
+        7
+    );
+}
+
+#[test]
+fn native_if_else() {
+    assert_eq!(
+        compile_to_native_and_run(
+            "func main() -> Int32 { let x: Int32 = if true { yield 1; } else { yield 2; }; return x; }"
+        ),
+        1
+    );
+}
+
+#[test]
+fn native_break_continue() {
+    assert_eq!(
+        compile_to_native_and_run(
+            "func main() -> Int32 { var i: Int32 = 0; var s: Int32 = 0; while i < 5 { i = i + 1; if i == 3 { continue; }; s = s + i; }; return s; }"
+        ),
+        12
+    );
+}
+
+#[test]
+fn native_unit_call() {
+    assert_eq!(
+        compile_to_native_and_run(
+            "func noop() { return; } func main() -> Int32 { noop(); return 42; }"
+        ),
+        42
+    );
+}
+
+#[test]
+fn native_i64_cast() {
+    assert_eq!(
+        compile_to_native_and_run(
+            "func main() -> Int32 { let x: Int64 = 100 as Int64; return x as Int32; }"
+        ),
+        100
+    );
+}
+
+#[test]
+fn native_i64_arithmetic() {
+    assert_eq!(
+        compile_to_native_and_run(
+            "func main() -> Int32 { let x: Int64 = 10 as Int64; let y: Int64 = 20 as Int64; return (x + y) as Int32; }"
+        ),
+        30
+    );
+}
+
+#[test]
+fn native_float() {
+    assert_eq!(
+        compile_to_native_and_run(
+            "func main() -> Int32 { let x: Float64 = 3.5; let y: Float64 = 1.5; return (x + y) as Int32; }"
+        ),
+        5
+    );
+}
+
+#[test]
+fn native_break_with_value() {
+    assert_eq!(
+        compile_to_native_and_run(
+            "func main() -> Int32 { let x: Int32 = while true { break 42; }; return x; }"
+        ),
+        42
+    );
+}
+
+#[test]
+fn native_diverging_if() {
+    assert_eq!(
+        compile_to_native_and_run(
+            "func main() -> Int32 { let x: Int32 = if false { return 99; } else { yield 42; }; return x; }"
+        ),
+        42
+    );
+}
+
+// --- Known bug regression tests ---
+
+/// Fibonacci codegen bug: `let next = a + b; a = b; b = next;` pattern
+/// returns 89 instead of 55 for fib(10). See Plan.md "既知の問題" section.
+#[test]
+#[ignore]
+fn fibonacci_known_bug() {
+    assert_eq!(
+        compile_and_run(
+            "func fibonacci(n: Int32) -> Int32 { var a: Int32 = 0; var b: Int32 = 1; var i: Int32 = 0; while i < n { let next: Int32 = a + b; a = b; b = next; i = i + 1; }; return a; } func main() -> Int32 { return fibonacci(10); }"
+        ),
+        55
+    );
 }

@@ -792,6 +792,26 @@ mod tests {
     }
 
     #[test]
+    fn test_comparison() {
+        assert_eq!(
+            compile_and_run(
+                "func main() -> Int32 { let x: Int32 = if 3 > 2 { yield 1; } else { yield 0; }; return x; }"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn test_i64_arithmetic() {
+        assert_eq!(
+            compile_and_run(
+                "func main() -> Int32 { let x: Int64 = 10 as Int64; let y: Int64 = 20 as Int64; return (x + y) as Int32; }"
+            ),
+            30
+        );
+    }
+
+    #[test]
     fn test_object_emit() {
         let source = "func main() -> Int32 { return 42; }";
         let tokens = tokenize(source).unwrap();
