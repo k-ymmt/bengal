@@ -125,7 +125,10 @@ fn resolve_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
                 field_index.insert(fname.clone(), idx);
             }
             StructMember::ComputedProperty {
-                name: pname, ty, ..
+                name: pname,
+                ty,
+                getter,
+                setter,
             } => {
                 if field_index.contains_key(pname) || computed_index.contains_key(pname) {
                     return Err(sem_err(format!(
@@ -134,18 +137,14 @@ fn resolve_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
                     )));
                 }
                 let resolved_ty = resolve_type_checked(ty, resolver)?;
-                let has_setter = matches!(
-                    member,
-                    StructMember::ComputedProperty {
-                        setter: Some(_),
-                        ..
-                    }
-                );
+                let has_setter = setter.is_some();
                 let idx = computed.len();
                 computed.push(resolver::ComputedPropInfo {
                     name: pname.clone(),
                     ty: resolved_ty,
                     has_setter,
+                    getter: getter.clone(),
+                    setter: setter.clone(),
                 });
                 computed_index.insert(pname.clone(), idx);
             }

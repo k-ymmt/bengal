@@ -30,6 +30,8 @@ pub struct ComputedPropInfo {
     pub name: String,
     pub ty: Type,
     pub has_setter: bool,
+    pub getter: Block,
+    pub setter: Option<Block>,
 }
 
 #[derive(Debug, Clone)]
