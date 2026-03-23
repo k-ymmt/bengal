@@ -541,6 +541,7 @@ impl Lowering {
             }
             Stmt::Break(opt_expr) => {
                 let loop_ctx = self.loop_stack.last().unwrap();
+                let header_bb = loop_ctx.header_bb;
                 let exit_bb = loop_ctx.exit_bb;
                 let mutable_vars = self.collect_mutable_var_values();
                 let args: Vec<(Value, BirType)> =
@@ -555,6 +556,7 @@ impl Lowering {
                     None => None,
                 };
                 self.seal_block(Terminator::BrBreak {
+                    header_bb,
                     exit_bb,
                     args,
                     value,

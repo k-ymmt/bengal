@@ -90,6 +90,7 @@ pub enum Terminator {
     },
     /// break — exit while loop, passing updated mutable vars + optional break value
     BrBreak {
+        header_bb: u32,
         exit_bb: u32,
         args: Vec<(Value, BirType)>,
         value: Option<(Value, BirType)>,

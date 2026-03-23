@@ -202,6 +202,7 @@ fn print_terminator(term: &Terminator, out: &mut String) {
             ));
         }
         Terminator::BrBreak {
+            header_bb,
             exit_bb,
             args,
             value,
@@ -211,12 +212,17 @@ fn print_terminator(term: &Terminator, out: &mut String) {
                 parts.push(format!("{}: {}", format_value(val), format_type(ty)));
             }
             if let Some((val, ty)) = value {
-                parts.push(format!("{}: {}", format_value(val), format_type(ty)));
+                parts.push(format!("value {}: {}", format_value(val), format_type(ty)));
             }
             if parts.is_empty() {
-                out.push_str(&format!("br_break bb{}", exit_bb));
+                out.push_str(&format!("br_break bb{} -> bb{}", header_bb, exit_bb));
             } else {
-                out.push_str(&format!("br_break bb{}({})", exit_bb, parts.join(", ")));
+                out.push_str(&format!(
+                    "br_break bb{} -> bb{}({})",
+                    header_bb,
+                    exit_bb,
+                    parts.join(", ")
+                ));
             }
         }
         Terminator::BrContinue { header_bb, args } => {

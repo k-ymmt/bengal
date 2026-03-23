@@ -289,13 +289,14 @@ fn emit_region(
                     unreachable!("CondBr in CfgRegion::Block should not happen");
                 }
                 Terminator::BrBreak {
+                    header_bb,
                     exit_bb,
                     args,
                     value,
                 } => {
                     let ll = loop_labels.expect("BrBreak outside of loop context");
                     // Copy mutable var values → header_bb param locals (for post-loop reads)
-                    let header_block = find_block(blocks, ll.header_bb);
+                    let header_block = find_block(blocks, *header_bb);
                     emit_br_args(args, header_block, locals, func);
                     // Handle break value → exit_bb block arg local
                     if let Some((val, _)) = value {
