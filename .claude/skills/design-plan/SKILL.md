@@ -62,37 +62,34 @@ Guidelines for phasing:
 
 ### 5. Write Plan.md
 
-**Overwrite** Plan.md with the following structure. Write the plan in **Japanese** (technical terms and code identifiers remain in English).
-
 ```markdown
 # Plan: <concise title>
 
-## 概要
+## Overview
 
 <2-4 sentences explaining what is being done and why>
 
-## 現在の状態
+## Current State
 
 <Describe the relevant current architecture/state — diagrams using ASCII art are encouraged>
 
-## 変更後の状態
+## Changed
 
 <Describe the target state after implementation>
 
-## 影響範囲
+## Impact
+- **Files to modify**: <list>
+- **Files to create**: <list, if any>
+- **Files to delete**: <list, if any>
+- **Unchanged**: <important files explicitly excluded>
 
-- **変更するファイル**: <list>
-- **新規作成するファイル**: <list, if any>
-- **削除するファイル**: <list, if any>
-- **変更なし**: <important files explicitly excluded>
+### Breaking Public API Changes
 
-### 公開 API の破壊的変更
-
-<Table or list of breaking changes, if any. "なし" if none>
+<Table or list of breaking changes, if any. "none" if none>
 
 ---
 
-## フェーズ 1: <phase title>
+## Phase 1: <phase title>
 
 ### 1.1 <sub-step title>
 
@@ -104,20 +101,18 @@ Guidelines for phasing:
 
 ---
 
-## フェーズ 2: <phase title>
+## Phase 2: <phase title>
 
 ...
 
 ---
 
-## フェーズ N: 最終確認
+## Phase N: Definition of Done
 
 - `cargo fmt`
-- `cargo clippy` — 警告なし
-- `cargo test` — 全テストパス
-- 動作確認
-```
-
+- `cargo clippy` — No warning
+- `cargo test` — Pass all tests
+``` 
 Adjust the number of phases and sub-steps to match the complexity of the task. Simple tasks may need only 1-2 phases; complex migrations may need 6+.
 
 ### 6. Review the plan
@@ -134,7 +129,6 @@ Fix any issues found during review.
 ## Important rules
 
 - Always investigate the codebase before writing the plan — never write a plan based on assumptions alone
-- Write Plan.md in Japanese; code snippets and identifiers stay in English
 - Include concrete code-level details (file paths, function signatures, type changes) — not vague descriptions
 - Show before/after code snippets for non-trivial changes
 - Each phase must leave the project in a compilable state
