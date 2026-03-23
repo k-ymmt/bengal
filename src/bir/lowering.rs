@@ -239,7 +239,7 @@ impl Lowering {
     fn collect_mutable_var_values(&self) -> Vec<(String, Value, BirType)> {
         self.mutable_vars
             .iter()
-            .map(|(name, ty)| (name.clone(), self.lookup_var(name), *ty))
+            .map(|(name, ty)| (name.clone(), self.lookup_var(name), ty.clone()))
             .collect()
     }
 
@@ -498,7 +498,7 @@ impl Lowering {
                     self.define_struct_var(name, &struct_name, field_values.clone());
                     for (fname, val) in &field_values {
                         let key = format!("{}.{}", name, fname);
-                        let ty = self.value_types.get(val).copied().unwrap_or(BirType::I32);
+                        let ty = self.value_types.get(val).cloned().unwrap_or(BirType::I32);
                         if !self.mutable_vars.iter().any(|(n, _)| n == &key) {
                             self.mutable_vars.push((key, ty));
                         }
@@ -506,7 +506,7 @@ impl Lowering {
                 } else {
                     let val = self.lower_expr(value);
                     self.define_var(name.clone(), val);
-                    let ty = self.value_types.get(&val).copied().unwrap_or(BirType::I32);
+                    let ty = self.value_types.get(&val).cloned().unwrap_or(BirType::I32);
                     if !self.mutable_vars.iter().any(|(n, _)| n == name) {
                         self.mutable_vars.push((name.clone(), ty));
                     }
@@ -544,13 +544,15 @@ impl Lowering {
                 let header_bb = loop_ctx.header_bb;
                 let exit_bb = loop_ctx.exit_bb;
                 let mutable_vars = self.collect_mutable_var_values();
-                let args: Vec<(Value, BirType)> =
-                    mutable_vars.iter().map(|(_, v, t)| (*v, *t)).collect();
+                let args: Vec<(Value, BirType)> = mutable_vars
+                    .iter()
+                    .map(|(_, v, t)| (*v, t.clone()))
+                    .collect();
                 let value = match opt_expr {
                     Some(expr) => {
                         let val = self.lower_expr(expr);
-                        let ty = self.value_types.get(&val).copied().unwrap_or(BirType::I32);
-                        self.loop_stack.last_mut().unwrap().break_ty = Some(ty);
+                        let ty = self.value_types.get(&val).cloned().unwrap_or(BirType::I32);
+                        self.loop_stack.last_mut().unwrap().break_ty = Some(ty.clone());
                         Some((val, ty))
                     }
                     None => None,
@@ -569,8 +571,10 @@ impl Lowering {
                 let loop_ctx = self.loop_stack.last().unwrap();
                 let header_bb = loop_ctx.header_bb;
                 let mutable_vars = self.collect_mutable_var_values();
-                let args: Vec<(Value, BirType)> =
-                    mutable_vars.iter().map(|(_, v, t)| (*v, *t)).collect();
+                let args: Vec<(Value, BirType)> = mutable_vars
+                    .iter()
+                    .map(|(_, v, t)| (*v, t.clone()))
+                    .collect();
                 self.seal_block(Terminator::BrContinue { header_bb, args });
                 let dummy_bb = self.fresh_block();
                 self.start_block(dummy_bb, vec![]);
@@ -697,14 +701,14 @@ impl Lowering {
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
                     let lhs = self.lower_expr(left);
                     let rhs = self.lower_expr(right);
-                    let ty = self.value_types.get(&lhs).copied().unwrap_or(BirType::I32);
+                    let ty = self.value_types.get(&lhs).cloned().unwrap_or(BirType::I32);
                     let result = self.fresh_value();
                     self.emit(Instruction::BinaryOp {
                         result,
                         op: convert_binop(*op),
                         lhs,
                         rhs,
-                        ty,
+                        ty: ty.clone(),
                     });
                     self.value_types.insert(result, ty);
                     result
@@ -712,7 +716,7 @@ impl Lowering {
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                     let lhs = self.lower_expr(left);
                     let rhs = self.lower_expr(right);
-                    let operand_ty = self.value_types.get(&lhs).copied().unwrap_or(BirType::I32);
+                    let operand_ty = self.value_types.get(&lhs).cloned().unwrap_or(BirType::I32);
                     let result = self.fresh_value();
                     self.emit(Instruction::Compare {
                         result,
@@ -743,13 +747,13 @@ impl Lowering {
                     );
                 }
                 let arg_vals: Vec<Value> = args.iter().map(|a| self.lower_expr(a)).collect();
-                let ty = self.func_sigs.get(name).copied().unwrap_or(BirType::I32);
+                let ty = self.func_sigs.get(name).cloned().unwrap_or(BirType::I32);
                 let result = self.fresh_value();
                 self.emit(Instruction::Call {
                     result,
                     func_name: name.clone(),
                     args: arg_vals,
-                    ty,
+                    ty: ty.clone(),
                 });
                 self.value_types.insert(result, ty);
                 result
@@ -781,7 +785,7 @@ impl Lowering {
                 let from_ty = self
                     .value_types
                     .get(&operand)
-                    .copied()
+                    .cloned()
                     .unwrap_or(BirType::I32);
                 let to_ty = convert_type(target_type);
                 let result = self.fresh_value();
@@ -789,7 +793,7 @@ impl Lowering {
                     result,
                     operand,
                     from_ty,
-                    to_ty,
+                    to_ty: to_ty.clone(),
                 });
                 self.value_types.insert(result, to_ty);
                 result
@@ -1025,10 +1029,10 @@ impl Lowering {
                 // Infer merge type from yield values
                 let merge_type = match (&then_result, &else_result) {
                     (Some(StmtResult::Yield(v)), _) => {
-                        self.value_types.get(v).copied().unwrap_or(BirType::I32)
+                        self.value_types.get(v).cloned().unwrap_or(BirType::I32)
                     }
                     (_, Some(StmtResult::Yield(v))) => {
-                        self.value_types.get(v).copied().unwrap_or(BirType::I32)
+                        self.value_types.get(v).cloned().unwrap_or(BirType::I32)
                     }
                     _ => BirType::I32,
                 };
@@ -1041,7 +1045,7 @@ impl Lowering {
                     Some(StmtResult::Yield(v)) => {
                         self.seal_block(Terminator::Br {
                             target: bb_merge,
-                            args: vec![(*v, merge_type)],
+                            args: vec![(*v, merge_type.clone())],
                         });
                     }
                     Some(StmtResult::Return(v)) => {
@@ -1070,7 +1074,7 @@ impl Lowering {
                     Some(StmtResult::Yield(v)) => {
                         self.seal_block(Terminator::Br {
                             target: bb_merge,
-                            args: vec![(*v, merge_type)],
+                            args: vec![(*v, merge_type.clone())],
                         });
                     }
                     Some(StmtResult::Return(v)) => {
@@ -1184,7 +1188,7 @@ impl Lowering {
         // Seal entry block with Br to header
         let entry_args: Vec<(Value, BirType)> = mutable_vars
             .iter()
-            .map(|(_, val, ty)| (*val, *ty))
+            .map(|(_, val, ty)| (*val, ty.clone()))
             .collect();
         self.seal_block(Terminator::Br {
             target: bb_header,
@@ -1196,7 +1200,7 @@ impl Lowering {
             .iter()
             .map(|(_, _, ty)| {
                 let v = self.fresh_value();
-                (v, *ty)
+                (v, ty.clone())
             })
             .collect();
 
@@ -1204,7 +1208,7 @@ impl Lowering {
 
         // Remap mutable vars to header params
         for (i, (name, _, _)) in mutable_vars.iter().enumerate() {
-            let (param_val, _) = header_params[i];
+            let param_val = header_params[i].0;
             self.assign_var(name, param_val);
         }
 
@@ -1261,7 +1265,7 @@ impl Lowering {
                 // Normal fall-through: emit back-edge to header
                 let updated_args: Vec<(Value, BirType)> = mutable_vars
                     .iter()
-                    .map(|(name, _, ty)| (self.lookup_var(name), *ty))
+                    .map(|(name, _, ty)| (self.lookup_var(name), ty.clone()))
                     .collect();
                 self.seal_block(Terminator::Br {
                     target: bb_header,
@@ -1301,7 +1305,7 @@ impl Lowering {
         // After the loop, mutable vars should map to their header block parameters,
         // which hold the correct values at loop exit.
         for (i, (name, _, _)) in mutable_vars.iter().enumerate() {
-            let (param_val, _) = header_params[i];
+            let param_val = header_params[i].0;
             self.assign_var(name, param_val);
         }
 
@@ -1318,7 +1322,7 @@ impl Lowering {
             match nobreak_result {
                 Some(StmtResult::Yield(v)) => {
                     if break_ty.is_some() {
-                        let ty = self.value_types.get(&v).copied().unwrap_or(BirType::I32);
+                        let ty = self.value_types.get(&v).cloned().unwrap_or(BirType::I32);
                         self.seal_block(Terminator::Br {
                             target: bb_exit,
                             args: vec![(v, ty)],
@@ -1353,7 +1357,7 @@ impl Lowering {
         // Exit block
         let while_result = if let Some(bty) = break_ty {
             let result_val = self.fresh_value();
-            self.start_block(bb_exit, vec![(result_val, bty)]);
+            self.start_block(bb_exit, vec![(result_val, bty.clone())]);
             self.value_types.insert(result_val, bty);
             result_val
         } else {
@@ -1404,6 +1408,55 @@ fn convert_compare_op(op: BinOp) -> BirCompareOp {
     }
 }
 
+fn semantic_type_to_bir(ty: &crate::semantic::types::Type) -> BirType {
+    match ty {
+        crate::semantic::types::Type::I32 => BirType::I32,
+        crate::semantic::types::Type::I64 => BirType::I64,
+        crate::semantic::types::Type::F32 => BirType::F32,
+        crate::semantic::types::Type::F64 => BirType::F64,
+        crate::semantic::types::Type::Bool => BirType::Bool,
+        crate::semantic::types::Type::Unit => BirType::Unit,
+        crate::semantic::types::Type::Struct(name) => BirType::Struct(name.clone()),
+    }
+}
+
+fn check_acyclic_structs(layouts: &HashMap<String, Vec<(String, BirType)>>) -> Result<()> {
+    fn visit(
+        name: &str,
+        layouts: &HashMap<String, Vec<(String, BirType)>>,
+        visiting: &mut HashSet<String>,
+        visited: &mut HashSet<String>,
+    ) -> Result<()> {
+        if visited.contains(name) {
+            return Ok(());
+        }
+        if !visiting.insert(name.to_string()) {
+            return Err(BengalError::LoweringError {
+                message: format!(
+                    "recursive struct `{}` is not supported (infinitely sized)",
+                    name
+                ),
+            });
+        }
+        if let Some(fields) = layouts.get(name) {
+            for (_, ty) in fields {
+                if let BirType::Struct(dep) = ty {
+                    visit(dep, layouts, visiting, visited)?;
+                }
+            }
+        }
+        visiting.remove(name);
+        visited.insert(name.to_string());
+        Ok(())
+    }
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+    for name in layouts.keys() {
+        visit(name, layouts, &mut visiting, &mut visited)?;
+    }
+    Ok(())
+}
+
 fn convert_type(ty: &TypeAnnotation) -> BirType {
     match ty {
         TypeAnnotation::I32 => BirType::I32,
@@ -1447,6 +1500,34 @@ pub fn lower_program(
         func_sigs.insert(func.name.clone(), convert_type(&func.return_type));
     }
 
+    // Build struct_layouts from semantic StructInfo
+    let mut struct_layouts: HashMap<String, Vec<(String, BirType)>> = HashMap::new();
+    for (name, info) in &sem_info.struct_defs {
+        let fields: Vec<(String, BirType)> = info
+            .fields
+            .iter()
+            .map(|(n, t)| (n.clone(), semantic_type_to_bir(t)))
+            .collect();
+        struct_layouts.insert(name.clone(), fields);
+    }
+
+    // Reject Unit-typed stored fields
+    for (name, fields) in &struct_layouts {
+        for (fname, fty) in fields {
+            if matches!(fty, BirType::Unit) {
+                return Err(BengalError::LoweringError {
+                    message: format!(
+                        "struct `{}` has Unit-typed stored field `{}`; Unit fields are not supported",
+                        name, fname
+                    ),
+                });
+            }
+        }
+    }
+
+    // Reject recursive structs (infinitely sized)
+    check_acyclic_structs(&struct_layouts)?;
+
     let sem_info_ref = SemInfoRef {
         struct_defs: sem_info.struct_defs.clone(),
         struct_init_calls: sem_info.struct_init_calls.clone(),
@@ -1462,7 +1543,10 @@ pub fn lower_program(
         return Err(err);
     }
 
-    Ok(BirModule { functions })
+    Ok(BirModule {
+        struct_layouts,
+        functions,
+    })
 }
 
 #[cfg(test)]
@@ -1692,5 +1776,16 @@ bb0:
         let sem_info = semantic::analyze(&program).unwrap();
         let result = lower_program(&program, &sem_info);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn lower_err_recursive_struct() {
+        let tokens =
+            tokenize("struct Node { var next: Node; } func main() -> Int32 { return 0; }").unwrap();
+        let program = parse(tokens).unwrap();
+        let sem_info = semantic::analyze(&program).unwrap();
+        let result = lower_program(&program, &sem_info);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("recursive struct"));
     }
 }

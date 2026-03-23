@@ -8,6 +8,7 @@ fn format_type(ty: &BirType) -> &str {
         BirType::F32 => "Float32",
         BirType::F64 => "Float64",
         BirType::Bool => "Bool",
+        BirType::Struct(name) => name.as_str(),
     }
 }
 
@@ -167,6 +168,55 @@ fn print_instruction(inst: &Instruction, out: &mut String) {
                 format_type(to_ty)
             ));
         }
+        Instruction::StructInit {
+            result,
+            struct_name,
+            fields,
+            ty,
+        } => {
+            let fields_str: Vec<String> = fields
+                .iter()
+                .map(|(name, val)| format!("{}: {}", name, format_value(val)))
+                .collect();
+            out.push_str(&format!(
+                "{} = struct_init @{} {{ {} }} : {}",
+                format_value(result),
+                struct_name,
+                fields_str.join(", "),
+                format_type(ty),
+            ));
+        }
+        Instruction::FieldGet {
+            result,
+            object,
+            field,
+            ty,
+            ..
+        } => {
+            out.push_str(&format!(
+                "{} = field_get {}, \"{}\" : {}",
+                format_value(result),
+                format_value(object),
+                field,
+                format_type(ty),
+            ));
+        }
+        Instruction::FieldSet {
+            result,
+            object,
+            field,
+            value,
+            ty,
+        } => {
+            out.push_str(&format!(
+                "{} = field_set {}, \"{}\", {} : {}",
+                format_value(result),
+                format_value(object),
+                field,
+                format_value(value),
+                format_type(ty),
+            ));
+        }
     }
 }
 
@@ -294,5 +344,84 @@ bb0:
             "func add(a: Int32, b: Int32) -> Int32 { return a + b; } func main() -> Int32 { return add(1, 2); }",
         );
         assert!(output.contains("call @add(%0, %1) : Int32"));
+    }
+
+    #[test]
+    fn format_type_struct() {
+        assert_eq!(format_type(&BirType::Struct("Foo".to_string())), "Foo");
+    }
+
+    #[test]
+    fn print_struct_instructions() {
+        use std::collections::HashMap;
+
+        let module = BirModule {
+            struct_layouts: HashMap::from([(
+                "Point".to_string(),
+                vec![
+                    ("x".to_string(), BirType::I32),
+                    ("y".to_string(), BirType::I32),
+                ],
+            )]),
+            functions: vec![BirFunction {
+                name: "test".to_string(),
+                params: vec![],
+                return_type: BirType::Unit,
+                blocks: vec![BasicBlock {
+                    label: 0,
+                    params: vec![],
+                    instructions: vec![
+                        Instruction::Literal {
+                            result: Value(0),
+                            value: 1,
+                            ty: BirType::I32,
+                        },
+                        Instruction::Literal {
+                            result: Value(1),
+                            value: 2,
+                            ty: BirType::I32,
+                        },
+                        Instruction::StructInit {
+                            result: Value(2),
+                            struct_name: "Point".to_string(),
+                            fields: vec![("x".to_string(), Value(0)), ("y".to_string(), Value(1))],
+                            ty: BirType::Struct("Point".to_string()),
+                        },
+                        Instruction::FieldGet {
+                            result: Value(3),
+                            object: Value(2),
+                            field: "x".to_string(),
+                            object_ty: BirType::Struct("Point".to_string()),
+                            ty: BirType::I32,
+                        },
+                        Instruction::FieldSet {
+                            result: Value(4),
+                            object: Value(2),
+                            field: "x".to_string(),
+                            value: Value(3),
+                            ty: BirType::Struct("Point".to_string()),
+                        },
+                    ],
+                    terminator: Terminator::ReturnVoid,
+                }],
+                body: vec![CfgRegion::Block(0)],
+            }],
+        };
+        let output = print_module(&module);
+        assert!(
+            output.contains(r#"%2 = struct_init @Point { x: %0, y: %1 } : Point"#),
+            "StructInit not found in:\n{}",
+            output
+        );
+        assert!(
+            output.contains(r#"%3 = field_get %2, "x" : Int32"#),
+            "FieldGet not found in:\n{}",
+            output
+        );
+        assert!(
+            output.contains(r#"%4 = field_set %2, "x", %3 : Point"#),
+            "FieldSet not found in:\n{}",
+            output
+        );
     }
 }

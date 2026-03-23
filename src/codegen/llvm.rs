@@ -34,6 +34,7 @@ fn bir_type_to_llvm_type<'ctx>(
         BirType::F64 => Some(context.f64_type().into()),
         BirType::Bool => Some(context.bool_type().into()),
         BirType::Unit => None,
+        BirType::Struct(_) => None, // Phase 3 で本実装に差し替え
     }
 }
 
@@ -42,21 +43,24 @@ fn collect_value_types(func: &BirFunction) -> HashMap<Value, BirType> {
     let mut value_types = HashMap::new();
 
     for (val, ty) in &func.params {
-        value_types.insert(*val, *ty);
+        value_types.insert(*val, ty.clone());
     }
 
     for block in &func.blocks {
         for (val, ty) in &block.params {
-            value_types.insert(*val, *ty);
+            value_types.insert(*val, ty.clone());
         }
         for inst in &block.instructions {
             let (result, ty) = match inst {
-                Instruction::Literal { result, ty, .. } => (*result, *ty),
-                Instruction::BinaryOp { result, ty, .. } => (*result, *ty),
+                Instruction::Literal { result, ty, .. } => (*result, ty.clone()),
+                Instruction::BinaryOp { result, ty, .. } => (*result, ty.clone()),
                 Instruction::Compare { result, .. } => (*result, BirType::Bool),
                 Instruction::Not { result, .. } => (*result, BirType::Bool),
-                Instruction::Cast { result, to_ty, .. } => (*result, *to_ty),
-                Instruction::Call { result, ty, .. } => (*result, *ty),
+                Instruction::Cast { result, to_ty, .. } => (*result, to_ty.clone()),
+                Instruction::Call { result, ty, .. } => (*result, ty.clone()),
+                Instruction::StructInit { result, ty, .. } => (*result, ty.clone()),
+                Instruction::FieldGet { result, ty, .. } => (*result, ty.clone()),
+                Instruction::FieldSet { result, ty, .. } => (*result, ty.clone()),
             };
             value_types.insert(result, ty);
         }
@@ -121,6 +125,7 @@ fn emit_instruction<'ctx>(
                 }
                 BirType::Bool => context.bool_type().const_int(*value as u64, false).into(),
                 BirType::Unit => return Ok(()),
+                BirType::Struct(_) => return Err(codegen_err("cannot create struct literal")),
             };
             builder
                 .build_store(alloca_map[result], llvm_val)
@@ -332,6 +337,14 @@ fn emit_instruction<'ctx>(
                     .build_store(alloca_map[result], ret_val)
                     .map_err(|e| codegen_err(e.to_string()))?;
             }
+        }
+
+        Instruction::StructInit { .. }
+        | Instruction::FieldGet { .. }
+        | Instruction::FieldSet { .. } => {
+            return Err(codegen_err(
+                "struct instructions not yet implemented in codegen",
+            ));
         }
     }
     Ok(())

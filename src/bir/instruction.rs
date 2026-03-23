@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Value(pub u32);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BirType {
     Unit,
     I32,
@@ -9,6 +11,7 @@ pub enum BirType {
     F32,
     F64,
     Bool,
+    Struct(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +71,29 @@ pub enum Instruction {
         operand: Value,
         from_ty: BirType,
         to_ty: BirType,
+    },
+    /// %result = struct_init @StructName { field0: %v0, ... } : Struct
+    StructInit {
+        result: Value,
+        struct_name: String,
+        fields: Vec<(String, Value)>,
+        ty: BirType,
+    },
+    /// %result = field_get %object, "field_name" : FieldType
+    FieldGet {
+        result: Value,
+        object: Value,
+        field: String,
+        object_ty: BirType,
+        ty: BirType,
+    },
+    /// %result = field_set %object, "field_name", %value : StructType
+    FieldSet {
+        result: Value,
+        object: Value,
+        field: String,
+        value: Value,
+        ty: BirType,
     },
 }
 
@@ -154,5 +180,6 @@ pub struct BirFunction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BirModule {
+    pub struct_layouts: HashMap<String, Vec<(String, BirType)>>,
     pub functions: Vec<BirFunction>,
 }

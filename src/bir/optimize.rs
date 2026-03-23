@@ -16,7 +16,7 @@ fn fold_constants(blocks: &mut [BasicBlock]) {
         for inst in &mut block.instructions {
             match inst {
                 Instruction::Literal { result, value, ty } => {
-                    value_map.insert(*result, (*value, *ty));
+                    value_map.insert(*result, (*value, ty.clone()));
                 }
                 Instruction::BinaryOp {
                     result,
@@ -27,13 +27,13 @@ fn fold_constants(blocks: &mut [BasicBlock]) {
                 } => {
                     if let (Some(&(lv, _)), Some(&(rv, _))) =
                         (value_map.get(lhs), value_map.get(rhs))
-                        && let Some(folded) = fold_binop(*op, lv, rv, *ty)
+                        && let Some(folded) = fold_binop(*op, lv, rv, ty.clone())
                     {
-                        value_map.insert(*result, (folded, *ty));
+                        value_map.insert(*result, (folded, ty.clone()));
                         *inst = Instruction::Literal {
                             result: *result,
                             value: folded,
-                            ty: *ty,
+                            ty: ty.clone(),
                         };
                     }
                 }
@@ -46,7 +46,7 @@ fn fold_constants(blocks: &mut [BasicBlock]) {
                 } => {
                     if let (Some(&(lv, _)), Some(&(rv, _))) =
                         (value_map.get(lhs), value_map.get(rhs))
-                        && let Some(folded) = fold_compare(*op, lv, rv, *ty)
+                        && let Some(folded) = fold_compare(*op, lv, rv, ty.clone())
                     {
                         let bool_val = if folded { 1i64 } else { 0i64 };
                         value_map.insert(*result, (bool_val, BirType::Bool));
