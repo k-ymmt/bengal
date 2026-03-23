@@ -1,5 +1,5 @@
 ---
-name: plan
+name: design-plan
 description: Investigate the codebase and write a detailed, phased implementation plan to Plan.md for the given task. Use when the user wants to plan a new feature, refactoring, migration, or any non-trivial implementation work.
 argument-hint: <what to implement>
 disable-model-invocation: true
