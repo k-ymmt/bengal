@@ -13,7 +13,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Compile a .bengal file to .wasm
+    /// Compile a .bengal file to a native executable
     Compile {
         /// Source file path
         file: PathBuf,
@@ -21,9 +21,9 @@ enum Command {
         #[arg(long)]
         emit_bir: bool,
     },
-    /// Evaluate an expression and print the result
+    /// Evaluate a Bengal program and print the result
     Eval {
-        /// Expression to evaluate
+        /// Program or expression to evaluate
         expr: String,
         /// Print BIR text representation
         #[arg(long)]
@@ -44,38 +44,55 @@ fn run() -> miette::Result<()> {
                 println!("{bir_text}");
             }
 
-            let wasm = bengal::compile_source(&source)
+            let obj_bytes = bengal::compile_source(&source)
                 .map_err(|e| Report::new(e.into_diagnostic(&filename, &source)))?;
 
-            let out_path = file.with_extension("wasm");
-            std::fs::write(&out_path, &wasm).map_err(|e| miette::miette!("{e}"))?;
-            eprintln!("Wrote {}", out_path.display());
+            let obj_path = file.with_extension("o");
+            std::fs::write(&obj_path, &obj_bytes).map_err(|e| miette::miette!("{e}"))?;
+
+            let exe_path = file.with_extension("");
+            if exe_path == file {
+                return Err(miette::miette!(
+                    "input file '{}' has no extension; cannot determine output path (use a .bengal extension)",
+                    file.display()
+                ));
+            }
+            let status = std::process::Command::new("cc")
+                .arg(&obj_path)
+                .arg("-o")
+                .arg(&exe_path)
+                .status()
+                .map_err(|e| miette::miette!("{e}"))?;
+            if !status.success() {
+                return Err(miette::miette!("linker failed"));
+            }
+            eprintln!("Wrote {}", exe_path.display());
         }
         Command::Eval { expr, emit_bir } => {
             let source = &expr;
             let filename = "<eval>";
 
+            let (mut bir, bir_text) = bengal::compile_to_bir(source)
+                .map_err(|e| Report::new(e.into_diagnostic(filename, source)))?;
+
             if emit_bir {
-                let (_module, bir_text) = bengal::compile_to_bir(source)
-                    .map_err(|e| Report::new(e.into_diagnostic(filename, source)))?;
                 println!("{bir_text}");
             }
 
-            let wasm = bengal::compile_source(source)
+            bengal::bir::optimize_module(&mut bir);
+
+            let context = inkwell::context::Context::create();
+            let module = bengal::codegen::compile_to_module(&context, &bir)
                 .map_err(|e| Report::new(e.into_diagnostic(filename, source)))?;
 
-            let engine = wasmtime::Engine::default();
-            let module = wasmtime::Module::new(&engine, &wasm)
-                .map_err(|e| miette::miette!("WASM instantiation error: {e}"))?;
-            let mut store = wasmtime::Store::new(&engine, ());
-            let instance = wasmtime::Instance::new(&mut store, &module, &[])
-                .map_err(|e| miette::miette!("WASM instantiation error: {e}"))?;
-            let main_fn = instance
-                .get_typed_func::<(), i32>(&mut store, "main")
-                .map_err(|e| miette::miette!("failed to find main: {e}"))?;
-            let result = main_fn
-                .call(&mut store, ())
-                .map_err(|e| miette::miette!("WASM execution error: {e}"))?;
+            let ee = module
+                .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+                .map_err(|e| miette::miette!("JIT error: {e}"))?;
+            let main_fn = unsafe {
+                ee.get_function::<unsafe extern "C" fn() -> i32>("main")
+                    .map_err(|e| miette::miette!("failed to find main: {e}"))?
+            };
+            let result = unsafe { main_fn.call() };
             println!("{result}");
         }
     }

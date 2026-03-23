@@ -70,6 +70,17 @@ Use the following granularity guidelines:
 - [ ] commit
 ```
 
+### 5. Review Task.md
+
+After writing Task.md, review it using an external reviewer in a loop:
+
+1. Run `codex e --sandbox read-only --full-auto -o /tmp/codex-review.md '$review-task-md' >/dev/null 2>&1` via Bash
+    a. Timeout after 10 minutes
+    b. `$review-task-md` is not environment variable. Do not change.
+2. Read /tmp/codex-review.md to check the review result
+3. If the reviewer reports issues, fix them in Task.md
+4. Repeat steps 1-3 until the reviewer reports no issues
+
 ## Important rules
 
 - Reflect design decisions and caveats documented in Plan.md in each task
