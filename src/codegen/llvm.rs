@@ -1090,6 +1090,26 @@ mod tests {
     }
 
     #[test]
+    fn test_struct_single_field() {
+        assert_eq!(
+            compile_and_run(
+                "struct Wrapper { var val: Int32; } func main() -> Int32 { let w = Wrapper(val: 99); return w.val; }"
+            ),
+            99
+        );
+    }
+
+    #[test]
+    fn test_struct_pass_through_calls() {
+        assert_eq!(
+            compile_and_run(
+                "struct Point { var x: Int32; var y: Int32; } func identity(p: Point) -> Point { return p; } func add_one(p: Point) -> Point { return Point(x: p.x + 1, y: p.y + 1); } func main() -> Int32 { let p = Point(x: 1, y: 2); let q = add_one(identity(p)); return q.x + q.y; }"
+            ),
+            5
+        );
+    }
+
+    #[test]
     fn test_struct_object_emit() {
         let source = "struct Point { var x: Int32; var y: Int32; } func main() -> Int32 { let p = Point(x: 3, y: 4); return p.x + p.y; }";
         let tokens = tokenize(source).unwrap();
