@@ -1,9 +1,9 @@
-# Bengal Language Grammar — Phase 4
+# Bengal Language Grammar — Phase 5
 
 ## Overview
 
 Bengal is an expression-oriented language that compiles to native code via LLVM.
-Phase 4 adds loop control (`break`/`continue`), multiple numeric types (`Int64`, `Float32`, `Float64`), local type inference, `as` casts, `while` expressions with `break` values and `nobreak` blocks, and constant folding optimization.
+Features include loop control (`break`/`continue`), multiple numeric types (`Int64`, `Float32`, `Float64`), local type inference, `as` casts, `while` expressions with `break` values and `nobreak` blocks, constant folding optimization, and structs with stored/computed properties and initializers.
 
 Key design principles:
 
@@ -11,6 +11,7 @@ Key design principles:
 - **Optional type annotations**: Type annotations on `let`/`var` can be omitted when the type can be inferred from the initializer.
 - **Immutable by default**: `let` bindings are immutable, `var` bindings are mutable.
 - **Expression-oriented**: `if`/`else` and `while` are expressions that produce values.
+- **Value-type structs**: Structs are stack-allocated value types with stored properties, computed properties, and custom initializers.
 
 ## Lexical Grammar
 
@@ -28,7 +29,8 @@ letter_or_underscore = "a".."z" | "A".."Z" | "_" ;
 (* Keywords *)
 keyword = "func" | "let" | "var" | "return" | "yield"
         | "true" | "false" | "if" | "else" | "while"
-        | "break" | "continue" | "as" | "nobreak" ;
+        | "break" | "continue" | "as" | "nobreak"
+        | "struct" | "init" | "self" | "get" | "set" ;
 
 (* Arithmetic operators *)
 additive_op       = "+" | "-" ;
@@ -49,6 +51,7 @@ colon     = ":" ;
 semicolon = ";" ;
 comma     = "," ;
 eq        = "=" ;
+dot       = "." ;
 
 (* Delimiters *)
 lparen = "(" ;
@@ -63,27 +66,30 @@ whitespace = " " | "\t" | "\n" | "\r" ;
 ## Syntactic Grammar
 
 ```ebnf
-program    = { function } ;
+program    = { top_level } ;
+top_level  = function | struct_def ;
 
 function   = "func" , identifier , param_list , [ "->" , type ] , block ;
            (* return type defaults to () if omitted *)
 
 param_list = "(" , [ param , { "," , param } ] , ")" ;
 param      = identifier , ":" , type ;
-type       = "Int32" | "Int64" | "Float32" | "Float64" | "Bool" | "Void" | "(" , ")" ;
+type       = "Int32" | "Int64" | "Float32" | "Float64" | "Bool" | "Void" | "(" , ")"
+           | identifier ;   (* named struct type *)
 
 block      = "{" , { statement } , "}" ;
 
-statement  = let_stmt | var_stmt | assign_stmt | return_stmt | yield_stmt
-           | break_stmt | continue_stmt | expr_stmt ;
-let_stmt      = "let" , identifier , [ ":" , type ] , "=" , expression , ";" ;
-var_stmt      = "var" , identifier , [ ":" , type ] , "=" , expression , ";" ;
-assign_stmt   = identifier , "=" , expression , ";" ;
-return_stmt   = "return" , [ expression ] , ";" ;
-yield_stmt    = "yield" , expression , ";" ;
-break_stmt    = "break" , [ expression ] , ";" ;
-continue_stmt = "continue" , ";" ;
-expr_stmt     = expression , ";" ;
+statement  = let_stmt | var_stmt | assign_stmt | field_assign_stmt
+           | return_stmt | yield_stmt | break_stmt | continue_stmt | expr_stmt ;
+let_stmt          = "let" , identifier , [ ":" , type ] , "=" , expression , ";" ;
+var_stmt          = "var" , identifier , [ ":" , type ] , "=" , expression , ";" ;
+assign_stmt       = identifier , "=" , expression , ";" ;
+field_assign_stmt = field_access , "=" , expression , ";" ;
+return_stmt       = "return" , [ expression ] , ";" ;
+yield_stmt        = "yield" , expression , ";" ;
+break_stmt        = "break" , [ expression ] , ";" ;
+continue_stmt     = "continue" , ";" ;
+expr_stmt         = expression , ";" ;
 
 expression       = or_expr ;
 or_expr          = and_expr , { "||" , and_expr } ;
@@ -97,16 +103,40 @@ unary            = "!" , unary | factor ;
 factor           = integer_literal
                  | float_literal
                  | bool_literal
-                 | identifier , "(" , [ expression , { "," , expression } ] , ")"  (* call *)
-                 | identifier                                                       (* variable *)
-                 | "(" , expression , ")"                                           (* grouping *)
-                 | block                                                            (* block expr *)
+                 | identifier , "(" , labeled_args , ")"                            (* struct init *)
+                 | identifier , "(" , [ expression , { "," , expression } ] , ")"   (* call *)
+                 | identifier                                                        (* variable *)
+                 | "self"                                                             (* self ref *)
+                 | "(" , expression , ")"                                            (* grouping *)
+                 | block                                                             (* block expr *)
                  | if_expr
                  | while_expr
                  ;
 
+(* Postfix operators: field access binds tighter than all binary operators *)
+postfix    = factor , { "." , identifier } ;
+           (* field access chains: a.b.c → (a.b).c — left-associative *)
+           (* postfix replaces factor in the precedence chain: unary uses postfix *)
+
+labeled_args = labeled_arg , { "," , labeled_arg } ;
+labeled_arg  = identifier , ":" , expression ;
+
 if_expr    = "if" , expression , block , [ "else" , block ] ;
 while_expr = "while" , expression , block , [ "nobreak" , block ] ;
+
+(* Struct definitions *)
+struct_def = "struct" , identifier , "{" , { struct_member } , "}" ;
+
+struct_member = stored_property | computed_property | initializer ;
+
+stored_property   = "var" , identifier , ":" , type , ";" ;
+
+computed_property = "var" , identifier , ":" , type ,
+                    "{" , getter , [ setter ] , "}" , ";" ;
+getter            = "get" , block ;
+setter            = "set" , block ;
+
+initializer       = "init" , param_list , block ;
 ```
 
 ## Operator Precedence and Associativity
@@ -120,7 +150,8 @@ while_expr = "while" , expression , block , [ "nobreak" , block ] ;
 | 5 | `+` `-` | Left |
 | 6 | `*` `/` | Left |
 | 7 | `as` (postfix cast) | Left |
-| 8 (highest) | `!` (prefix) | Right |
+| 8 | `!` (prefix) | Right |
+| 9 (highest) | `.` (field access) | Left |
 
 ## Type System
 
@@ -132,6 +163,7 @@ while_expr = "while" , expression , block , [ "nobreak" , block ] ;
 | `Int64` | 64-bit signed integer | 4 |
 | `Float32` | 32-bit floating point | 4 |
 | `Float64` | 64-bit floating point | 4 |
+| *StructName* | User-defined struct type (value type) | 5 |
 
 ### Default literal types
 - Integer literals (`42`) default to `Int32`.
@@ -185,6 +217,56 @@ The type of a `while` expression is determined by its `break` statements:
 - `while cond` + non-Unit break + no `nobreak` → compile error (condition-false path has no value).
 - `nobreak` block type must match the break type. It uses `yield` to provide a value.
 
+### Structs
+
+#### Definition
+- Struct names must be unique across all top-level definitions (no duplicate with functions or other structs).
+- A struct body contains stored properties, computed properties, and at most one initializer.
+- Member names must be unique within a struct.
+- Recursive structs (a struct containing a stored field of its own type) are rejected.
+
+#### Stored properties
+- Declared with `var name: Type;`.
+- All stored properties must be initialized in the initializer body via `self.field = value;`.
+
+#### Computed properties
+- Declared with `var name: Type { get { ... } set { ... } };`.
+- Getter is required and must end with a `return` statement.
+- Setter is optional. If absent, the property is read-only (assignment is a compile error).
+- Inside getter, `self` is immutable. Inside setter, `self` is mutable.
+- Setter receives an implicit parameter `newValue` of the property's type.
+
+#### Initializer
+- Declared with `init(params) { ... }`.
+- At most one explicit `init` per struct.
+- Parameters are immutable.
+- All stored properties must be assigned via `self.field = value;` before the initializer returns.
+- If no explicit `init` is provided, a memberwise initializer is auto-generated with parameters matching stored properties in declaration order.
+- When an explicit `init` is defined, the memberwise initializer is unavailable.
+
+#### Struct initialization
+- With memberwise init: `Point(x: 1, y: 2)` — labeled arguments in field declaration order.
+- With explicit init: `Counter(start: 5)` — labeled arguments matching init parameters.
+- Zero-argument init (empty struct or no-param init): `Empty()` — parsed as a call expression, resolved to struct init by semantic analysis.
+- Struct init expressions return a value of the struct's type.
+
+#### Field access
+- `object.field` reads a stored property or invokes a computed property getter.
+- Chains are left-associative: `a.b.c` is `(a.b).c`.
+- The object must be a struct type and the field must exist.
+
+#### Field assignment
+- `object.field = value;` writes a stored property or invokes a computed property setter.
+- The object must be mutable (`var` binding, not `let`).
+- For computed properties, a setter must be defined.
+- Nested field assignment (e.g., `o.inner.x = 10;`) is supported.
+- Nested field assignment on `self` during init (e.g., `self.inner.x = 10;`) is rejected because `self` is not fully materialized during initialization.
+
+#### `self`
+- Can only be used inside an initializer, getter, or setter body.
+- `self` is mutable in initializer and setter contexts, immutable in getter context.
+- During init body, `self` is not materialized as a struct value; fields are accessed as individual variables. Bare `self` usage (e.g., `let s = self;`) and computed property access on `self` are not allowed in init bodies.
+
 ### Operators
 - Arithmetic (`+`, `-`, `*`, `/`): both operands must be the same numeric type. Result is that type.
 - Comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`): both operands must be the same numeric type. Result is `Bool`.
@@ -207,6 +289,8 @@ The type of a `while` expression is determined by its `break` statements:
 
 - **Unary minus**: `-x` negation
 - **String type**: string literals and operations
-- **Arrays/structs**: composite data types
+- **Arrays**: array data type
 - **Closures/first-class functions**
 - **Integer literal suffixes**: `42i64` (use `42 as Int64` instead)
+- **Methods**: functions defined on struct types
+- **Protocols/traits**: shared interfaces across struct types
