@@ -75,38 +75,35 @@ fn find_block(blocks: &[BasicBlock], label: u32) -> &BasicBlock {
     blocks.iter().find(|b| b.label == label).unwrap()
 }
 
-/// Load a BIR Value from its alloca. Returns None if the value is Unit type.
-fn load_value<'ctx>(
+/// Shared context for instruction/terminator emission within a single function.
+struct EmitCtx<'a, 'ctx> {
     context: &'ctx Context,
-    builder: &Builder<'ctx>,
-    val: &Value,
-    alloca_map: &HashMap<Value, PointerValue<'ctx>>,
-    value_types: &HashMap<Value, BirType>,
-    struct_types: &HashMap<String, inkwell::types::StructType<'ctx>>,
-) -> Option<BasicValueEnum<'ctx>> {
-    let ty = value_types.get(val)?;
+    builder: &'a Builder<'ctx>,
+    alloca_map: &'a HashMap<Value, PointerValue<'ctx>>,
+    value_types: &'a HashMap<Value, BirType>,
+    struct_types: &'a HashMap<String, inkwell::types::StructType<'ctx>>,
+}
+
+/// Load a BIR Value from its alloca. Returns None if the value is Unit type.
+fn load_value<'ctx>(ctx: &EmitCtx<'_, 'ctx>, val: &Value) -> Option<BasicValueEnum<'ctx>> {
+    let ty = ctx.value_types.get(val)?;
     if *ty == BirType::Unit {
         return None;
     }
-    let llvm_ty = bir_type_to_llvm_type(context, ty, struct_types)?;
-    let ptr = alloca_map.get(val)?;
+    let llvm_ty = bir_type_to_llvm_type(ctx.context, ty, ctx.struct_types)?;
+    let ptr = ctx.alloca_map.get(val)?;
     Some(
-        builder
+        ctx.builder
             .build_load(llvm_ty, *ptr, &format!("v{}", val.0))
             .unwrap(),
     )
 }
 
 /// Emit a single BIR instruction.
-#[allow(clippy::too_many_arguments)]
 fn emit_instruction<'ctx>(
-    context: &'ctx Context,
-    builder: &Builder<'ctx>,
+    ctx: &EmitCtx<'_, 'ctx>,
     inst: &Instruction,
-    alloca_map: &HashMap<Value, PointerValue<'ctx>>,
-    value_types: &HashMap<Value, BirType>,
     func_map: &HashMap<String, FunctionValue<'ctx>>,
-    struct_types: &HashMap<String, inkwell::types::StructType<'ctx>>,
     bir_module: &BirModule,
 ) -> Result<()> {
     match inst {
@@ -115,25 +112,30 @@ fn emit_instruction<'ctx>(
                 return Ok(());
             }
             let llvm_val: BasicValueEnum = match ty {
-                BirType::I32 => context
+                BirType::I32 => ctx
+                    .context
                     .i32_type()
                     .const_int(*value as u32 as u64, false)
                     .into(),
-                BirType::I64 => context.i64_type().const_int(*value as u64, true).into(),
+                BirType::I64 => ctx.context.i64_type().const_int(*value as u64, true).into(),
                 BirType::F32 => {
                     let f = f32::from_bits(*value as u32);
-                    context.f32_type().const_float(f as f64).into()
+                    ctx.context.f32_type().const_float(f as f64).into()
                 }
                 BirType::F64 => {
                     let f = f64::from_bits(*value as u64);
-                    context.f64_type().const_float(f).into()
+                    ctx.context.f64_type().const_float(f).into()
                 }
-                BirType::Bool => context.bool_type().const_int(*value as u64, false).into(),
+                BirType::Bool => ctx
+                    .context
+                    .bool_type()
+                    .const_int(*value as u64, false)
+                    .into(),
                 BirType::Unit => return Ok(()),
                 BirType::Struct(_) => return Err(codegen_err("cannot create struct literal")),
             };
-            builder
-                .build_store(alloca_map[result], llvm_val)
+            ctx.builder
+                .build_store(ctx.alloca_map[result], llvm_val)
                 .map_err(|e| codegen_err(e.to_string()))?;
         }
 
@@ -144,20 +146,18 @@ fn emit_instruction<'ctx>(
             rhs,
             ty,
         } => {
-            let lhs_val = load_value(context, builder, lhs, alloca_map, value_types, struct_types)
-                .ok_or_else(|| codegen_err("BinaryOp on Unit"))?;
-            let rhs_val = load_value(context, builder, rhs, alloca_map, value_types, struct_types)
-                .ok_or_else(|| codegen_err("BinaryOp on Unit"))?;
+            let lhs_val = load_value(ctx, lhs).ok_or_else(|| codegen_err("BinaryOp on Unit"))?;
+            let rhs_val = load_value(ctx, rhs).ok_or_else(|| codegen_err("BinaryOp on Unit"))?;
 
             let result_val: BasicValueEnum = match ty {
                 BirType::I32 | BirType::I64 => {
                     let l = lhs_val.into_int_value();
                     let r = rhs_val.into_int_value();
                     match op {
-                        BirBinOp::Add => builder.build_int_add(l, r, "add"),
-                        BirBinOp::Sub => builder.build_int_sub(l, r, "sub"),
-                        BirBinOp::Mul => builder.build_int_mul(l, r, "mul"),
-                        BirBinOp::Div => builder.build_int_signed_div(l, r, "div"),
+                        BirBinOp::Add => ctx.builder.build_int_add(l, r, "add"),
+                        BirBinOp::Sub => ctx.builder.build_int_sub(l, r, "sub"),
+                        BirBinOp::Mul => ctx.builder.build_int_mul(l, r, "mul"),
+                        BirBinOp::Div => ctx.builder.build_int_signed_div(l, r, "div"),
                     }
                     .map_err(|e| codegen_err(e.to_string()))?
                     .into()
@@ -166,18 +166,18 @@ fn emit_instruction<'ctx>(
                     let l = lhs_val.into_float_value();
                     let r = rhs_val.into_float_value();
                     match op {
-                        BirBinOp::Add => builder.build_float_add(l, r, "fadd"),
-                        BirBinOp::Sub => builder.build_float_sub(l, r, "fsub"),
-                        BirBinOp::Mul => builder.build_float_mul(l, r, "fmul"),
-                        BirBinOp::Div => builder.build_float_div(l, r, "fdiv"),
+                        BirBinOp::Add => ctx.builder.build_float_add(l, r, "fadd"),
+                        BirBinOp::Sub => ctx.builder.build_float_sub(l, r, "fsub"),
+                        BirBinOp::Mul => ctx.builder.build_float_mul(l, r, "fmul"),
+                        BirBinOp::Div => ctx.builder.build_float_div(l, r, "fdiv"),
                     }
                     .map_err(|e| codegen_err(e.to_string()))?
                     .into()
                 }
                 _ => return Err(codegen_err(format!("unsupported BinaryOp type: {:?}", ty))),
             };
-            builder
-                .build_store(alloca_map[result], result_val)
+            ctx.builder
+                .build_store(ctx.alloca_map[result], result_val)
                 .map_err(|e| codegen_err(e.to_string()))?;
         }
 
@@ -188,10 +188,8 @@ fn emit_instruction<'ctx>(
             rhs,
             ty,
         } => {
-            let lhs_val = load_value(context, builder, lhs, alloca_map, value_types, struct_types)
-                .ok_or_else(|| codegen_err("Compare on Unit"))?;
-            let rhs_val = load_value(context, builder, rhs, alloca_map, value_types, struct_types)
-                .ok_or_else(|| codegen_err("Compare on Unit"))?;
+            let lhs_val = load_value(ctx, lhs).ok_or_else(|| codegen_err("Compare on Unit"))?;
+            let rhs_val = load_value(ctx, rhs).ok_or_else(|| codegen_err("Compare on Unit"))?;
 
             let cmp_val: BasicValueEnum = match ty {
                 BirType::I32 | BirType::I64 | BirType::Bool => {
@@ -205,7 +203,7 @@ fn emit_instruction<'ctx>(
                         BirCompareOp::Le => IntPredicate::SLE,
                         BirCompareOp::Ge => IntPredicate::SGE,
                     };
-                    builder
+                    ctx.builder
                         .build_int_compare(pred, l, r, "cmp")
                         .map_err(|e| codegen_err(e.to_string()))?
                         .into()
@@ -221,34 +219,27 @@ fn emit_instruction<'ctx>(
                         BirCompareOp::Le => FloatPredicate::OLE,
                         BirCompareOp::Ge => FloatPredicate::OGE,
                     };
-                    builder
+                    ctx.builder
                         .build_float_compare(pred, l, r, "fcmp")
                         .map_err(|e| codegen_err(e.to_string()))?
                         .into()
                 }
                 _ => return Err(codegen_err(format!("unsupported Compare type: {:?}", ty))),
             };
-            builder
-                .build_store(alloca_map[result], cmp_val)
+            ctx.builder
+                .build_store(ctx.alloca_map[result], cmp_val)
                 .map_err(|e| codegen_err(e.to_string()))?;
         }
 
         Instruction::Not { result, operand } => {
-            let val = load_value(
-                context,
-                builder,
-                operand,
-                alloca_map,
-                value_types,
-                struct_types,
-            )
-            .ok_or_else(|| codegen_err("Not on Unit"))?;
-            let zero = context.bool_type().const_zero();
-            let not_val = builder
+            let val = load_value(ctx, operand).ok_or_else(|| codegen_err("Not on Unit"))?;
+            let zero = ctx.context.bool_type().const_zero();
+            let not_val = ctx
+                .builder
                 .build_int_compare(IntPredicate::EQ, val.into_int_value(), zero, "not")
                 .map_err(|e| codegen_err(e.to_string()))?;
-            builder
-                .build_store(alloca_map[result], not_val)
+            ctx.builder
+                .build_store(ctx.alloca_map[result], not_val)
                 .map_err(|e| codegen_err(e.to_string()))?;
         }
 
@@ -259,42 +250,29 @@ fn emit_instruction<'ctx>(
             to_ty,
         } => {
             if from_ty == to_ty {
-                let val = load_value(
-                    context,
-                    builder,
-                    operand,
-                    alloca_map,
-                    value_types,
-                    struct_types,
-                )
-                .ok_or_else(|| codegen_err("Cast on Unit"))?;
-                builder
-                    .build_store(alloca_map[result], val)
+                let val = load_value(ctx, operand).ok_or_else(|| codegen_err("Cast on Unit"))?;
+                ctx.builder
+                    .build_store(ctx.alloca_map[result], val)
                     .map_err(|e| codegen_err(e.to_string()))?;
                 return Ok(());
             }
-            let val = load_value(
-                context,
-                builder,
-                operand,
-                alloca_map,
-                value_types,
-                struct_types,
-            )
-            .ok_or_else(|| codegen_err("Cast on Unit"))?;
-            let dest_ty = bir_type_to_llvm_type(context, to_ty, struct_types)
+            let val = load_value(ctx, operand).ok_or_else(|| codegen_err("Cast on Unit"))?;
+            let dest_ty = bir_type_to_llvm_type(ctx.context, to_ty, ctx.struct_types)
                 .ok_or_else(|| codegen_err("Cast to Unit"))?;
 
             let cast_val: BasicValueEnum = match (from_ty, to_ty) {
-                (BirType::I32, BirType::I64) => builder
-                    .build_int_s_extend(val.into_int_value(), context.i64_type(), "sext")
+                (BirType::I32, BirType::I64) => ctx
+                    .builder
+                    .build_int_s_extend(val.into_int_value(), ctx.context.i64_type(), "sext")
                     .map_err(|e| codegen_err(e.to_string()))?
                     .into(),
-                (BirType::I64, BirType::I32) => builder
-                    .build_int_truncate(val.into_int_value(), context.i32_type(), "trunc")
+                (BirType::I64, BirType::I32) => ctx
+                    .builder
+                    .build_int_truncate(val.into_int_value(), ctx.context.i32_type(), "trunc")
                     .map_err(|e| codegen_err(e.to_string()))?
                     .into(),
-                (BirType::I32 | BirType::I64, BirType::F32 | BirType::F64) => builder
+                (BirType::I32 | BirType::I64, BirType::F32 | BirType::F64) => ctx
+                    .builder
                     .build_signed_int_to_float(
                         val.into_int_value(),
                         dest_ty.into_float_type(),
@@ -302,7 +280,8 @@ fn emit_instruction<'ctx>(
                     )
                     .map_err(|e| codegen_err(e.to_string()))?
                     .into(),
-                (BirType::F32 | BirType::F64, BirType::I32 | BirType::I64) => builder
+                (BirType::F32 | BirType::F64, BirType::I32 | BirType::I64) => ctx
+                    .builder
                     .build_float_to_signed_int(
                         val.into_float_value(),
                         dest_ty.into_int_type(),
@@ -310,15 +289,18 @@ fn emit_instruction<'ctx>(
                     )
                     .map_err(|e| codegen_err(e.to_string()))?
                     .into(),
-                (BirType::F32, BirType::F64) => builder
-                    .build_float_ext(val.into_float_value(), context.f64_type(), "fpext")
+                (BirType::F32, BirType::F64) => ctx
+                    .builder
+                    .build_float_ext(val.into_float_value(), ctx.context.f64_type(), "fpext")
                     .map_err(|e| codegen_err(e.to_string()))?
                     .into(),
-                (BirType::F64, BirType::F32) => builder
-                    .build_float_trunc(val.into_float_value(), context.f32_type(), "fptrunc")
+                (BirType::F64, BirType::F32) => ctx
+                    .builder
+                    .build_float_trunc(val.into_float_value(), ctx.context.f32_type(), "fptrunc")
                     .map_err(|e| codegen_err(e.to_string()))?
                     .into(),
-                (BirType::Bool, BirType::I32 | BirType::I64) => builder
+                (BirType::Bool, BirType::I32 | BirType::I64) => ctx
+                    .builder
                     .build_int_z_extend(val.into_int_value(), dest_ty.into_int_type(), "zext")
                     .map_err(|e| codegen_err(e.to_string()))?
                     .into(),
@@ -329,8 +311,8 @@ fn emit_instruction<'ctx>(
                     )));
                 }
             };
-            builder
-                .build_store(alloca_map[result], cast_val)
+            ctx.builder
+                .build_store(ctx.alloca_map[result], cast_val)
                 .map_err(|e| codegen_err(e.to_string()))?;
         }
 
@@ -345,24 +327,25 @@ fn emit_instruction<'ctx>(
                 .ok_or_else(|| codegen_err(format!("unknown function: {}", func_name)))?;
             let mut call_args: Vec<BasicValueEnum> = Vec::new();
             for arg in args {
-                let arg_ty = value_types.get(arg);
+                let arg_ty = ctx.value_types.get(arg);
                 if arg_ty == Some(&BirType::Unit) || arg_ty.is_none() {
                     continue;
                 }
-                let v = load_value(context, builder, arg, alloca_map, value_types, struct_types)
+                let v = load_value(ctx, arg)
                     .ok_or_else(|| codegen_err("Call: failed to load non-Unit argument"))?;
                 call_args.push(v);
             }
             let args_meta: Vec<inkwell::values::BasicMetadataValueEnum> =
                 call_args.iter().map(|v| (*v).into()).collect();
-            let call_site = builder
+            let call_site = ctx
+                .builder
                 .build_call(*callee, &args_meta, "call")
                 .map_err(|e| codegen_err(e.to_string()))?;
             if *ty != BirType::Unit {
                 match call_site.try_as_basic_value() {
                     inkwell::values::ValueKind::Basic(ret_val) => {
-                        builder
-                            .build_store(alloca_map[result], ret_val)
+                        ctx.builder
+                            .build_store(ctx.alloca_map[result], ret_val)
                             .map_err(|e| codegen_err(e.to_string()))?;
                     }
                     _ => {
@@ -380,7 +363,8 @@ fn emit_instruction<'ctx>(
             fields,
             ..
         } => {
-            let llvm_struct_ty = struct_types
+            let llvm_struct_ty = ctx
+                .struct_types
                 .get(struct_name.as_str())
                 .ok_or_else(|| codegen_err(format!("unknown struct: {}", struct_name)))?;
             let layout = bir_module
@@ -398,21 +382,15 @@ fn emit_instruction<'ctx>(
                             field_name, struct_name
                         ))
                     })?;
-                let val = load_value(
-                    context,
-                    builder,
-                    field_val,
-                    alloca_map,
-                    value_types,
-                    struct_types,
-                )
-                .ok_or_else(|| codegen_err("StructInit: failed to load field value"))?;
-                agg = builder
+                let val = load_value(ctx, field_val)
+                    .ok_or_else(|| codegen_err("StructInit: failed to load field value"))?;
+                agg = ctx
+                    .builder
                     .build_insert_value(agg, val, field_idx as u32, "insert")
                     .map_err(|e| codegen_err(e.to_string()))?;
             }
-            builder
-                .build_store(alloca_map[result], agg.into_struct_value())
+            ctx.builder
+                .build_store(ctx.alloca_map[result], agg.into_struct_value())
                 .map_err(|e| codegen_err(e.to_string()))?;
         }
 
@@ -434,20 +412,14 @@ fn emit_instruction<'ctx>(
             let field_idx = layout.iter().position(|(n, _)| n == field).ok_or_else(|| {
                 codegen_err(format!("unknown field {} in struct {}", field, struct_name))
             })?;
-            let struct_val = load_value(
-                context,
-                builder,
-                object,
-                alloca_map,
-                value_types,
-                struct_types,
-            )
-            .ok_or_else(|| codegen_err("FieldGet: failed to load struct value"))?;
-            let field_val = builder
+            let struct_val = load_value(ctx, object)
+                .ok_or_else(|| codegen_err("FieldGet: failed to load struct value"))?;
+            let field_val = ctx
+                .builder
                 .build_extract_value(struct_val.into_struct_value(), field_idx as u32, "field")
                 .map_err(|e| codegen_err(e.to_string()))?;
-            builder
-                .build_store(alloca_map[result], field_val)
+            ctx.builder
+                .build_store(ctx.alloca_map[result], field_val)
                 .map_err(|e| codegen_err(e.to_string()))?;
         }
 
@@ -469,25 +441,12 @@ fn emit_instruction<'ctx>(
             let field_idx = layout.iter().position(|(n, _)| n == field).ok_or_else(|| {
                 codegen_err(format!("unknown field {} in struct {}", field, struct_name))
             })?;
-            let struct_val = load_value(
-                context,
-                builder,
-                object,
-                alloca_map,
-                value_types,
-                struct_types,
-            )
-            .ok_or_else(|| codegen_err("FieldSet: failed to load struct value"))?;
-            let new_field_val = load_value(
-                context,
-                builder,
-                value,
-                alloca_map,
-                value_types,
-                struct_types,
-            )
-            .ok_or_else(|| codegen_err("FieldSet: failed to load new field value"))?;
-            let updated = builder
+            let struct_val = load_value(ctx, object)
+                .ok_or_else(|| codegen_err("FieldSet: failed to load struct value"))?;
+            let new_field_val = load_value(ctx, value)
+                .ok_or_else(|| codegen_err("FieldSet: failed to load new field value"))?;
+            let updated = ctx
+                .builder
                 .build_insert_value(
                     struct_val.into_struct_value(),
                     new_field_val,
@@ -495,8 +454,8 @@ fn emit_instruction<'ctx>(
                     "update",
                 )
                 .map_err(|e| codegen_err(e.to_string()))?;
-            builder
-                .build_store(alloca_map[result], updated.into_struct_value())
+            ctx.builder
+                .build_store(ctx.alloca_map[result], updated.into_struct_value())
                 .map_err(|e| codegen_err(e.to_string()))?;
         }
     }
@@ -505,75 +464,57 @@ fn emit_instruction<'ctx>(
 
 /// Store branch args to target block params' allocas.
 fn store_br_args<'ctx>(
-    context: &'ctx Context,
-    builder: &Builder<'ctx>,
+    ctx: &EmitCtx<'_, 'ctx>,
     args: &[(Value, BirType)],
     target_params: &[(Value, BirType)],
-    alloca_map: &HashMap<Value, PointerValue<'ctx>>,
-    value_types: &HashMap<Value, BirType>,
-    struct_types: &HashMap<String, inkwell::types::StructType<'ctx>>,
 ) -> Result<()> {
     for (i, (val, ty)) in args.iter().enumerate() {
         if *ty == BirType::Unit {
             continue;
         }
-        let loaded = load_value(context, builder, val, alloca_map, value_types, struct_types)
+        let loaded = load_value(ctx, val)
             .ok_or_else(|| codegen_err("store_br_args: failed to load value"))?;
         let target_val = &target_params[i].0;
-        builder
-            .build_store(alloca_map[target_val], loaded)
+        ctx.builder
+            .build_store(ctx.alloca_map[target_val], loaded)
             .map_err(|e| codegen_err(e.to_string()))?;
     }
     Ok(())
 }
 
 /// Emit a BIR terminator.
-#[allow(clippy::too_many_arguments)]
 fn emit_terminator<'ctx>(
-    context: &'ctx Context,
-    builder: &Builder<'ctx>,
+    ctx: &EmitCtx<'_, 'ctx>,
     terminator: &Terminator,
-    alloca_map: &HashMap<Value, PointerValue<'ctx>>,
     bb_map: &HashMap<u32, LlvmBasicBlock<'ctx>>,
     bir_blocks: &[BasicBlock],
-    value_types: &HashMap<Value, BirType>,
-    struct_types: &HashMap<String, inkwell::types::StructType<'ctx>>,
 ) -> Result<()> {
     match terminator {
         Terminator::Return(val) => {
-            let ty = value_types.get(val);
+            let ty = ctx.value_types.get(val);
             if ty == Some(&BirType::Unit) || ty.is_none() {
-                builder
+                ctx.builder
                     .build_return(None)
                     .map_err(|e| codegen_err(e.to_string()))?;
             } else {
-                let loaded =
-                    load_value(context, builder, val, alloca_map, value_types, struct_types)
-                        .ok_or_else(|| codegen_err("Return: failed to load value"))?;
-                builder
+                let loaded = load_value(ctx, val)
+                    .ok_or_else(|| codegen_err("Return: failed to load value"))?;
+                ctx.builder
                     .build_return(Some(&loaded))
                     .map_err(|e| codegen_err(e.to_string()))?;
             }
         }
 
         Terminator::ReturnVoid => {
-            builder
+            ctx.builder
                 .build_return(None)
                 .map_err(|e| codegen_err(e.to_string()))?;
         }
 
         Terminator::Br { target, args } => {
             let target_block = find_block(bir_blocks, *target);
-            store_br_args(
-                context,
-                builder,
-                args,
-                &target_block.params,
-                alloca_map,
-                value_types,
-                struct_types,
-            )?;
-            builder
+            store_br_args(ctx, args, &target_block.params)?;
+            ctx.builder
                 .build_unconditional_branch(bb_map[target])
                 .map_err(|e| codegen_err(e.to_string()))?;
         }
@@ -583,16 +524,9 @@ fn emit_terminator<'ctx>(
             then_bb,
             else_bb,
         } => {
-            let cond_val = load_value(
-                context,
-                builder,
-                cond,
-                alloca_map,
-                value_types,
-                struct_types,
-            )
-            .ok_or_else(|| codegen_err("CondBr: failed to load condition"))?;
-            builder
+            let cond_val = load_value(ctx, cond)
+                .ok_or_else(|| codegen_err("CondBr: failed to load condition"))?;
+            ctx.builder
                 .build_conditional_branch(
                     cond_val.into_int_value(),
                     bb_map[then_bb],
@@ -607,49 +541,30 @@ fn emit_terminator<'ctx>(
             args,
             value,
         } => {
-            // Store mutable var args to header block params
             let header_block = find_block(bir_blocks, *header_bb);
-            store_br_args(
-                context,
-                builder,
-                args,
-                &header_block.params,
-                alloca_map,
-                value_types,
-                struct_types,
-            )?;
-            // Store break value to exit block params
+            store_br_args(ctx, args, &header_block.params)?;
             if let Some((val, ty)) = value
                 && *ty != BirType::Unit
             {
                 let exit_block = find_block(bir_blocks, *exit_bb);
                 if !exit_block.params.is_empty() {
-                    let loaded =
-                        load_value(context, builder, val, alloca_map, value_types, struct_types)
-                            .ok_or_else(|| codegen_err("BrBreak: failed to load break value"))?;
+                    let loaded = load_value(ctx, val)
+                        .ok_or_else(|| codegen_err("BrBreak: failed to load break value"))?;
                     let exit_param = &exit_block.params[0].0;
-                    builder
-                        .build_store(alloca_map[exit_param], loaded)
+                    ctx.builder
+                        .build_store(ctx.alloca_map[exit_param], loaded)
                         .map_err(|e| codegen_err(e.to_string()))?;
                 }
             }
-            builder
+            ctx.builder
                 .build_unconditional_branch(bb_map[exit_bb])
                 .map_err(|e| codegen_err(e.to_string()))?;
         }
 
         Terminator::BrContinue { header_bb, args } => {
             let header_block = find_block(bir_blocks, *header_bb);
-            store_br_args(
-                context,
-                builder,
-                args,
-                &header_block.params,
-                alloca_map,
-                value_types,
-                struct_types,
-            )?;
-            builder
+            store_br_args(ctx, args, &header_block.params)?;
+            ctx.builder
                 .build_unconditional_branch(bb_map[header_bb])
                 .map_err(|e| codegen_err(e.to_string()))?;
         }
@@ -707,33 +622,23 @@ fn compile_function<'ctx>(
     }
 
     // Pass 3: Emit instructions and terminators for each block
+    let ctx = EmitCtx {
+        context,
+        builder,
+        alloca_map: &alloca_map,
+        value_types: &value_types,
+        struct_types,
+    };
+
     for bir_block in &bir_func.blocks {
         let llvm_bb = bb_map[&bir_block.label];
-        builder.position_at_end(llvm_bb);
+        ctx.builder.position_at_end(llvm_bb);
 
         for inst in &bir_block.instructions {
-            emit_instruction(
-                context,
-                builder,
-                inst,
-                &alloca_map,
-                &value_types,
-                func_map,
-                struct_types,
-                bir_module,
-            )?;
+            emit_instruction(&ctx, inst, func_map, bir_module)?;
         }
 
-        emit_terminator(
-            context,
-            builder,
-            &bir_block.terminator,
-            &alloca_map,
-            &bb_map,
-            &bir_func.blocks,
-            &value_types,
-            struct_types,
-        )?;
+        emit_terminator(&ctx, &bir_block.terminator, &bb_map, &bir_func.blocks)?;
     }
 
     Ok(())
