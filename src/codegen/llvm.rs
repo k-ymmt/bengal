@@ -26,6 +26,7 @@ fn codegen_err(msg: impl Into<String>) -> BengalError {
 fn bir_type_to_llvm_type<'ctx>(
     context: &'ctx Context,
     ty: &BirType,
+    struct_types: &HashMap<String, inkwell::types::StructType<'ctx>>,
 ) -> Option<BasicTypeEnum<'ctx>> {
     match ty {
         BirType::I32 => Some(context.i32_type().into()),
@@ -34,7 +35,7 @@ fn bir_type_to_llvm_type<'ctx>(
         BirType::F64 => Some(context.f64_type().into()),
         BirType::Bool => Some(context.bool_type().into()),
         BirType::Unit => None,
-        BirType::Struct(_) => None, // Phase 3 で本実装に差し替え
+        BirType::Struct(name) => Some(struct_types.get(name)?.as_basic_type_enum()),
     }
 }
 
@@ -81,12 +82,13 @@ fn load_value<'ctx>(
     val: &Value,
     alloca_map: &HashMap<Value, PointerValue<'ctx>>,
     value_types: &HashMap<Value, BirType>,
+    struct_types: &HashMap<String, inkwell::types::StructType<'ctx>>,
 ) -> Option<BasicValueEnum<'ctx>> {
     let ty = value_types.get(val)?;
     if *ty == BirType::Unit {
         return None;
     }
-    let llvm_ty = bir_type_to_llvm_type(context, ty)?;
+    let llvm_ty = bir_type_to_llvm_type(context, ty, struct_types)?;
     let ptr = alloca_map.get(val)?;
     Some(
         builder
@@ -96,6 +98,7 @@ fn load_value<'ctx>(
 }
 
 /// Emit a single BIR instruction.
+#[allow(clippy::too_many_arguments)]
 fn emit_instruction<'ctx>(
     context: &'ctx Context,
     builder: &Builder<'ctx>,
@@ -103,6 +106,8 @@ fn emit_instruction<'ctx>(
     alloca_map: &HashMap<Value, PointerValue<'ctx>>,
     value_types: &HashMap<Value, BirType>,
     func_map: &HashMap<String, FunctionValue<'ctx>>,
+    struct_types: &HashMap<String, inkwell::types::StructType<'ctx>>,
+    bir_module: &BirModule,
 ) -> Result<()> {
     match inst {
         Instruction::Literal { result, value, ty } => {
@@ -139,9 +144,9 @@ fn emit_instruction<'ctx>(
             rhs,
             ty,
         } => {
-            let lhs_val = load_value(context, builder, lhs, alloca_map, value_types)
+            let lhs_val = load_value(context, builder, lhs, alloca_map, value_types, struct_types)
                 .ok_or_else(|| codegen_err("BinaryOp on Unit"))?;
-            let rhs_val = load_value(context, builder, rhs, alloca_map, value_types)
+            let rhs_val = load_value(context, builder, rhs, alloca_map, value_types, struct_types)
                 .ok_or_else(|| codegen_err("BinaryOp on Unit"))?;
 
             let result_val: BasicValueEnum = match ty {
@@ -183,9 +188,9 @@ fn emit_instruction<'ctx>(
             rhs,
             ty,
         } => {
-            let lhs_val = load_value(context, builder, lhs, alloca_map, value_types)
+            let lhs_val = load_value(context, builder, lhs, alloca_map, value_types, struct_types)
                 .ok_or_else(|| codegen_err("Compare on Unit"))?;
-            let rhs_val = load_value(context, builder, rhs, alloca_map, value_types)
+            let rhs_val = load_value(context, builder, rhs, alloca_map, value_types, struct_types)
                 .ok_or_else(|| codegen_err("Compare on Unit"))?;
 
             let cmp_val: BasicValueEnum = match ty {
@@ -229,8 +234,15 @@ fn emit_instruction<'ctx>(
         }
 
         Instruction::Not { result, operand } => {
-            let val = load_value(context, builder, operand, alloca_map, value_types)
-                .ok_or_else(|| codegen_err("Not on Unit"))?;
+            let val = load_value(
+                context,
+                builder,
+                operand,
+                alloca_map,
+                value_types,
+                struct_types,
+            )
+            .ok_or_else(|| codegen_err("Not on Unit"))?;
             let zero = context.bool_type().const_zero();
             let not_val = builder
                 .build_int_compare(IntPredicate::EQ, val.into_int_value(), zero, "not")
@@ -247,17 +259,31 @@ fn emit_instruction<'ctx>(
             to_ty,
         } => {
             if from_ty == to_ty {
-                let val = load_value(context, builder, operand, alloca_map, value_types)
-                    .ok_or_else(|| codegen_err("Cast on Unit"))?;
+                let val = load_value(
+                    context,
+                    builder,
+                    operand,
+                    alloca_map,
+                    value_types,
+                    struct_types,
+                )
+                .ok_or_else(|| codegen_err("Cast on Unit"))?;
                 builder
                     .build_store(alloca_map[result], val)
                     .map_err(|e| codegen_err(e.to_string()))?;
                 return Ok(());
             }
-            let val = load_value(context, builder, operand, alloca_map, value_types)
-                .ok_or_else(|| codegen_err("Cast on Unit"))?;
-            let dest_ty =
-                bir_type_to_llvm_type(context, to_ty).ok_or_else(|| codegen_err("Cast to Unit"))?;
+            let val = load_value(
+                context,
+                builder,
+                operand,
+                alloca_map,
+                value_types,
+                struct_types,
+            )
+            .ok_or_else(|| codegen_err("Cast on Unit"))?;
+            let dest_ty = bir_type_to_llvm_type(context, to_ty, struct_types)
+                .ok_or_else(|| codegen_err("Cast to Unit"))?;
 
             let cast_val: BasicValueEnum = match (from_ty, to_ty) {
                 (BirType::I32, BirType::I64) => builder
@@ -317,34 +343,161 @@ fn emit_instruction<'ctx>(
             let callee = func_map
                 .get(func_name.as_str())
                 .ok_or_else(|| codegen_err(format!("unknown function: {}", func_name)))?;
-            let llvm_args: Vec<BasicMetadataTypeEnum> = Vec::new();
-            let _ = llvm_args; // unused, just for clarity
             let mut call_args: Vec<BasicValueEnum> = Vec::new();
             for arg in args {
-                if let Some(v) = load_value(context, builder, arg, alloca_map, value_types) {
-                    call_args.push(v);
+                let arg_ty = value_types.get(arg);
+                if arg_ty == Some(&BirType::Unit) || arg_ty.is_none() {
+                    continue;
                 }
+                let v = load_value(context, builder, arg, alloca_map, value_types, struct_types)
+                    .ok_or_else(|| codegen_err("Call: failed to load non-Unit argument"))?;
+                call_args.push(v);
             }
             let args_meta: Vec<inkwell::values::BasicMetadataValueEnum> =
                 call_args.iter().map(|v| (*v).into()).collect();
             let call_site = builder
                 .build_call(*callee, &args_meta, "call")
                 .map_err(|e| codegen_err(e.to_string()))?;
-            if *ty != BirType::Unit
-                && let inkwell::values::ValueKind::Basic(ret_val) = call_site.try_as_basic_value()
-            {
-                builder
-                    .build_store(alloca_map[result], ret_val)
-                    .map_err(|e| codegen_err(e.to_string()))?;
+            if *ty != BirType::Unit {
+                match call_site.try_as_basic_value() {
+                    inkwell::values::ValueKind::Basic(ret_val) => {
+                        builder
+                            .build_store(alloca_map[result], ret_val)
+                            .map_err(|e| codegen_err(e.to_string()))?;
+                    }
+                    _ => {
+                        return Err(codegen_err(
+                            "Call: expected basic return value for non-Unit return type",
+                        ));
+                    }
+                }
             }
         }
 
-        Instruction::StructInit { .. }
-        | Instruction::FieldGet { .. }
-        | Instruction::FieldSet { .. } => {
-            return Err(codegen_err(
-                "struct instructions not yet implemented in codegen",
-            ));
+        Instruction::StructInit {
+            result,
+            struct_name,
+            fields,
+            ..
+        } => {
+            let llvm_struct_ty = struct_types
+                .get(struct_name.as_str())
+                .ok_or_else(|| codegen_err(format!("unknown struct: {}", struct_name)))?;
+            let layout = bir_module
+                .struct_layouts
+                .get(struct_name.as_str())
+                .ok_or_else(|| codegen_err(format!("no layout for struct: {}", struct_name)))?;
+            let mut agg: inkwell::values::AggregateValueEnum = llvm_struct_ty.get_undef().into();
+            for (field_name, field_val) in fields {
+                let field_idx = layout
+                    .iter()
+                    .position(|(n, _)| n == field_name)
+                    .ok_or_else(|| {
+                        codegen_err(format!(
+                            "unknown field {} in struct {}",
+                            field_name, struct_name
+                        ))
+                    })?;
+                let val = load_value(
+                    context,
+                    builder,
+                    field_val,
+                    alloca_map,
+                    value_types,
+                    struct_types,
+                )
+                .ok_or_else(|| codegen_err("StructInit: failed to load field value"))?;
+                agg = builder
+                    .build_insert_value(agg, val, field_idx as u32, "insert")
+                    .map_err(|e| codegen_err(e.to_string()))?;
+            }
+            builder
+                .build_store(alloca_map[result], agg.into_struct_value())
+                .map_err(|e| codegen_err(e.to_string()))?;
+        }
+
+        Instruction::FieldGet {
+            result,
+            object,
+            field,
+            object_ty,
+            ..
+        } => {
+            let struct_name = match object_ty {
+                BirType::Struct(name) => name,
+                _ => return Err(codegen_err("FieldGet on non-struct type")),
+            };
+            let layout = bir_module
+                .struct_layouts
+                .get(struct_name.as_str())
+                .ok_or_else(|| codegen_err(format!("no layout for struct: {}", struct_name)))?;
+            let field_idx = layout.iter().position(|(n, _)| n == field).ok_or_else(|| {
+                codegen_err(format!("unknown field {} in struct {}", field, struct_name))
+            })?;
+            let struct_val = load_value(
+                context,
+                builder,
+                object,
+                alloca_map,
+                value_types,
+                struct_types,
+            )
+            .ok_or_else(|| codegen_err("FieldGet: failed to load struct value"))?;
+            let field_val = builder
+                .build_extract_value(struct_val.into_struct_value(), field_idx as u32, "field")
+                .map_err(|e| codegen_err(e.to_string()))?;
+            builder
+                .build_store(alloca_map[result], field_val)
+                .map_err(|e| codegen_err(e.to_string()))?;
+        }
+
+        Instruction::FieldSet {
+            result,
+            object,
+            field,
+            value,
+            ty,
+        } => {
+            let struct_name = match ty {
+                BirType::Struct(name) => name,
+                _ => return Err(codegen_err("FieldSet on non-struct type")),
+            };
+            let layout = bir_module
+                .struct_layouts
+                .get(struct_name.as_str())
+                .ok_or_else(|| codegen_err(format!("no layout for struct: {}", struct_name)))?;
+            let field_idx = layout.iter().position(|(n, _)| n == field).ok_or_else(|| {
+                codegen_err(format!("unknown field {} in struct {}", field, struct_name))
+            })?;
+            let struct_val = load_value(
+                context,
+                builder,
+                object,
+                alloca_map,
+                value_types,
+                struct_types,
+            )
+            .ok_or_else(|| codegen_err("FieldSet: failed to load struct value"))?;
+            let new_field_val = load_value(
+                context,
+                builder,
+                value,
+                alloca_map,
+                value_types,
+                struct_types,
+            )
+            .ok_or_else(|| codegen_err("FieldSet: failed to load new field value"))?;
+            let updated = builder
+                .build_insert_value(
+                    struct_val.into_struct_value(),
+                    new_field_val,
+                    field_idx as u32,
+                    "update",
+                )
+                .map_err(|e| codegen_err(e.to_string()))?;
+            builder
+                .build_store(alloca_map[result], updated.into_struct_value())
+                .map_err(|e| codegen_err(e.to_string()))?;
         }
     }
     Ok(())
@@ -358,12 +511,13 @@ fn store_br_args<'ctx>(
     target_params: &[(Value, BirType)],
     alloca_map: &HashMap<Value, PointerValue<'ctx>>,
     value_types: &HashMap<Value, BirType>,
+    struct_types: &HashMap<String, inkwell::types::StructType<'ctx>>,
 ) -> Result<()> {
     for (i, (val, ty)) in args.iter().enumerate() {
         if *ty == BirType::Unit {
             continue;
         }
-        let loaded = load_value(context, builder, val, alloca_map, value_types)
+        let loaded = load_value(context, builder, val, alloca_map, value_types, struct_types)
             .ok_or_else(|| codegen_err("store_br_args: failed to load value"))?;
         let target_val = &target_params[i].0;
         builder
@@ -374,6 +528,7 @@ fn store_br_args<'ctx>(
 }
 
 /// Emit a BIR terminator.
+#[allow(clippy::too_many_arguments)]
 fn emit_terminator<'ctx>(
     context: &'ctx Context,
     builder: &Builder<'ctx>,
@@ -382,6 +537,7 @@ fn emit_terminator<'ctx>(
     bb_map: &HashMap<u32, LlvmBasicBlock<'ctx>>,
     bir_blocks: &[BasicBlock],
     value_types: &HashMap<Value, BirType>,
+    struct_types: &HashMap<String, inkwell::types::StructType<'ctx>>,
 ) -> Result<()> {
     match terminator {
         Terminator::Return(val) => {
@@ -391,8 +547,9 @@ fn emit_terminator<'ctx>(
                     .build_return(None)
                     .map_err(|e| codegen_err(e.to_string()))?;
             } else {
-                let loaded = load_value(context, builder, val, alloca_map, value_types)
-                    .ok_or_else(|| codegen_err("Return: failed to load value"))?;
+                let loaded =
+                    load_value(context, builder, val, alloca_map, value_types, struct_types)
+                        .ok_or_else(|| codegen_err("Return: failed to load value"))?;
                 builder
                     .build_return(Some(&loaded))
                     .map_err(|e| codegen_err(e.to_string()))?;
@@ -414,6 +571,7 @@ fn emit_terminator<'ctx>(
                 &target_block.params,
                 alloca_map,
                 value_types,
+                struct_types,
             )?;
             builder
                 .build_unconditional_branch(bb_map[target])
@@ -425,8 +583,15 @@ fn emit_terminator<'ctx>(
             then_bb,
             else_bb,
         } => {
-            let cond_val = load_value(context, builder, cond, alloca_map, value_types)
-                .ok_or_else(|| codegen_err("CondBr: failed to load condition"))?;
+            let cond_val = load_value(
+                context,
+                builder,
+                cond,
+                alloca_map,
+                value_types,
+                struct_types,
+            )
+            .ok_or_else(|| codegen_err("CondBr: failed to load condition"))?;
             builder
                 .build_conditional_branch(
                     cond_val.into_int_value(),
@@ -451,6 +616,7 @@ fn emit_terminator<'ctx>(
                 &header_block.params,
                 alloca_map,
                 value_types,
+                struct_types,
             )?;
             // Store break value to exit block params
             if let Some((val, ty)) = value
@@ -458,8 +624,9 @@ fn emit_terminator<'ctx>(
             {
                 let exit_block = find_block(bir_blocks, *exit_bb);
                 if !exit_block.params.is_empty() {
-                    let loaded = load_value(context, builder, val, alloca_map, value_types)
-                        .ok_or_else(|| codegen_err("BrBreak: failed to load break value"))?;
+                    let loaded =
+                        load_value(context, builder, val, alloca_map, value_types, struct_types)
+                            .ok_or_else(|| codegen_err("BrBreak: failed to load break value"))?;
                     let exit_param = &exit_block.params[0].0;
                     builder
                         .build_store(alloca_map[exit_param], loaded)
@@ -480,6 +647,7 @@ fn emit_terminator<'ctx>(
                 &header_block.params,
                 alloca_map,
                 value_types,
+                struct_types,
             )?;
             builder
                 .build_unconditional_branch(bb_map[header_bb])
@@ -496,6 +664,8 @@ fn compile_function<'ctx>(
     bir_func: &BirFunction,
     llvm_func: FunctionValue<'ctx>,
     func_map: &HashMap<String, FunctionValue<'ctx>>,
+    struct_types: &HashMap<String, inkwell::types::StructType<'ctx>>,
+    bir_module: &BirModule,
 ) -> Result<()> {
     let value_types = collect_value_types(bir_func);
 
@@ -515,7 +685,8 @@ fn compile_function<'ctx>(
         if *ty == BirType::Unit {
             continue;
         }
-        let llvm_ty = bir_type_to_llvm_type(context, ty).unwrap();
+        let llvm_ty = bir_type_to_llvm_type(context, ty, struct_types)
+            .ok_or_else(|| codegen_err(format!("unsupported type for alloca: {:?}", ty)))?;
         let alloca = builder
             .build_alloca(llvm_ty, &format!("v{}", val.0))
             .map_err(|e| codegen_err(e.to_string()))?;
@@ -541,7 +712,16 @@ fn compile_function<'ctx>(
         builder.position_at_end(llvm_bb);
 
         for inst in &bir_block.instructions {
-            emit_instruction(context, builder, inst, &alloca_map, &value_types, func_map)?;
+            emit_instruction(
+                context,
+                builder,
+                inst,
+                &alloca_map,
+                &value_types,
+                func_map,
+                struct_types,
+                bir_module,
+            )?;
         }
 
         emit_terminator(
@@ -552,10 +732,39 @@ fn compile_function<'ctx>(
             &bb_map,
             &bir_func.blocks,
             &value_types,
+            struct_types,
         )?;
     }
 
     Ok(())
+}
+
+/// Build LLVM named struct types from BIR struct layouts (2-pass).
+fn build_struct_types<'ctx>(
+    context: &'ctx Context,
+    bir_module: &BirModule,
+) -> HashMap<String, inkwell::types::StructType<'ctx>> {
+    let mut struct_types = HashMap::new();
+
+    // Pass 1: Create opaque structs
+    for name in bir_module.struct_layouts.keys() {
+        let llvm_struct = context.opaque_struct_type(name);
+        struct_types.insert(name.clone(), llvm_struct);
+    }
+
+    // Pass 2: Set struct bodies
+    for (name, fields) in &bir_module.struct_layouts {
+        let field_types: Vec<BasicTypeEnum<'ctx>> = fields
+            .iter()
+            .map(|(_, ty)| {
+                bir_type_to_llvm_type(context, ty, &struct_types)
+                    .expect("struct field must have a valid LLVM type")
+            })
+            .collect();
+        struct_types[name].set_body(&field_types, false);
+    }
+
+    struct_types
 }
 
 /// Compile BIR module to LLVM Module.
@@ -585,21 +794,29 @@ pub fn compile_to_module<'ctx>(
     module.set_data_layout(&target_machine.get_target_data().get_data_layout());
     module.set_triple(&triple);
 
+    let struct_types = build_struct_types(context, bir_module);
+
     // Pass 1: Declare all functions
     let mut func_map: HashMap<String, FunctionValue<'ctx>> = HashMap::new();
     for bir_func in &bir_module.functions {
         let param_types: Vec<BasicMetadataTypeEnum> = bir_func
             .params
             .iter()
-            .filter(|(_, ty)| *ty != BirType::Unit)
-            .filter_map(|(_, ty)| bir_type_to_llvm_type(context, ty))
+            .filter(|(_, ty)| !matches!(ty, BirType::Unit))
+            .map(|(_, ty)| {
+                bir_type_to_llvm_type(context, ty, &struct_types).ok_or_else(|| {
+                    codegen_err(format!("non-Unit param must have LLVM type: {:?}", ty))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
             .map(|t| t.into())
             .collect();
 
         let fn_type = if bir_func.return_type == BirType::Unit {
             context.void_type().fn_type(&param_types, false)
         } else {
-            let ret_ty = bir_type_to_llvm_type(context, &bir_func.return_type)
+            let ret_ty = bir_type_to_llvm_type(context, &bir_func.return_type, &struct_types)
                 .ok_or_else(|| codegen_err("unsupported return type"))?;
             ret_ty.fn_type(&param_types, false)
         };
@@ -611,7 +828,15 @@ pub fn compile_to_module<'ctx>(
     // Pass 2: Compile each function
     for bir_func in &bir_module.functions {
         let llvm_func = func_map[&bir_func.name];
-        compile_function(context, &builder, bir_func, llvm_func, &func_map)?;
+        compile_function(
+            context,
+            &builder,
+            bir_func,
+            llvm_func,
+            &func_map,
+            &struct_types,
+            bir_module,
+        )?;
     }
 
     Ok(module)
@@ -835,5 +1060,178 @@ mod tests {
 
         let obj_bytes = compile(&bir_module).unwrap();
         assert!(!obj_bytes.is_empty(), "object output must not be empty");
+    }
+
+    // --- Phase 3: Struct codegen tests ---
+
+    #[test]
+    fn test_struct_basic() {
+        assert_eq!(
+            compile_and_run(
+                "struct Point { var x: Int32; var y: Int32; } func main() -> Int32 { let p = Point(x: 3, y: 4); return p.x + p.y; }"
+            ),
+            7
+        );
+    }
+
+    #[test]
+    fn test_struct_field_assign() {
+        assert_eq!(
+            compile_and_run(
+                "struct Point { var x: Int32; var y: Int32; } func main() -> Int32 { var p = Point(x: 1, y: 2); p.x = 10; return p.x; }"
+            ),
+            10
+        );
+    }
+
+    #[test]
+    fn test_struct_as_function_arg() {
+        assert_eq!(
+            compile_and_run(
+                "struct Point { var x: Int32; var y: Int32; } func get_x(p: Point) -> Int32 { return p.x; } func main() -> Int32 { let p = Point(x: 42, y: 0); return get_x(p); }"
+            ),
+            42
+        );
+    }
+
+    #[test]
+    fn test_struct_as_return_value() {
+        assert_eq!(
+            compile_and_run(
+                "struct Point { var x: Int32; var y: Int32; } func make_point() -> Point { return Point(x: 5, y: 6); } func main() -> Int32 { let p = make_point(); return p.x + p.y; }"
+            ),
+            11
+        );
+    }
+
+    #[test]
+    fn test_struct_in_if() {
+        assert_eq!(
+            compile_and_run(
+                "struct Point { var x: Int32; var y: Int32; } func main() -> Int32 { let p = if true { yield Point(x: 1, y: 2); } else { yield Point(x: 3, y: 4); }; return p.x; }"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn test_struct_computed_property() {
+        assert_eq!(
+            compile_and_run(
+                "struct Rect { var w: Int32; var h: Int32; var area: Int32 { get { return self.w * self.h; } }; } func main() -> Int32 { let r = Rect(w: 3, h: 4); return r.area; }"
+            ),
+            12
+        );
+    }
+
+    #[test]
+    fn test_struct_explicit_init() {
+        assert_eq!(
+            compile_and_run(
+                "struct Counter { var count: Int32; init(start: Int32) { self.count = start * 2; } } func main() -> Int32 { let c = Counter(start: 5); return c.count; }"
+            ),
+            10
+        );
+    }
+
+    #[test]
+    fn test_struct_nested_field_assign() {
+        assert_eq!(
+            compile_and_run(
+                "struct Inner { var x: Int32; } struct Outer { var inner: Inner; } func main() -> Int32 { var o = Outer(inner: Inner(x: 1)); o.inner.x = 10; return o.inner.x; }"
+            ),
+            10
+        );
+    }
+
+    #[test]
+    fn test_struct_param_no_local_init() {
+        assert_eq!(
+            compile_and_run(
+                "struct Point { var x: Int32; var y: Int32; } func sum(p: Point) -> Int32 { return p.x + p.y; } func main() -> Int32 { return sum(Point(x: 10, y: 20)); }"
+            ),
+            30
+        );
+    }
+
+    #[test]
+    fn test_struct_mutable_in_loop() {
+        assert_eq!(
+            compile_and_run(
+                "struct Acc { var val: Int32; } func main() -> Int32 { var a = Acc(val: 0); var i: Int32 = 0; while i < 5 { a.val = a.val + i; i = i + 1; }; return a.val; }"
+            ),
+            10
+        );
+    }
+
+    #[test]
+    fn test_struct_valued_while_break() {
+        assert_eq!(
+            compile_and_run(
+                "struct Point { var x: Int32; var y: Int32; } func main() -> Int32 { var i: Int32 = 0; let p = while i < 10 { i = i + 1; if i == 3 { break Point(x: i, y: i * 2); }; } nobreak { yield Point(x: 0, y: 0); }; return p.x + p.y; }"
+            ),
+            9
+        );
+    }
+
+    #[test]
+    fn test_struct_computed_setter() {
+        assert_eq!(
+            compile_and_run(
+                "struct Foo { var x: Int32; var bar: Int32 { get { return self.x; } set { self.x = newValue * 2; } }; } func main() -> Int32 { var f = Foo(x: 1); f.bar = 5; return f.x; }"
+            ),
+            10
+        );
+    }
+
+    #[test]
+    fn test_struct_object_emit() {
+        let source = "struct Point { var x: Int32; var y: Int32; } func main() -> Int32 { let p = Point(x: 3, y: 4); return p.x + p.y; }";
+        let tokens = tokenize(source).unwrap();
+        let program = parse(tokens).unwrap();
+        let sem_info = semantic::analyze(&program).unwrap();
+        let mut bir_module = bir::lower_program(&program, &sem_info).unwrap();
+        bir::optimize_module(&mut bir_module);
+
+        let obj_bytes = compile(&bir_module).unwrap();
+        assert!(!obj_bytes.is_empty(), "object output must not be empty");
+    }
+
+    #[test]
+    fn test_struct_init_field_access() {
+        assert_eq!(
+            compile_and_run(
+                "struct Point { var x: Int32; var y: Int32; } func main() -> Int32 { return Point(x: 1, y: 2).x; }"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn test_struct_empty() {
+        assert_eq!(
+            compile_and_run("struct Empty {} func main() -> Int32 { let e = Empty(); return 0; }"),
+            0
+        );
+    }
+
+    #[test]
+    fn test_struct_continue_in_loop() {
+        assert_eq!(
+            compile_and_run(
+                "struct Acc { var val: Int32; } func main() -> Int32 { var a = Acc(val: 0); var i: Int32 = 0; while i < 5 { i = i + 1; if i == 3 { continue; }; a.val = a.val + 1; }; return a.val; }"
+            ),
+            4
+        );
+    }
+
+    #[test]
+    fn test_struct_nobreak_yield() {
+        assert_eq!(
+            compile_and_run(
+                "struct Point { var x: Int32; var y: Int32; } func main() -> Int32 { let p = while false { break Point(x: 0, y: 0); } nobreak { yield Point(x: 7, y: 8); }; return p.x + p.y; }"
+            ),
+            15
+        );
     }
 }

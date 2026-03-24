@@ -928,6 +928,28 @@ fn native_diverging_if() {
     );
 }
 
+// --- Phase 3: Struct native tests ---
+
+#[test]
+fn native_struct_basic() {
+    assert_eq!(
+        compile_to_native_and_run(
+            "struct Point { var x: Int32; var y: Int32; } func main() -> Int32 { let p = Point(x: 3, y: 4); return p.x + p.y; }"
+        ),
+        7
+    );
+}
+
+#[test]
+fn native_struct_function_arg_return() {
+    assert_eq!(
+        compile_to_native_and_run(
+            "struct Point { var x: Int32; var y: Int32; } func make_point(a: Int32, b: Int32) -> Point { return Point(x: a, y: b); } func sum(p: Point) -> Int32 { return p.x + p.y; } func main() -> Int32 { let p = make_point(10, 20); return sum(p); }"
+        ),
+        30
+    );
+}
+
 // --- Known bug regression tests ---
 
 #[test]
