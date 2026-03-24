@@ -21,15 +21,15 @@ struct LoopContext {
     break_ty: Option<BirType>,
 }
 
-#[derive(Clone)]
-struct StructMeta {
-    struct_name: String,
-    fields: Vec<String>,
-}
-
 struct SemInfoRef {
     struct_defs: HashMap<String, resolver::StructInfo>,
     struct_init_calls: HashSet<NodeId>,
+}
+
+struct ReceiverInfo {
+    value: Value,
+    struct_name: String,
+    var_name: String,
 }
 
 struct Lowering {
@@ -52,9 +52,10 @@ struct Lowering {
     // Track Value types for cast/multi-numeric support
     value_types: HashMap<Value, BirType>,
     // Struct support
-    struct_meta_scopes: Vec<HashMap<String, StructMeta>>,
     sem_info: Option<SemInfoRef>,
     self_var_name: Option<String>,
+    in_init_body: bool,
+    init_struct_name: Option<String>,
     lowering_error: Option<BengalError>,
 }
 
@@ -73,10 +74,18 @@ impl Lowering {
             mutable_vars: Vec::new(),
             loop_stack: Vec::new(),
             value_types: HashMap::new(),
-            struct_meta_scopes: Vec::new(),
             sem_info: Some(sem_info),
             self_var_name: None,
+            in_init_body: false,
+            init_struct_name: None,
             lowering_error: None,
+        }
+    }
+
+    fn convert_type_with_structs(&self, ty: &TypeAnnotation) -> BirType {
+        match ty {
+            TypeAnnotation::Named(name) => BirType::Struct(name.clone()),
+            other => convert_type(other),
         }
     }
 
@@ -134,12 +143,10 @@ impl Lowering {
 
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
-        self.struct_meta_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
-        self.struct_meta_scopes.pop();
     }
 
     fn define_var(&mut self, name: String, value: Value) {
@@ -182,56 +189,300 @@ impl Lowering {
         None
     }
 
-    fn define_struct_var(
-        &mut self,
-        var_name: &str,
-        struct_name: &str,
-        field_values: Vec<(String, Value)>,
-    ) {
-        let struct_info = self
-            .sem_info
-            .as_ref()
-            .unwrap()
-            .struct_defs
-            .get(struct_name)
-            .unwrap();
-        let fields: Vec<String> = struct_info.fields.iter().map(|(n, _)| n.clone()).collect();
-        for (fname, val) in &field_values {
-            let key = format!("{}.{}", var_name, fname);
-            self.define_var(key, *val);
-        }
-        if let Some(scope) = self.struct_meta_scopes.last_mut() {
-            scope.insert(
-                var_name.to_string(),
-                StructMeta {
-                    struct_name: struct_name.to_string(),
-                    fields,
-                },
-            );
-        }
+    // ========== Struct helpers ==========
+
+    fn emit_struct_init(&mut self, struct_name: &str, field_values: &[(String, Value)]) -> Value {
+        let bir_ty = BirType::Struct(struct_name.to_string());
+        let result = self.fresh_value();
+        self.emit(Instruction::StructInit {
+            result,
+            struct_name: struct_name.to_string(),
+            fields: field_values.to_vec(),
+            ty: bir_ty.clone(),
+        });
+        self.value_types.insert(result, bir_ty);
+        result
     }
 
-    fn lookup_struct_meta(&self, var_name: &str) -> Option<&StructMeta> {
-        for scope in self.struct_meta_scopes.iter().rev() {
-            if let Some(meta) = scope.get(var_name) {
-                return Some(meta);
+    fn lower_receiver(&mut self, object: &Expr) -> Option<ReceiverInfo> {
+        match &object.kind {
+            ExprKind::Ident(name) => {
+                let val = self.lookup_var(name);
+                let struct_name = match self.value_types.get(&val)? {
+                    BirType::Struct(n) => n.clone(),
+                    _ => return None,
+                };
+                Some(ReceiverInfo {
+                    value: val,
+                    struct_name,
+                    var_name: name.clone(),
+                })
+            }
+            ExprKind::SelfRef => {
+                let self_name = self.self_var_name.as_ref()?.clone();
+                let val = self.lookup_var(&self_name);
+                let struct_name = match self.value_types.get(&val)? {
+                    BirType::Struct(n) => n.clone(),
+                    _ => return None,
+                };
+                Some(ReceiverInfo {
+                    value: val,
+                    struct_name,
+                    var_name: self_name,
+                })
+            }
+            _ => {
+                let val = self.lower_expr(object);
+                let struct_name = match self.value_types.get(&val)? {
+                    BirType::Struct(n) => n.clone(),
+                    _ => return None,
+                };
+                let tmp_name = format!("__tmp_{}", self.next_value);
+                self.define_var(tmp_name.clone(), val);
+                Some(ReceiverInfo {
+                    value: val,
+                    struct_name,
+                    var_name: tmp_name,
+                })
             }
         }
-        None
     }
 
-    fn resolve_field_access_key(&self, expr: &Expr) -> Option<String> {
+    fn infer_struct_name_no_lower(&self, expr: &Expr) -> Option<String> {
         match &expr.kind {
-            ExprKind::Ident(name) => Some(name.clone()),
-            ExprKind::SelfRef => Some(
-                self.self_var_name
-                    .clone()
-                    .unwrap_or_else(|| "self".to_string()),
-            ),
-            ExprKind::FieldAccess { object, field } => self
-                .resolve_field_access_key(object)
-                .map(|base| format!("{}.{}", base, field)),
+            ExprKind::Ident(name) => {
+                let val = self.try_lookup_var(name)?;
+                match self.value_types.get(&val)? {
+                    BirType::Struct(name) => Some(name.clone()),
+                    _ => None,
+                }
+            }
+            ExprKind::SelfRef => {
+                let self_name = self.self_var_name.as_ref()?;
+                let val = self.try_lookup_var(self_name)?;
+                match self.value_types.get(&val)? {
+                    BirType::Struct(name) => Some(name.clone()),
+                    _ => None,
+                }
+            }
+            ExprKind::StructInit { name, .. } => Some(name.clone()),
+            ExprKind::Call { name, .. } => {
+                let sem = self.sem_info.as_ref().unwrap();
+                if sem.struct_init_calls.contains(&expr.id) {
+                    Some(name.clone())
+                } else {
+                    match self.func_sigs.get(name)? {
+                        BirType::Struct(sn) => Some(sn.clone()),
+                        _ => None,
+                    }
+                }
+            }
+            ExprKind::FieldAccess { object, field } => {
+                let parent_struct = self.infer_struct_name_no_lower(object)?;
+                let sem = self.sem_info.as_ref().unwrap();
+                let info = sem.struct_defs.get(&parent_struct)?;
+                // Check stored fields
+                if let Some((_, ty)) = info.fields.iter().find(|(n, _)| n == field) {
+                    return match ty {
+                        crate::semantic::types::Type::Struct(name) => Some(name.clone()),
+                        _ => None,
+                    };
+                }
+                // Check computed properties
+                if let Some(prop) = info.computed.iter().find(|p| p.name == *field) {
+                    return match &prop.ty {
+                        crate::semantic::types::Type::Struct(name) => Some(name.clone()),
+                        _ => None,
+                    };
+                }
+                None
+            }
             _ => None,
+        }
+    }
+
+    fn inline_getter(&mut self, self_var_name: &str, getter_block: &Block) -> Value {
+        let prev_self_var = self.self_var_name.clone();
+        let prev_in_init = self.in_init_body;
+        self.self_var_name = Some(self_var_name.to_string());
+        self.in_init_body = false;
+        self.push_scope();
+        let (result, mut getter_regions) = self.lower_block_stmts(getter_block);
+        self.pending_regions.append(&mut getter_regions);
+        let val = match result {
+            Some(StmtResult::Return(v)) => v,
+            _ => unreachable!("getter must return"),
+        };
+        self.pop_scope();
+        self.self_var_name = prev_self_var;
+        self.in_init_body = prev_in_init;
+        val
+    }
+
+    fn try_lower_computed_setter(&mut self, object: &Expr, field: &str, value: &Expr) -> bool {
+        let struct_name = match self.infer_struct_name_no_lower(object) {
+            Some(n) => n,
+            None => return false,
+        };
+        let sem = self.sem_info.as_ref().unwrap();
+        let struct_info = match sem.struct_defs.get(&struct_name) {
+            Some(i) => i.clone(),
+            None => return false,
+        };
+        let prop = match struct_info.computed.iter().find(|p| p.name == field) {
+            Some(p) => p.clone(),
+            None => return false,
+        };
+        if !prop.has_setter {
+            return false;
+        }
+
+        // Only support Ident/SelfRef receivers for setters
+        let var_name = match &object.kind {
+            ExprKind::Ident(name) => name.clone(),
+            ExprKind::SelfRef => match &self.self_var_name {
+                Some(n) => n.clone(),
+                None => return false,
+            },
+            _ => return false,
+        };
+
+        let val = self.lower_expr(value);
+        let setter_block = prop.setter.unwrap();
+
+        // Save and switch context — setter body runs as normal struct method,
+        // not as initializer.
+        let prev_self_var = self.self_var_name.clone();
+        let prev_in_init = self.in_init_body;
+        let prev_init_struct = self.init_struct_name.clone();
+        self.self_var_name = Some(var_name);
+        self.in_init_body = false;
+        self.init_struct_name = None;
+
+        self.push_scope();
+        self.define_var("newValue".to_string(), val);
+        let (_, mut setter_regions) = self.lower_block_stmts(&setter_block);
+        self.pending_regions.append(&mut setter_regions);
+        self.pop_scope();
+
+        self.self_var_name = prev_self_var;
+        self.in_init_body = prev_in_init;
+        self.init_struct_name = prev_init_struct;
+        true
+    }
+
+    fn expr_refers_to_self(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::SelfRef => true,
+            ExprKind::FieldAccess { object, .. } => self.expr_refers_to_self(object),
+            _ => false,
+        }
+    }
+
+    fn lower_field_assign_recursive(&mut self, object: &Expr, field: &str, new_val: Value) {
+        // Guard: check that field is a stored field, not computed
+        if let Some(struct_name) = self.infer_struct_name_no_lower(object) {
+            let sem = self.sem_info.as_ref().unwrap();
+            if let Some(info) = sem.struct_defs.get(&struct_name)
+                && info.computed.iter().any(|p| p.name == field)
+            {
+                self.record_error(format!(
+                    "computed property setter `{}` on non-direct receiver is not yet supported",
+                    field
+                ));
+                return;
+            }
+        }
+
+        match &object.kind {
+            ExprKind::Ident(var_name) => {
+                let obj_val = self.lookup_var(var_name);
+                let obj_ty = self.value_types.get(&obj_val).cloned().unwrap();
+                let result = self.fresh_value();
+                self.emit(Instruction::FieldSet {
+                    result,
+                    object: obj_val,
+                    field: field.to_string(),
+                    value: new_val,
+                    ty: obj_ty.clone(),
+                });
+                self.value_types.insert(result, obj_ty);
+                self.assign_var(var_name, result);
+            }
+            ExprKind::SelfRef => {
+                let self_name = self.self_var_name.as_ref().unwrap().clone();
+                let obj_val = self.lookup_var(&self_name);
+                let obj_ty = self.value_types.get(&obj_val).cloned().unwrap();
+                let result = self.fresh_value();
+                self.emit(Instruction::FieldSet {
+                    result,
+                    object: obj_val,
+                    field: field.to_string(),
+                    value: new_val,
+                    ty: obj_ty.clone(),
+                });
+                self.value_types.insert(result, obj_ty);
+                self.assign_var(&self_name, result);
+            }
+            ExprKind::FieldAccess {
+                object: parent,
+                field: parent_field,
+            } => {
+                // Guard: parent_field must be stored, not computed
+                if let Some(parent_struct) = self.infer_struct_name_no_lower(parent) {
+                    let sem = self.sem_info.as_ref().unwrap();
+                    if let Some(info) = sem.struct_defs.get(&parent_struct)
+                        && info.computed.iter().any(|p| p.name == *parent_field)
+                    {
+                        self.record_error(format!(
+                            "assignment through computed property `{}` is not yet supported",
+                            parent_field
+                        ));
+                        return;
+                    }
+                }
+                // 1. Get the intermediate struct
+                let parent_val = self.lower_expr(parent);
+                let parent_ty = self.value_types.get(&parent_val).cloned().unwrap();
+                let parent_struct_name = match &parent_ty {
+                    BirType::Struct(name) => name.clone(),
+                    _ => unreachable!(),
+                };
+                // 2. Get the inner struct field
+                let sem = self.sem_info.as_ref().unwrap();
+                let inner_sem_ty = &sem
+                    .struct_defs
+                    .get(&parent_struct_name)
+                    .unwrap()
+                    .fields
+                    .iter()
+                    .find(|(n, _)| n == parent_field)
+                    .unwrap()
+                    .1;
+                let inner_ty = semantic_type_to_bir(inner_sem_ty);
+                let inner_val = self.fresh_value();
+                self.emit(Instruction::FieldGet {
+                    result: inner_val,
+                    object: parent_val,
+                    field: parent_field.clone(),
+                    object_ty: parent_ty.clone(),
+                    ty: inner_ty.clone(),
+                });
+                self.value_types.insert(inner_val, inner_ty.clone());
+                // 3. Update the inner struct's field
+                let updated_inner = self.fresh_value();
+                self.emit(Instruction::FieldSet {
+                    result: updated_inner,
+                    object: inner_val,
+                    field: field.to_string(),
+                    value: new_val,
+                    ty: inner_ty.clone(),
+                });
+                self.value_types.insert(updated_inner, inner_ty);
+                // 4. Recurse: write the updated inner back into parent
+                self.lower_field_assign_recursive(parent, parent_field, updated_inner);
+            }
+            _ => unreachable!("FieldAssign on unsupported object expression"),
         }
     }
 
@@ -252,7 +503,7 @@ impl Lowering {
         self.blocks.clear();
         self.pending_regions.clear();
         self.mutable_vars.clear();
-        self.struct_meta_scopes.clear();
+        self.value_types.clear();
 
         let bb0 = self.fresh_block();
         self.start_block(bb0, vec![]);
@@ -262,8 +513,9 @@ impl Lowering {
         let mut params = Vec::new();
         for param in &func.params {
             let val = self.fresh_value();
-            let bir_ty = convert_type(&param.ty);
-            params.push((val, bir_ty));
+            let bir_ty = self.convert_type_with_structs(&param.ty);
+            params.push((val, bir_ty.clone()));
+            self.value_types.insert(val, bir_ty);
             self.define_var(param.name.clone(), val);
         }
 
@@ -292,7 +544,7 @@ impl Lowering {
         BirFunction {
             name: func.name.clone(),
             params,
-            return_type: convert_type(&func.return_type),
+            return_type: self.convert_type_with_structs(&func.return_type),
             blocks,
             body,
         }
@@ -342,79 +594,6 @@ impl Lowering {
 
     // ========== Struct helpers ==========
 
-    fn struct_type_of_expr(&self, expr: &Expr) -> Option<String> {
-        let sem = self.sem_info.as_ref().unwrap();
-        match &expr.kind {
-            ExprKind::StructInit { name, .. } => Some(name.clone()),
-            ExprKind::Call { name, .. } if sem.struct_init_calls.contains(&expr.id) => {
-                Some(name.clone())
-            }
-            ExprKind::Ident(name) => self.lookup_struct_meta(name).map(|m| m.struct_name.clone()),
-            _ => None,
-        }
-    }
-
-    fn lower_struct_producing_expr(
-        &mut self,
-        expr: &Expr,
-        struct_name: &str,
-    ) -> Vec<(String, Value)> {
-        let sem = self.sem_info.as_ref().unwrap();
-        let struct_info = sem.struct_defs.get(struct_name).unwrap().clone();
-
-        match &expr.kind {
-            ExprKind::StructInit { .. } | ExprKind::Call { .. }
-                if matches!(&expr.kind, ExprKind::StructInit { .. })
-                    || self
-                        .sem_info
-                        .as_ref()
-                        .unwrap()
-                        .struct_init_calls
-                        .contains(&expr.id) =>
-            {
-                self.lower_struct_init_fields(struct_name, &struct_info, expr)
-            }
-            ExprKind::Ident(name) => {
-                let meta = self.lookup_struct_meta(name).unwrap().clone();
-                meta.fields
-                    .iter()
-                    .map(|fname| {
-                        let key = format!("{}.{}", name, fname);
-                        let val = self.lookup_var(&key);
-                        (fname.clone(), val)
-                    })
-                    .collect()
-            }
-            _ => unreachable!("not a struct-producing expression"),
-        }
-    }
-
-    fn lower_struct_init_fields(
-        &mut self,
-        struct_name: &str,
-        struct_info: &resolver::StructInfo,
-        expr: &Expr,
-    ) -> Vec<(String, Value)> {
-        if struct_info.init.body.is_none() {
-            // Memberwise init: args map directly to stored fields
-            let args = match &expr.kind {
-                ExprKind::StructInit { args, .. } => args,
-                ExprKind::Call { args, .. } if args.is_empty() => {
-                    return vec![];
-                }
-                _ => unreachable!(),
-            };
-            args.iter()
-                .map(|(label, arg_expr)| {
-                    let val = self.lower_expr(arg_expr);
-                    (label.clone(), val)
-                })
-                .collect()
-        } else {
-            self.lower_explicit_init(struct_name, struct_info, expr)
-        }
-    }
-
     fn lower_explicit_init(
         &mut self,
         struct_name: &str,
@@ -433,35 +612,27 @@ impl Lowering {
             _ => unreachable!(),
         };
 
-        // Set up self context
+        // Set up self context — per-field variable tracking (hybrid model)
         let temp_self = format!("__init_{}", self.next_value);
         let prev_self_var = self.self_var_name.clone();
+        let prev_in_init = self.in_init_body;
+        let prev_init_struct = self.init_struct_name.clone();
         self.self_var_name = Some(temp_self.clone());
+        self.in_init_body = true;
+        self.init_struct_name = Some(struct_name.to_string());
 
         self.push_scope();
-
-        // Register StructMeta for temp_self
-        let fields: Vec<String> = struct_info.fields.iter().map(|(n, _)| n.clone()).collect();
-        if let Some(scope) = self.struct_meta_scopes.last_mut() {
-            scope.insert(
-                temp_self.clone(),
-                StructMeta {
-                    struct_name: struct_name.to_string(),
-                    fields,
-                },
-            );
-        }
 
         // Define init parameters as local variables
         for (i, (param_name, _)) in init_info.params.iter().enumerate() {
             self.define_var(param_name.clone(), arg_values[i]);
         }
 
-        // Execute init body
+        // Execute init body — self.field = val goes through FieldAssign init-body path
         let (_, mut init_regions) = self.lower_block_stmts(&body);
         self.pending_regions.append(&mut init_regions);
 
-        // Collect resulting field values from self
+        // Collect resulting field values (all fields should be initialized)
         let result: Vec<(String, Value)> = struct_info
             .fields
             .iter()
@@ -474,6 +645,8 @@ impl Lowering {
 
         self.pop_scope();
         self.self_var_name = prev_self_var;
+        self.in_init_body = prev_in_init;
+        self.init_struct_name = prev_init_struct;
 
         result
     }
@@ -483,47 +656,22 @@ impl Lowering {
     fn lower_stmt(&mut self, stmt: &Stmt) -> StmtResult {
         match stmt {
             Stmt::Let { name, value, .. } => {
-                if let Some(struct_name) = self.struct_type_of_expr(value) {
-                    let field_values = self.lower_struct_producing_expr(value, &struct_name);
-                    self.define_struct_var(name, &struct_name, field_values);
-                } else {
-                    let val = self.lower_expr(value);
-                    self.define_var(name.clone(), val);
-                }
+                let val = self.lower_expr(value);
+                self.define_var(name.clone(), val);
                 StmtResult::None
             }
             Stmt::Var { name, value, .. } => {
-                if let Some(struct_name) = self.struct_type_of_expr(value) {
-                    let field_values = self.lower_struct_producing_expr(value, &struct_name);
-                    self.define_struct_var(name, &struct_name, field_values.clone());
-                    for (fname, val) in &field_values {
-                        let key = format!("{}.{}", name, fname);
-                        let ty = self.value_types.get(val).cloned().unwrap_or(BirType::I32);
-                        if !self.mutable_vars.iter().any(|(n, _)| n == &key) {
-                            self.mutable_vars.push((key, ty));
-                        }
-                    }
-                } else {
-                    let val = self.lower_expr(value);
-                    self.define_var(name.clone(), val);
-                    let ty = self.value_types.get(&val).cloned().unwrap_or(BirType::I32);
-                    if !self.mutable_vars.iter().any(|(n, _)| n == name) {
-                        self.mutable_vars.push((name.clone(), ty));
-                    }
+                let val = self.lower_expr(value);
+                self.define_var(name.clone(), val);
+                let ty = self.value_types.get(&val).cloned().unwrap_or(BirType::I32);
+                if !self.mutable_vars.iter().any(|(n, _)| n == name) {
+                    self.mutable_vars.push((name.clone(), ty));
                 }
                 StmtResult::None
             }
             Stmt::Assign { name, value } => {
-                if let Some(struct_name) = self.struct_type_of_expr(value) {
-                    let field_values = self.lower_struct_producing_expr(value, &struct_name);
-                    for (fname, val) in &field_values {
-                        let key = format!("{}.{}", name, fname);
-                        self.assign_var(&key, *val);
-                    }
-                } else {
-                    let val = self.lower_expr(value);
-                    self.assign_var(name, val);
-                }
+                let val = self.lower_expr(value);
+                self.assign_var(name, val);
                 StmtResult::None
             }
             Stmt::Return(Some(expr)) => {
@@ -585,56 +733,49 @@ impl Lowering {
                 field,
                 value,
             } => {
-                let Some(base_key) = self.resolve_field_access_key(object) else {
-                    self.record_error(format!(
-                        "struct value in expression position is not yet supported (FieldAssign on {:?})",
-                        object.kind
-                    ));
-                    return StmtResult::None;
-                };
-                let stored_key = format!("{}.{}", base_key, field);
-
-                if self.try_lookup_var(&stored_key).is_some() {
-                    // 1. Stored property already defined — reassignment
-                    let val = self.lower_expr(value);
-                    self.assign_var(&stored_key, val);
-                } else {
-                    // Check if it's a computed property
-                    let is_computed = if let Some(meta) = self.lookup_struct_meta(&base_key) {
-                        let meta = meta.clone();
+                // 1. Init body + SelfRef: per-field variable path
+                if self.in_init_body {
+                    if let ExprKind::SelfRef = &object.kind {
+                        // Reject computed property setter on self during init
+                        let struct_name = self.init_struct_name.as_ref().unwrap().clone();
                         let sem = self.sem_info.as_ref().unwrap();
-                        let struct_info = sem.struct_defs.get(&meta.struct_name).unwrap().clone();
-                        struct_info
-                            .computed
-                            .iter()
-                            .find(|p| p.name == *field)
-                            .cloned()
-                    } else {
-                        None
-                    };
-
-                    if let Some(prop) = is_computed {
-                        // 2. Computed property — inline setter
-                        let val = self.lower_expr(value);
-                        let setter_block = prop.setter.as_ref().unwrap().clone();
-
-                        let prev_self_var = self.self_var_name.clone();
-                        self.self_var_name = Some(base_key.clone());
-                        self.push_scope();
-
-                        self.define_var("newValue".to_string(), val);
-
-                        let (_, mut setter_regions) = self.lower_block_stmts(&setter_block);
-                        self.pending_regions.append(&mut setter_regions);
-
-                        self.pop_scope();
-                        self.self_var_name = prev_self_var;
-                    } else {
-                        // 3. Stored property not yet defined — first assignment in init body
-                        let val = self.lower_expr(value);
-                        self.define_var(stored_key, val);
+                        if let Some(info) = sem.struct_defs.get(&struct_name)
+                            && info.computed.iter().any(|p| p.name == *field)
+                        {
+                            self.record_error(format!(
+                                "computed property setter `{}` on `self` in initializer body \
+                                     is not supported (self is not fully materialized during init)",
+                                field
+                            ));
+                            return StmtResult::None;
+                        }
+                        // Stored field — write to per-field variable
+                        let new_val = self.lower_expr(value);
+                        let self_name = self.self_var_name.as_ref().unwrap().clone();
+                        let key = format!("{}.{}", self_name, field);
+                        if self.try_lookup_var(&key).is_some() {
+                            self.assign_var(&key, new_val);
+                        } else {
+                            self.define_var(key, new_val);
+                        }
+                        return StmtResult::None;
+                    }
+                    // 2. Init body + nested self path: error
+                    if self.expr_refers_to_self(object) {
+                        self.record_error(
+                            "nested field assignment through `self` in initializer body is not supported",
+                        );
+                        return StmtResult::None;
                     }
                 }
+
+                // 3. General case: try computed setter, then recursive field assign
+                if self.try_lower_computed_setter(object, field, value) {
+                    return StmtResult::None;
+                }
+
+                let new_val = self.lower_expr(value);
+                self.lower_field_assign_recursive(object, field, new_val);
                 StmtResult::None
             }
         }
@@ -674,15 +815,7 @@ impl Lowering {
                 self.value_types.insert(result, BirType::Bool);
                 result
             }
-            ExprKind::Ident(name) => {
-                if self.lookup_struct_meta(name).is_some() {
-                    return self.record_error(format!(
-                        "struct variable `{}` in expression position is not yet supported",
-                        name
-                    ));
-                }
-                self.lookup_var(name)
-            }
+            ExprKind::Ident(name) => self.lookup_var(name),
             ExprKind::UnaryOp { op, operand } => {
                 let operand_val = self.lower_expr(operand);
                 match op {
@@ -742,9 +875,13 @@ impl Lowering {
             ExprKind::Call { name, args } => {
                 let sem = self.sem_info.as_ref().unwrap();
                 if sem.struct_init_calls.contains(&expr.id) {
-                    return self.record_error(
-                        "struct value in expression position is not yet supported (Call as StructInit)",
-                    );
+                    let struct_info = sem.struct_defs.get(name).unwrap().clone();
+                    if struct_info.init.body.is_some() {
+                        let field_values = self.lower_explicit_init(name, &struct_info, expr);
+                        return self.emit_struct_init(name, &field_values);
+                    }
+                    // No-arg memberwise init (call syntax with no custom init body)
+                    return self.emit_struct_init(name, &[]);
                 }
                 let arg_vals: Vec<Value> = args.iter().map(|a| self.lower_expr(a)).collect();
                 let ty = self.func_sigs.get(name).cloned().unwrap_or(BirType::I32);
@@ -787,7 +924,7 @@ impl Lowering {
                     .get(&operand)
                     .cloned()
                     .unwrap_or(BirType::I32);
-                let to_ty = convert_type(target_type);
+                let to_ty = self.convert_type_with_structs(target_type);
                 let result = self.fresh_value();
                 self.emit(Instruction::Cast {
                     result,
@@ -798,62 +935,92 @@ impl Lowering {
                 self.value_types.insert(result, to_ty);
                 result
             }
-            ExprKind::StructInit { .. } => self.record_error(
-                "struct value in expression position is not yet supported (StructInit)",
-            ),
+            ExprKind::StructInit { name, args } => {
+                let sem = self.sem_info.as_ref().unwrap();
+                let struct_info = sem.struct_defs.get(name).unwrap().clone();
+                if struct_info.init.body.is_some() {
+                    let field_values = self.lower_explicit_init(name, &struct_info, expr);
+                    return self.emit_struct_init(name, &field_values);
+                }
+                let field_values: Vec<(String, Value)> = args
+                    .iter()
+                    .map(|(label, arg_expr)| (label.clone(), self.lower_expr(arg_expr)))
+                    .collect();
+                self.emit_struct_init(name, &field_values)
+            }
             ExprKind::FieldAccess { object, field } => {
-                let Some(base_key) = self.resolve_field_access_key(object) else {
-                    return self.record_error(format!(
-                        "struct value in expression position is not yet supported (FieldAccess on {:?})",
-                        object.kind
-                    ));
-                };
-                let key = format!("{}.{}", base_key, field);
-
-                // 1. Stored field — already defined in scopes
-                if self.try_lookup_var(&key).is_some() {
-                    return self.lookup_var(&key);
-                }
-
-                // 2. Computed property — inline getter
-                if let Some(meta) = self.lookup_struct_meta(&base_key) {
-                    let meta = meta.clone();
+                // Special case: self.field during init body
+                if let ExprKind::SelfRef = &object.kind
+                    && self.in_init_body
+                    && let Some(self_name) = &self.self_var_name.clone()
+                {
+                    // Reject computed property access during init
+                    let struct_name = self.init_struct_name.as_ref().unwrap().clone();
                     let sem = self.sem_info.as_ref().unwrap();
-                    let struct_info = sem.struct_defs.get(&meta.struct_name).unwrap().clone();
-
-                    if let Some(prop) = struct_info.computed.iter().find(|p| p.name == *field) {
-                        let getter_block = prop.getter.clone();
-
-                        let prev_self_var = self.self_var_name.clone();
-                        self.self_var_name = Some(base_key.clone());
-                        self.push_scope();
-
-                        let (result, mut getter_regions) = self.lower_block_stmts(&getter_block);
-                        self.pending_regions.append(&mut getter_regions);
-                        let getter_val = match result {
-                            Some(StmtResult::Return(v)) => v,
-                            _ => unreachable!("getter must return a value"),
-                        };
-
-                        self.pop_scope();
-                        self.self_var_name = prev_self_var;
-
-                        return getter_val;
+                    if let Some(info) = sem.struct_defs.get(&struct_name)
+                        && info.computed.iter().any(|p| p.name == *field)
+                    {
+                        return self.record_error(format!(
+                                        "computed property `{}` access on `self` in initializer body \
+                                         is not supported (self is not fully materialized during init)",
+                                        field
+                                    ));
                     }
-                }
-
-                // 3. Read-before-init in initializer
-                if self.self_var_name.is_some() {
+                    // Stored field — read from per-field variable
+                    let key = format!("{}.{}", self_name, field);
+                    if let Some(val) = self.try_lookup_var(&key) {
+                        return val;
+                    }
                     return self.record_error(format!(
-                        "read-before-init: field `{}` read before initialization in initializer",
+                        "read-before-init: field `{}` read before initialization",
                         field
                     ));
                 }
 
-                self.lookup_var(&key)
+                // General case: lower the receiver, then dispatch on lowered type
+                let receiver = self.lower_receiver(object);
+                match receiver {
+                    Some(recv) => {
+                        let sem = self.sem_info.as_ref().unwrap();
+                        let struct_info = sem.struct_defs.get(&recv.struct_name).unwrap().clone();
+
+                        // Check if field is a computed property
+                        if let Some(prop) = struct_info.computed.iter().find(|p| p.name == *field) {
+                            // Inline the getter with receiver as self
+                            return self.inline_getter(&recv.var_name, &prop.getter.clone());
+                        }
+
+                        // Stored field — emit FieldGet
+                        let field_sem_ty = &struct_info
+                            .fields
+                            .iter()
+                            .find(|(n, _)| n == field)
+                            .unwrap()
+                            .1;
+                        let field_ty = semantic_type_to_bir(field_sem_ty);
+                        let result = self.fresh_value();
+                        self.emit(Instruction::FieldGet {
+                            result,
+                            object: recv.value,
+                            field: field.clone(),
+                            object_ty: BirType::Struct(recv.struct_name),
+                            ty: field_ty.clone(),
+                        });
+                        self.value_types.insert(result, field_ty);
+                        result
+                    }
+                    None => unreachable!("field access on non-struct (semantic guarantees this)"),
+                }
             }
-            ExprKind::SelfRef => self
-                .record_error("struct value in expression position is not yet supported (SelfRef)"),
+            ExprKind::SelfRef => {
+                let self_name = self.self_var_name.as_ref().unwrap();
+                if self.in_init_body {
+                    return self.record_error(
+                        "bare `self` in initializer body is not supported; use self.field instead",
+                    );
+                }
+                self.lookup_var(self_name)
+            }
         }
     }
 
@@ -1098,6 +1265,7 @@ impl Lowering {
                 // merge block
                 let merge_params = if has_merge_value {
                     let result = self.fresh_value();
+                    self.value_types.insert(result, merge_type.clone());
                     self.start_block(bb_merge, vec![(result, merge_type)]);
                     result
                 } else {
@@ -1200,6 +1368,7 @@ impl Lowering {
             .iter()
             .map(|(_, _, ty)| {
                 let v = self.fresh_value();
+                self.value_types.insert(v, ty.clone());
                 (v, ty.clone())
             })
             .collect();
@@ -1475,31 +1644,6 @@ pub fn lower_program(
     program: &Program,
     sem_info: &crate::semantic::SemanticInfo,
 ) -> Result<BirModule> {
-    // Pre-collect function signatures
-    let mut func_sigs = HashMap::new();
-    for func in &program.functions {
-        // Reject functions with struct params or return types
-        if matches!(func.return_type, TypeAnnotation::Named(_)) {
-            return Err(BengalError::LoweringError {
-                message: format!(
-                    "function `{}` returns a struct type, which is not yet supported in lowering",
-                    func.name
-                ),
-            });
-        }
-        for param in &func.params {
-            if matches!(param.ty, TypeAnnotation::Named(_)) {
-                return Err(BengalError::LoweringError {
-                    message: format!(
-                        "function `{}` has struct parameter `{}`, which is not yet supported in lowering",
-                        func.name, param.name
-                    ),
-                });
-            }
-        }
-        func_sigs.insert(func.name.clone(), convert_type(&func.return_type));
-    }
-
     // Build struct_layouts from semantic StructInfo
     let mut struct_layouts: HashMap<String, Vec<(String, BirType)>> = HashMap::new();
     for (name, info) in &sem_info.struct_defs {
@@ -1532,7 +1676,14 @@ pub fn lower_program(
         struct_defs: sem_info.struct_defs.clone(),
         struct_init_calls: sem_info.struct_init_calls.clone(),
     };
-    let mut lowering = Lowering::new(func_sigs, sem_info_ref);
+    let mut lowering = Lowering::new(HashMap::new(), sem_info_ref);
+
+    // Build func_sigs using convert_type_with_structs (supports Named types)
+    for func in &program.functions {
+        let bir_ty = lowering.convert_type_with_structs(&func.return_type);
+        lowering.func_sigs.insert(func.name.clone(), bir_ty);
+    }
+
     let functions = program
         .functions
         .iter()
@@ -1668,33 +1819,72 @@ bb0:
         assert!(output.contains("literal 0 : Bool"));
     }
 
-    // --- Phase 5: Struct lowering tests ---
+    // --- Phase 5: Struct lowering tests (updated for first-class struct instructions) ---
 
     #[test]
-    fn lower_struct_field_expansion() {
+    fn lower_struct_init_basic() {
+        let output = lower_str(
+            "struct Point { var x: Int32; var y: Int32; } func main() -> Int32 { let p = Point(x: 1, y: 2); return p.x; }",
+        );
+        assert!(output.contains("struct_init @Point"));
+        assert!(output.contains("field_get"));
+    }
+
+    #[test]
+    fn lower_struct_field_get() {
         let output = lower_str(
             "struct Point { var x: Int32; var y: Int32; } func main() -> Int32 { var p = Point(x: 1, y: 2); return p.x; }",
         );
-        assert!(output.contains("literal 1 : Int32"));
-        assert!(output.contains("literal 2 : Int32"));
-        assert!(output.contains("return"));
+        assert!(output.contains("struct_init @Point"));
+        assert!(output.contains(r#"field_get"#));
+        assert!(output.contains(r#""x""#));
     }
 
     #[test]
-    fn lower_struct_field_write() {
+    fn lower_struct_field_set() {
         let output = lower_str(
             "struct Point { var x: Int32; } func main() -> Int32 { var p = Point(x: 1); p.x = 10; return p.x; }",
         );
-        assert!(output.contains("literal 10 : Int32"));
+        assert!(output.contains("struct_init @Point"));
+        assert!(output.contains("field_set"));
+        assert!(output.contains("field_get"));
     }
 
     #[test]
-    fn lower_struct_value_copy() {
+    fn lower_struct_as_function_arg() {
         let output = lower_str(
-            "struct Point { var x: Int32; } func main() -> Int32 { var p = Point(x: 1); var q = p; q.x = 99; return p.x; }",
+            "struct Point { var x: Int32; } func get_x(p: Point) -> Int32 { return p.x; } func main() -> Int32 { return get_x(Point(x: 42)); }",
         );
-        assert!(output.contains("literal 1 : Int32"));
-        assert!(output.contains("literal 99 : Int32"));
+        assert!(output.contains("@get_x(%0: Point)"));
+        assert!(output.contains("field_get"));
+    }
+
+    #[test]
+    fn lower_struct_as_return_value() {
+        let output = lower_str(
+            "struct Point { var x: Int32; } func make() -> Point { return Point(x: 5); } func main() -> Int32 { let p = make(); return p.x; }",
+        );
+        assert!(output.contains("@make() -> Point"));
+        assert!(output.contains("struct_init @Point"));
+    }
+
+    #[test]
+    fn lower_struct_in_if_expr() {
+        let output = lower_str(
+            "struct Point { var x: Int32; } func main() -> Int32 { let p = if true { yield Point(x: 1); } else { yield Point(x: 2); }; return p.x; }",
+        );
+        assert!(output.contains("struct_init @Point"));
+        assert!(output.contains("field_get"));
+    }
+
+    #[test]
+    fn lower_struct_computed_property() {
+        let output = lower_str(
+            "struct Foo { var x: Int32; var double: Int32 { get { return self.x; } }; } func main() -> Int32 { var f = Foo(x: 5); return f.double; }",
+        );
+        assert!(output.contains("struct_init @Foo"));
+        // Getter is inlined — field_get on self.x
+        assert!(output.contains("field_get"));
     }
 
     #[test]
@@ -1702,16 +1892,27 @@ bb0:
         let output = lower_str(
             "struct Foo { var x: Int32; init(val: Int32) { self.x = val; } } func main() -> Int32 { var f = Foo(val: 42); return f.x; }",
         );
+        assert!(output.contains("struct_init @Foo"));
         assert!(output.contains("literal 42 : Int32"));
-        assert!(output.contains("return"));
     }
 
     #[test]
-    fn lower_struct_computed_getter() {
+    fn lower_struct_nested_field_assign() {
         let output = lower_str(
-            "struct Foo { var x: Int32; var double: Int32 { get { return self.x; } }; } func main() -> Int32 { var f = Foo(x: 5); return f.double; }",
+            "struct Inner { var x: Int32; } struct Outer { var inner: Inner; } func main() -> Int32 { var o = Outer(inner: Inner(x: 1)); o.inner.x = 10; return o.inner.x; }",
         );
-        assert!(output.contains("literal 5 : Int32"));
+        assert!(output.contains("field_get"));
+        assert!(output.contains("field_set"));
+    }
+
+    #[test]
+    fn lower_struct_mutable_in_loop() {
+        let output = lower_str(
+            "struct Acc { var val: Int32; } func main() -> Int32 { var a = Acc(val: 0); var i: Int32 = 0; while i < 3 { a.val = a.val + 1; i = i + 1; }; return a.val; }",
+        );
+        assert!(output.contains("struct_init @Acc"));
+        assert!(output.contains("field_get"));
+        assert!(output.contains("field_set"));
     }
 
     #[test]
@@ -1719,53 +1920,21 @@ bb0:
         let output = lower_str(
             "struct Foo { var x: Int32; var bar: Int32 { get { return 0; } set { self.x = newValue; } }; } func main() -> Int32 { var f = Foo(x: 1); f.bar = 10; return f.x; }",
         );
-        assert!(output.contains("literal 10 : Int32"));
+        // Setter is inlined — field_set on self.x via setter body
+        assert!(output.contains("field_set"));
     }
 
     #[test]
-    fn lower_err_struct_return_type() {
-        let tokens = tokenize(
-            "struct Point { var x: Int32; } func make() -> Point { return Point(x: 1); } func main() -> Int32 { return 0; }",
-        ).unwrap();
-        let program = parse(tokens).unwrap();
-        let sem_info = semantic::analyze(&program).unwrap();
-        let result = lower_program(&program, &sem_info);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn lower_err_struct_param() {
-        let tokens = tokenize(
-            "struct Point { var x: Int32; } func use_point(p: Point) -> Int32 { return p.x; } func main() -> Int32 { return 0; }",
-        ).unwrap();
-        let program = parse(tokens).unwrap();
-        let sem_info = semantic::analyze(&program).unwrap();
-        let result = lower_program(&program, &sem_info);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn lower_err_struct_var_in_expr_position() {
-        let tokens = tokenize(
-            "struct Point { var x: Int32; } func main() -> Int32 { var p = Point(x: 1); p; return 0; }",
-        ).unwrap();
-        let program = parse(tokens).unwrap();
-        let sem_info = semantic::analyze(&program).unwrap();
-        let result = lower_program(&program, &sem_info);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn lower_err_struct_init_field_access() {
-        let tokens = tokenize(
+    fn lower_struct_init_field_access() {
+        // Point(x: 1).x should now work (struct in expression position)
+        let output = lower_str(
             "struct Point { var x: Int32; } func main() -> Int32 { return Point(x: 1).x; }",
-        )
-        .unwrap();
-        let program = parse(tokens).unwrap();
-        let sem_info = semantic::analyze(&program).unwrap();
-        let result = lower_program(&program, &sem_info);
-        assert!(result.is_err());
+        );
+        assert!(output.contains("struct_init @Point"));
+        assert!(output.contains("field_get"));
     }
+
+    // --- Error tests ---
 
     #[test]
     fn lower_err_read_before_init() {
@@ -1776,6 +1945,7 @@ bb0:
         let sem_info = semantic::analyze(&program).unwrap();
         let result = lower_program(&program, &sem_info);
         assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("read-before-init"));
     }
 
     #[test]
@@ -1787,5 +1957,51 @@ bb0:
         let result = lower_program(&program, &sem_info);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("recursive struct"));
+    }
+
+    #[test]
+    fn lower_err_bare_self_in_init() {
+        let tokens = tokenize(
+            "struct Foo { var x: Int32; init(val: Int32) { self.x = val; let s = self; } } func main() -> Int32 { var f = Foo(val: 1); return f.x; }",
+        ).unwrap();
+        let program = parse(tokens).unwrap();
+        let sem_info = semantic::analyze(&program).unwrap();
+        let result = lower_program(&program, &sem_info);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("bare `self`"));
+    }
+
+    #[test]
+    fn lower_err_computed_on_self_in_init() {
+        let tokens = tokenize(
+            "struct Foo { var x: Int32; var double: Int32 { get { return self.x; } }; init(val: Int32) { self.x = val; let d: Int32 = self.double; } } func main() -> Int32 { var f = Foo(val: 1); return f.x; }",
+        ).unwrap();
+        let program = parse(tokens).unwrap();
+        let sem_info = semantic::analyze(&program).unwrap();
+        let result = lower_program(&program, &sem_info);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("computed property")
+        );
+    }
+
+    #[test]
+    fn lower_err_nested_self_field_assign_in_init() {
+        let tokens = tokenize(
+            "struct Inner { var x: Int32; } struct Outer { var inner: Inner; init() { self.inner = Inner(x: 0); self.inner.x = 10; } } func main() -> Int32 { var o = Outer(); return o.inner.x; }",
+        ).unwrap();
+        let program = parse(tokens).unwrap();
+        let sem_info = semantic::analyze(&program).unwrap();
+        let result = lower_program(&program, &sem_info);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("nested field assignment")
+        );
     }
 }
