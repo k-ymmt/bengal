@@ -109,6 +109,22 @@ fn function_returns_bool() {
     );
 }
 
+#[test]
+fn exhaustive_return_unit() {
+    // Void function where both branches return — no trailing return needed
+    assert_eq!(
+        compile_and_run(
+            r#"
+            func side_effect(x: Int32) {
+                if x > 0 { return; } else { return; };
+            }
+            func main() -> Int32 { side_effect(1); return 42; }
+        "#
+        ),
+        42
+    );
+}
+
 // --- Error cases ---
 
 #[test]
@@ -165,6 +181,32 @@ fn err_wrong_arg_count() {
         r#"
         func add(a: Int32, b: Int32) -> Int32 { return a + b; }
         func main() -> Int32 { return add(1); }
+    "#,
+    );
+}
+
+#[test]
+fn err_partial_return_in_if_else() {
+    // Only one branch returns — still needs trailing return
+    compile_source_should_fail(
+        r#"
+        func foo(x: Int32) -> Int32 {
+            if x > 0 { return 1; } else { };
+        }
+        func main() -> Int32 { return foo(5); }
+    "#,
+    );
+}
+
+#[test]
+fn err_if_without_else_return() {
+    // if without else cannot exhaustively return
+    compile_source_should_fail(
+        r#"
+        func foo(x: Int32) -> Int32 {
+            if x > 0 { return 1; };
+        }
+        func main() -> Int32 { return foo(5); }
     "#,
     );
 }

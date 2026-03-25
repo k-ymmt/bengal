@@ -218,6 +218,26 @@ fn exhaustive_return_if_else() {
     );
 }
 
+#[test]
+fn exhaustive_return_nested() {
+    // Nested if/else where all leaf branches return
+    assert_eq!(
+        compile_and_run(
+            r#"
+            func classify(x: Int32) -> Int32 {
+                if x > 0 {
+                    if x > 100 { return 2; } else { return 1; };
+                } else {
+                    return 0;
+                };
+            }
+            func main() -> Int32 { return classify(50); }
+        "#,
+        ),
+        1
+    );
+}
+
 // --- while loops ---
 
 #[test]

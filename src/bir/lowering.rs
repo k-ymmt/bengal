@@ -61,6 +61,9 @@ struct Lowering {
     name_map: Option<HashMap<String, String>>,
     // Set by lower_if when both branches diverge (all paths return/break/continue)
     last_expr_diverged: bool,
+    // When inlining a getter, redirect `return expr` to this continuation block
+    // instead of emitting Terminator::Return.  The block has one param for the value.
+    getter_return_bb: Option<(u32, Value, BirType)>,
 }
 
 impl Lowering {
@@ -85,6 +88,7 @@ impl Lowering {
             lowering_error: None,
             name_map: None,
             last_expr_diverged: false,
+            getter_return_bb: None,
         }
     }
 
@@ -317,22 +321,53 @@ impl Lowering {
         }
     }
 
-    fn inline_getter(&mut self, self_var_name: &str, getter_block: &Block) -> Value {
+    fn inline_getter(
+        &mut self,
+        self_var_name: &str,
+        getter_block: &Block,
+        return_ty: BirType,
+    ) -> Value {
         let prev_self_var = self.self_var_name.clone();
         let prev_in_init = self.in_init_body;
+        let prev_getter_return_bb = self.getter_return_bb.take();
+
+        // Allocate a continuation block that accepts the getter's return value as a param.
+        let cont_bb = self.fresh_block();
+        let cont_val = self.fresh_value();
+        self.value_types.insert(cont_val, return_ty.clone());
+        self.getter_return_bb = Some((cont_bb, cont_val, return_ty.clone()));
+
         self.self_var_name = Some(self_var_name.to_string());
         self.in_init_body = false;
         self.push_scope();
         let (result, mut getter_regions) = self.lower_block_stmts(getter_block);
         self.pending_regions.append(&mut getter_regions);
-        let val = match result {
-            Some(StmtResult::Return(v)) => v,
-            _ => unreachable!("getter must return"),
-        };
         self.pop_scope();
         self.self_var_name = prev_self_var;
         self.in_init_body = prev_in_init;
-        val
+        self.getter_return_bb = prev_getter_return_bb;
+
+        match result {
+            Some(StmtResult::Return(v)) => {
+                // Simple trailing-return getter: seal the current block by branching to cont_bb,
+                // then start cont_bb so the caller continues from there.
+                // NOTE: with getter_return_bb set, Stmt::Return redirects to cont_bb and returns
+                // ReturnVoid, so this arm is normally unreachable — but kept as a safety fallback.
+                self.seal_block(Terminator::Br {
+                    target: cont_bb,
+                    args: vec![(v, return_ty.clone())],
+                });
+                self.start_block(cont_bb, vec![(cont_val, return_ty)]);
+                cont_val
+            }
+            Some(StmtResult::ReturnVoid) | None => {
+                // Exhaustive control-flow returns: all paths branched to cont_bb already.
+                // The current block is a dead/unreachable block — abandon it and switch to cont_bb.
+                self.start_block(cont_bb, vec![(cont_val, return_ty)]);
+                cont_val
+            }
+            _ => unreachable!("getter body produced unexpected StmtResult"),
+        }
     }
 
     fn try_lower_computed_setter(&mut self, object: &Expr, field: &str, value: &Expr) -> bool {
@@ -692,7 +727,17 @@ impl Lowering {
             }
             Stmt::Return(Some(expr)) => {
                 let val = self.lower_expr(expr);
-                StmtResult::Return(val)
+                if let Some((cont_bb, _param, ty)) = self.getter_return_bb.clone() {
+                    self.seal_block(Terminator::Br {
+                        target: cont_bb,
+                        args: vec![(val, ty)],
+                    });
+                    let dead_bb = self.fresh_block();
+                    self.start_block(dead_bb, vec![]);
+                    StmtResult::ReturnVoid
+                } else {
+                    StmtResult::Return(val)
+                }
             }
             Stmt::Return(None) => StmtResult::ReturnVoid,
             Stmt::Yield(expr) => {
@@ -1013,7 +1058,12 @@ impl Lowering {
                         // Check if field is a computed property
                         if let Some(prop) = struct_info.computed.iter().find(|p| p.name == *field) {
                             // Inline the getter with receiver as self
-                            return self.inline_getter(&recv.var_name, &prop.getter.clone());
+                            let prop_ty = semantic_type_to_bir(&prop.ty);
+                            return self.inline_getter(
+                                &recv.var_name,
+                                &prop.getter.clone(),
+                                prop_ty,
+                            );
                         }
 
                         // Stored field — emit FieldGet

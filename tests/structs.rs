@@ -189,6 +189,29 @@ fn field_assign_complex_expr() {
     );
 }
 
+#[test]
+fn getter_exhaustive_return() {
+    assert_eq!(
+        compile_and_run(
+            r#"
+            struct Classify {
+                var x: Int32;
+                var label: Int32 {
+                    get {
+                        if self.x > 0 { return 1; } else { return 0; };
+                    }
+                };
+            }
+            func main() -> Int32 {
+                let c = Classify(x: 5);
+                return c.label;
+            }
+        "#
+        ),
+        1
+    );
+}
+
 // --- Error cases ---
 
 // Note: err_recursive_struct is omitted — the compiler does not yet detect
