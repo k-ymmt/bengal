@@ -185,24 +185,6 @@ fn nested_if() {
 }
 
 #[test]
-fn both_branches_diverge() {
-    // Compiler requires top-level return even when all branches diverge,
-    // so we add an unreachable return 0 at the end.
-    assert_eq!(
-        compile_and_run(
-            r#"
-            func choose(x: Int32) -> Int32 {
-                if x > 0 { return 1; } else { return 0; };
-                return 0;
-            }
-            func main() -> Int32 { return choose(5); }
-        "#
-        ),
-        1
-    );
-}
-
-#[test]
 fn exhaustive_return_if_else() {
     // Both branches return — no trailing return needed
     assert_eq!(

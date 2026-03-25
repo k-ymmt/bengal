@@ -212,6 +212,7 @@ property_req  = "var" , identifier , ":" , type , "{" , "get" , [ "set" ] , "}" 
 - `main` function must exist, take no parameters, and return `Int32`.
 - Function return type defaults to `()` if `->` is omitted.
 - All functions must end with a `return` statement.
+- A function may omit a trailing `return` if all control-flow paths end with `return` (e.g., `if`/`else` where both branches return).
 - `return` may appear at any position (early return is allowed).
 - `return;` (no value) is valid for `()` return type functions.
 
