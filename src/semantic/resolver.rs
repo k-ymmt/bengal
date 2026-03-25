@@ -55,6 +55,27 @@ pub struct SelfContext {
     pub mutable: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProtocolMethodSig {
+    pub name: String,
+    pub params: Vec<(String, Type)>,
+    pub return_type: Type,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProtocolPropertyReq {
+    pub name: String,
+    pub ty: Type,
+    pub has_setter: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProtocolInfo {
+    pub name: String,
+    pub methods: Vec<ProtocolMethodSig>,
+    pub properties: Vec<ProtocolPropertyReq>,
+}
+
 #[derive(Default)]
 pub struct Resolver {
     scopes: Vec<HashMap<String, VarInfo>>,
@@ -63,6 +84,7 @@ pub struct Resolver {
     loop_depth: u32,
     loop_break_types: Vec<Option<Type>>,
     struct_defs: HashMap<String, StructInfo>,
+    protocol_defs: HashMap<String, ProtocolInfo>,
     pub self_context: Option<SelfContext>,
     pub struct_init_calls: HashSet<NodeId>,
 }
@@ -109,6 +131,14 @@ impl Resolver {
 
     pub fn lookup_struct(&self, name: &str) -> Option<&StructInfo> {
         self.struct_defs.get(name)
+    }
+
+    pub fn define_protocol(&mut self, name: String, info: ProtocolInfo) {
+        self.protocol_defs.insert(name, info);
+    }
+
+    pub fn lookup_protocol(&self, name: &str) -> Option<&ProtocolInfo> {
+        self.protocol_defs.get(name)
     }
 
     pub fn reserve_struct(&mut self, name: String) {

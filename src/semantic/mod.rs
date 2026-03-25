@@ -36,6 +36,24 @@ pub fn analyze(program: &Program) -> Result<SemanticInfo> {
         }
         resolver.reserve_struct(struct_def.name.clone());
     }
+    // Pass 1a (continued): register protocol names
+    for proto in &program.protocols {
+        if resolver.lookup_struct(&proto.name).is_some()
+            || resolver.lookup_func(&proto.name).is_some()
+            || resolver.lookup_protocol(&proto.name).is_some()
+        {
+            return Err(sem_err(format!("duplicate definition `{}`", proto.name)));
+        }
+        resolver.define_protocol(
+            proto.name.clone(),
+            resolver::ProtocolInfo {
+                name: proto.name.clone(),
+                methods: vec![],
+                properties: vec![],
+            },
+        );
+    }
+
     for func in &program.functions {
         if resolver.lookup_struct(&func.name).is_some()
             || resolver.lookup_func(&func.name).is_some()
@@ -76,6 +94,52 @@ pub fn analyze(program: &Program) -> Result<SemanticInfo> {
                 }
             }
         }
+    }
+
+    // Pass 1b (continued): resolve protocol member types
+    for proto in &program.protocols {
+        let mut methods = Vec::new();
+        let mut properties = Vec::new();
+        for member in &proto.members {
+            match member {
+                ProtocolMember::MethodSig {
+                    name,
+                    params,
+                    return_type,
+                } => {
+                    let resolved_params: Vec<(String, Type)> = params
+                        .iter()
+                        .map(|p| Ok((p.name.clone(), resolve_type_checked(&p.ty, &resolver)?)))
+                        .collect::<Result<Vec<_>>>()?;
+                    let resolved_return = resolve_type_checked(return_type, &resolver)?;
+                    methods.push(resolver::ProtocolMethodSig {
+                        name: name.clone(),
+                        params: resolved_params,
+                        return_type: resolved_return,
+                    });
+                }
+                ProtocolMember::PropertyReq {
+                    name,
+                    ty,
+                    has_setter,
+                } => {
+                    let resolved_ty = resolve_type_checked(ty, &resolver)?;
+                    properties.push(resolver::ProtocolPropertyReq {
+                        name: name.clone(),
+                        ty: resolved_ty,
+                        has_setter: *has_setter,
+                    });
+                }
+            }
+        }
+        resolver.define_protocol(
+            proto.name.clone(),
+            resolver::ProtocolInfo {
+                name: proto.name.clone(),
+                methods,
+                properties,
+            },
+        );
     }
 
     // Pass 2: verify main function exists with correct signature
