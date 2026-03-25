@@ -435,6 +435,79 @@ mod tests {
     }
 
     #[test]
+    fn module_keyword() {
+        assert_eq!(token_nodes("module"), vec![Token::Module, Token::Eof]);
+    }
+
+    #[test]
+    fn import_keyword() {
+        assert_eq!(token_nodes("import"), vec![Token::Import, Token::Eof]);
+    }
+
+    #[test]
+    fn visibility_keywords() {
+        assert_eq!(token_nodes("public"), vec![Token::Public, Token::Eof]);
+        assert_eq!(token_nodes("package"), vec![Token::Package, Token::Eof]);
+        assert_eq!(token_nodes("internal"), vec![Token::Internal, Token::Eof]);
+        assert_eq!(
+            token_nodes("fileprivate"),
+            vec![Token::Fileprivate, Token::Eof]
+        );
+        assert_eq!(token_nodes("private"), vec![Token::Private, Token::Eof]);
+    }
+
+    #[test]
+    fn super_keyword() {
+        assert_eq!(token_nodes("super"), vec![Token::Super, Token::Eof]);
+    }
+
+    #[test]
+    fn colon_colon_token() {
+        assert_eq!(
+            token_nodes("foo::bar"),
+            vec![
+                Token::Ident("foo".to_string()),
+                Token::ColonColon,
+                Token::Ident("bar".to_string()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn colon_colon_does_not_break_existing_colon() {
+        assert_eq!(
+            token_nodes("x: Int32"),
+            vec![
+                Token::Ident("x".to_string()),
+                Token::Colon,
+                Token::Ident("Int32".to_string()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn keyword_prefix_not_captured() {
+        assert_eq!(
+            token_nodes("modules"),
+            vec![Token::Ident("modules".to_string()), Token::Eof]
+        );
+        assert_eq!(
+            token_nodes("imported"),
+            vec![Token::Ident("imported".to_string()), Token::Eof]
+        );
+        assert_eq!(
+            token_nodes("publicly"),
+            vec![Token::Ident("publicly".to_string()), Token::Eof]
+        );
+        assert_eq!(
+            token_nodes("superb"),
+            vec![Token::Ident("superb".to_string()), Token::Eof]
+        );
+    }
+
+    #[test]
     fn lex_error_on_invalid_character() {
         let err = tokenize("2 @ 3").unwrap_err();
         match err {

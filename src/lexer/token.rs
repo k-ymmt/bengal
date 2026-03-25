@@ -72,6 +72,28 @@ pub enum Token {
     #[token("protocol")]
     Protocol,
 
+    // Module system: keywords
+    #[token("module")]
+    Module,
+    #[token("import")]
+    Import,
+    #[token("public")]
+    Public,
+    #[token("package")]
+    Package,
+    #[token("internal")]
+    Internal,
+    #[token("fileprivate")]
+    Fileprivate,
+    #[token("private")]
+    Private,
+    #[token("super")]
+    Super,
+
+    // Module system: symbols
+    #[token("::")]
+    ColonColon,
+
     // Phase 2: symbols
     #[token("->")]
     Arrow,
@@ -157,6 +179,15 @@ impl fmt::Display for Token {
             Token::Init => write!(f, "init"),
             Token::SelfKw => write!(f, "self"),
             Token::Protocol => write!(f, "protocol"),
+            Token::Module => write!(f, "module"),
+            Token::Import => write!(f, "import"),
+            Token::Public => write!(f, "public"),
+            Token::Package => write!(f, "package"),
+            Token::Internal => write!(f, "internal"),
+            Token::Fileprivate => write!(f, "fileprivate"),
+            Token::Private => write!(f, "private"),
+            Token::Super => write!(f, "super"),
+            Token::ColonColon => write!(f, "::"),
             Token::Dot => write!(f, "."),
             Token::EqEq => write!(f, "=="),
             Token::NotEq => write!(f, "!="),
