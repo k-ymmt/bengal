@@ -52,17 +52,18 @@ impl Parser {
 
     fn parse_program(&mut self) -> Result<Program> {
         let mut structs = Vec::new();
+        let mut protocols = Vec::new();
         let mut functions = Vec::new();
         while self.peek().node != Token::Eof {
-            if self.peek().node == Token::Struct {
-                structs.push(self.parse_struct_def()?);
-            } else {
-                functions.push(self.parse_function()?);
+            match self.peek().node {
+                Token::Struct => structs.push(self.parse_struct_def()?),
+                Token::Protocol => protocols.push(self.parse_protocol_def()?),
+                _ => functions.push(self.parse_function()?),
             }
         }
         Ok(Program {
             structs,
-            protocols: vec![],
+            protocols,
             functions,
         })
     }
@@ -175,6 +176,76 @@ impl Parser {
                 let tok = self.peek();
                 Err(BengalError::ParseError {
                     message: format!("expected struct member, found `{}`", tok.node),
+                    span: tok.span,
+                })
+            }
+        }
+    }
+
+    fn parse_protocol_def(&mut self) -> Result<ProtocolDef> {
+        self.expect(Token::Protocol)?;
+        let name = self.expect_ident()?;
+        self.expect(Token::LBrace)?;
+        let mut members = Vec::new();
+        while self.peek().node != Token::RBrace {
+            members.push(self.parse_protocol_member()?);
+        }
+        self.expect(Token::RBrace)?;
+        Ok(ProtocolDef { name, members })
+    }
+
+    fn parse_protocol_member(&mut self) -> Result<ProtocolMember> {
+        match &self.peek().node {
+            Token::Func => {
+                self.advance();
+                let name = self.expect_ident()?;
+                let params = self.parse_param_list()?;
+                let return_type = if self.peek().node == Token::Arrow {
+                    self.advance();
+                    self.parse_type()?
+                } else {
+                    TypeAnnotation::Unit
+                };
+                self.expect(Token::Semicolon)?;
+                Ok(ProtocolMember::MethodSig {
+                    name,
+                    params,
+                    return_type,
+                })
+            }
+            Token::Var => {
+                self.advance();
+                let name = self.expect_ident()?;
+                self.expect(Token::Colon)?;
+                let ty = self.parse_type()?;
+                self.expect(Token::LBrace)?;
+                // expect `get` identifier
+                let tok = self.expect(Token::Ident(String::new()))?;
+                match &tok.node {
+                    Token::Ident(s) if s == "get" => {}
+                    _ => {
+                        return Err(BengalError::ParseError {
+                            message: format!("expected `get`, found `{}`", tok.node),
+                            span: tok.span,
+                        });
+                    }
+                }
+                let has_setter = matches!(&self.peek().node, Token::Ident(s) if s == "set");
+                if has_setter {
+                    self.advance(); // consume `set`
+                }
+                self.expect(Token::RBrace)?;
+                self.expect(Token::Semicolon)?;
+                Ok(ProtocolMember::PropertyReq {
+                    name,
+                    ty,
+                    has_setter,
+                })
+            }
+            _ => {
+                let tok = self.peek();
+                Err(BengalError::ParseError {
+                    message: format!("expected protocol member, found `{}`", tok.node),
                     span: tok.span,
                 })
             }
@@ -688,7 +759,10 @@ pub fn parse(tokens: Vec<SpannedToken>) -> Result<Program> {
     let mut parser = Parser::new(tokens);
 
     // Phase 1 compatibility: if the first token is not `func`, treat as a bare expression
-    if matches!(parser.peek().node, Token::Func | Token::Struct) {
+    if matches!(
+        parser.peek().node,
+        Token::Func | Token::Struct | Token::Protocol
+    ) {
         let program = parser.parse_program()?;
         let next = parser.peek();
         if next.node != Token::Eof {
@@ -1568,5 +1642,21 @@ mod tests {
         let tokens = crate::lexer::tokenize(source).unwrap();
         let program = parse(tokens).unwrap();
         assert_eq!(program.structs[0].conformances, vec!["Foo", "Bar"]);
+    }
+
+    #[test]
+    fn parse_protocol_def() {
+        let source = r#"
+            protocol Summable {
+                func sum() -> Int32;
+                var total: Int32 { get };
+            }
+            func main() -> Int32 { return 0; }
+        "#;
+        let tokens = crate::lexer::tokenize(source).unwrap();
+        let program = parse(tokens).unwrap();
+        assert_eq!(program.protocols.len(), 1);
+        assert_eq!(program.protocols[0].name, "Summable");
+        assert_eq!(program.protocols[0].members.len(), 2);
     }
 }
