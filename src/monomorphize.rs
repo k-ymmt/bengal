@@ -382,6 +382,10 @@ fn substitute_type(ta: &TypeAnnotation, subst: &HashMap<String, TypeAnnotation>)
                 args: new_args,
             }
         }
+        TypeAnnotation::Array { element, size } => TypeAnnotation::Array {
+            element: Box::new(substitute_type(element, subst)),
+            size: *size,
+        },
         _ => ta.clone(),
     }
 }

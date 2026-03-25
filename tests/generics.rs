@@ -181,6 +181,17 @@ fn spec_full_example() {
 }
 
 #[test]
+fn generic_function_with_array() {
+    assert_eq!(
+        compile_and_run(
+            "func first<T>(arr: [T; 3]) -> T { return arr[0]; }
+             func main() -> Int32 { return first<Int32>([10, 20, 30]); }",
+        ),
+        10
+    );
+}
+
+#[test]
 fn generic_same_func_multiple_types() {
     assert_eq!(
         compile_and_run(
