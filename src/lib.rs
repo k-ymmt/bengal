@@ -281,6 +281,11 @@ fn collect_call_arg_types(
                 }
                 bir::instruction::Instruction::FieldGet { result, ty, .. } => (*result, ty.clone()),
                 bir::instruction::Instruction::FieldSet { result, ty, .. } => (*result, ty.clone()),
+                bir::instruction::Instruction::ArrayInit { result, ty, .. } => {
+                    (*result, ty.clone())
+                }
+                bir::instruction::Instruction::ArrayGet { result, ty, .. } => (*result, ty.clone()),
+                bir::instruction::Instruction::ArraySet { result, ty, .. } => (*result, ty.clone()),
             };
             value_types.insert(result, ty);
         }

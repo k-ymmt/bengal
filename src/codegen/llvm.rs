@@ -36,6 +36,10 @@ fn bir_type_to_llvm_type<'ctx>(
         BirType::Bool => Some(context.bool_type().into()),
         BirType::Unit => None,
         BirType::Struct(name) => Some(struct_types.get(name)?.as_basic_type_enum()),
+        BirType::Array { element, size } => {
+            let elem_ty = bir_type_to_llvm_type(context, element, struct_types)?;
+            Some(elem_ty.array_type(*size as u32).into())
+        }
     }
 }
 
@@ -62,6 +66,9 @@ fn collect_value_types(func: &BirFunction) -> HashMap<Value, BirType> {
                 Instruction::StructInit { result, ty, .. } => (*result, ty.clone()),
                 Instruction::FieldGet { result, ty, .. } => (*result, ty.clone()),
                 Instruction::FieldSet { result, ty, .. } => (*result, ty.clone()),
+                Instruction::ArrayInit { result, ty, .. } => (*result, ty.clone()),
+                Instruction::ArrayGet { result, ty, .. } => (*result, ty.clone()),
+                Instruction::ArraySet { result, ty, .. } => (*result, ty.clone()),
             };
             value_types.insert(result, ty);
         }
@@ -133,6 +140,7 @@ fn emit_instruction<'ctx>(
                     .into(),
                 BirType::Unit => return Ok(()),
                 BirType::Struct(_) => return Err(codegen_err("cannot create struct literal")),
+                BirType::Array { .. } => return Err(codegen_err("cannot create array literal")),
             };
             ctx.builder
                 .build_store(ctx.alloca_map[result], llvm_val)
@@ -457,6 +465,16 @@ fn emit_instruction<'ctx>(
             ctx.builder
                 .build_store(ctx.alloca_map[result], updated.into_struct_value())
                 .map_err(|e| codegen_err(e.to_string()))?;
+        }
+
+        Instruction::ArrayInit { .. } => {
+            return Err(codegen_err("ArrayInit codegen not yet implemented"));
+        }
+        Instruction::ArrayGet { .. } => {
+            return Err(codegen_err("ArrayGet codegen not yet implemented"));
+        }
+        Instruction::ArraySet { .. } => {
+            return Err(codegen_err("ArraySet codegen not yet implemented"));
         }
     }
     Ok(())

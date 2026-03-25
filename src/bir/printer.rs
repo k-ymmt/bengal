@@ -1,14 +1,17 @@
 use super::instruction::*;
 
-fn format_type(ty: &BirType) -> &str {
+fn format_type(ty: &BirType) -> String {
     match ty {
-        BirType::Unit => "()",
-        BirType::I32 => "Int32",
-        BirType::I64 => "Int64",
-        BirType::F32 => "Float32",
-        BirType::F64 => "Float64",
-        BirType::Bool => "Bool",
-        BirType::Struct(name) => name.as_str(),
+        BirType::Unit => "()".to_string(),
+        BirType::I32 => "Int32".to_string(),
+        BirType::I64 => "Int64".to_string(),
+        BirType::F32 => "Float32".to_string(),
+        BirType::F64 => "Float64".to_string(),
+        BirType::Bool => "Bool".to_string(),
+        BirType::Struct(name) => name.clone(),
+        BirType::Array { element, size } => {
+            format!("[{}; {}]", format_type(element), size)
+        }
     }
 }
 
@@ -55,7 +58,7 @@ fn print_function(func: &BirFunction, out: &mut String) {
         out.push_str(&format!("{}: {}", format_value(val), format_type(ty)));
     }
     out.push_str(") -> ");
-    out.push_str(format_type(&func.return_type));
+    out.push_str(&format_type(&func.return_type));
     out.push_str(" {\n");
 
     for block in &func.blocks {
@@ -215,6 +218,53 @@ fn print_instruction(inst: &Instruction, out: &mut String) {
                 field,
                 format_value(value),
                 format_type(ty),
+            ));
+        }
+        Instruction::ArrayInit {
+            result,
+            ty,
+            elements,
+        } => {
+            let elems_str: Vec<String> = elements.iter().map(format_value).collect();
+            out.push_str(&format!(
+                "{} = array_init [{}] : {}",
+                format_value(result),
+                elems_str.join(", "),
+                format_type(ty),
+            ));
+        }
+        Instruction::ArrayGet {
+            result,
+            ty,
+            array,
+            index,
+            array_size,
+        } => {
+            out.push_str(&format!(
+                "{} = array_get {}, {} : {} (size {})",
+                format_value(result),
+                format_value(array),
+                format_value(index),
+                format_type(ty),
+                array_size,
+            ));
+        }
+        Instruction::ArraySet {
+            result,
+            ty,
+            array,
+            index,
+            value,
+            array_size,
+        } => {
+            out.push_str(&format!(
+                "{} = array_set {}, {}, {} : {} (size {})",
+                format_value(result),
+                format_value(array),
+                format_value(index),
+                format_value(value),
+                format_type(ty),
+                array_size,
             ));
         }
     }

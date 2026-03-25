@@ -12,6 +12,7 @@ pub enum BirType {
     F64,
     Bool,
     Struct(String),
+    Array { element: Box<BirType>, size: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +95,29 @@ pub enum Instruction {
         field: String,
         value: Value,
         ty: BirType,
+    },
+    /// %result = array_init [%e0, %e1, ...] : [ElemType; N]
+    ArrayInit {
+        result: Value,
+        ty: BirType,
+        elements: Vec<Value>,
+    },
+    /// %result = array_get %array, %index : ElemType (array_size for runtime bounds check)
+    ArrayGet {
+        result: Value,
+        ty: BirType,
+        array: Value,
+        index: Value,
+        array_size: u64,
+    },
+    /// %result = array_set %array, %index, %value : [ElemType; N] (array_size for runtime bounds check)
+    ArraySet {
+        result: Value,
+        ty: BirType,
+        array: Value,
+        index: Value,
+        value: Value,
+        array_size: u64,
     },
 }
 

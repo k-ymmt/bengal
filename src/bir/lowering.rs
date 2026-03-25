@@ -844,8 +844,41 @@ impl Lowering {
                 self.lower_field_assign_recursive(object, field, new_val);
                 StmtResult::None
             }
-            Stmt::IndexAssign { .. } => {
-                todo!("BIR lowering for IndexAssign")
+            Stmt::IndexAssign {
+                object,
+                index,
+                value,
+            } => {
+                let idx_val = self.lower_expr(index);
+                let new_val = self.lower_expr(value);
+
+                // The object must be a variable (semantic analysis ensures this)
+                let var_name = match &object.kind {
+                    ExprKind::Ident(name) => name.clone(),
+                    _ => unreachable!("IndexAssign on non-ident (semantic guarantees this)"),
+                };
+                let arr_val = self.lookup_var(&var_name);
+                let arr_ty = self
+                    .value_types
+                    .get(&arr_val)
+                    .cloned()
+                    .unwrap_or(BirType::I32);
+                let size = match &arr_ty {
+                    BirType::Array { size, .. } => *size,
+                    _ => unreachable!("IndexAssign on non-array type (semantic guarantees this)"),
+                };
+                let result = self.fresh_value();
+                self.emit(Instruction::ArraySet {
+                    result,
+                    ty: arr_ty.clone(),
+                    array: arr_val,
+                    index: idx_val,
+                    value: new_val,
+                    array_size: size,
+                });
+                self.value_types.insert(result, arr_ty);
+                self.assign_var(&var_name, result);
+                StmtResult::None
             }
         }
     }
@@ -1131,11 +1164,49 @@ impl Lowering {
                 self.value_types.insert(result, ret_ty);
                 result
             }
-            ExprKind::ArrayLiteral { .. } => {
-                todo!("BIR lowering for ArrayLiteral")
+            ExprKind::ArrayLiteral { elements } => {
+                let elem_values: Vec<Value> = elements.iter().map(|e| self.lower_expr(e)).collect();
+                // Determine element BirType from first element
+                let elem_ty = if let Some(first) = elem_values.first() {
+                    self.value_types.get(first).cloned().unwrap_or(BirType::I32)
+                } else {
+                    BirType::I32
+                };
+                let arr_ty = BirType::Array {
+                    element: Box::new(elem_ty),
+                    size: elem_values.len() as u64,
+                };
+                let result = self.fresh_value();
+                self.emit(Instruction::ArrayInit {
+                    result,
+                    ty: arr_ty.clone(),
+                    elements: elem_values,
+                });
+                self.value_types.insert(result, arr_ty);
+                result
             }
-            ExprKind::IndexAccess { .. } => {
-                todo!("BIR lowering for IndexAccess")
+            ExprKind::IndexAccess { object, index } => {
+                let arr_val = self.lower_expr(object);
+                let idx_val = self.lower_expr(index);
+                let arr_ty = self
+                    .value_types
+                    .get(&arr_val)
+                    .cloned()
+                    .unwrap_or(BirType::I32);
+                let (elem_ty, size) = match &arr_ty {
+                    BirType::Array { element, size } => (*element.clone(), *size),
+                    _ => unreachable!("IndexAccess on non-array type (semantic guarantees this)"),
+                };
+                let result = self.fresh_value();
+                self.emit(Instruction::ArrayGet {
+                    result,
+                    ty: elem_ty.clone(),
+                    array: arr_val,
+                    index: idx_val,
+                    array_size: size,
+                });
+                self.value_types.insert(result, elem_ty);
+                result
             }
         }
     }
@@ -1729,9 +1800,10 @@ pub fn semantic_type_to_bir(ty: &crate::semantic::types::Type) -> BirType {
         crate::semantic::types::Type::Generic { name, .. } => {
             panic!("unresolved generic type `{}` in BIR lowering", name)
         }
-        crate::semantic::types::Type::Array { .. } => {
-            panic!("Array type not yet supported in semantic_type_to_bir")
-        }
+        crate::semantic::types::Type::Array { element, size } => BirType::Array {
+            element: Box::new(semantic_type_to_bir(element)),
+            size: *size,
+        },
     }
 }
 
@@ -1786,9 +1858,10 @@ fn convert_type(ty: &TypeAnnotation) -> BirType {
         TypeAnnotation::Generic { name, .. } => {
             panic!("Generic type `{}` not yet supported in convert_type", name)
         }
-        TypeAnnotation::Array { .. } => {
-            todo!("Array type not yet supported in convert_type")
-        }
+        TypeAnnotation::Array { element, size } => BirType::Array {
+            element: Box::new(convert_type(element)),
+            size: *size,
+        },
     }
 }
 
