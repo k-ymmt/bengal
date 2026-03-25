@@ -57,6 +57,8 @@ struct Lowering {
     in_init_body: bool,
     init_struct_name: Option<String>,
     lowering_error: Option<BengalError>,
+    // Name mangling map for per-module lowering: local name -> mangled name
+    name_map: Option<HashMap<String, String>>,
 }
 
 impl Lowering {
@@ -79,6 +81,7 @@ impl Lowering {
             in_init_body: false,
             init_struct_name: None,
             lowering_error: None,
+            name_map: None,
         }
     }
 
@@ -86,6 +89,16 @@ impl Lowering {
         match ty {
             TypeAnnotation::Named(name) => BirType::Struct(name.clone()),
             other => convert_type(other),
+        }
+    }
+
+    /// Resolve a function/method name through the name_map (if present).
+    /// Returns the mangled name if a mapping exists, otherwise returns the original name.
+    fn resolve_name(&self, name: &str) -> String {
+        if let Some(map) = &self.name_map {
+            map.get(name).cloned().unwrap_or_else(|| name.to_string())
+        } else {
+            name.to_string()
         }
     }
 
@@ -542,7 +555,7 @@ impl Lowering {
         let blocks = std::mem::take(&mut self.blocks);
 
         BirFunction {
-            name: func.name.clone(),
+            name: self.resolve_name(&func.name),
             params,
             return_type: self.convert_type_with_structs(&func.return_type),
             blocks,
@@ -884,11 +897,16 @@ impl Lowering {
                     return self.emit_struct_init(name, &[]);
                 }
                 let arg_vals: Vec<Value> = args.iter().map(|a| self.lower_expr(a)).collect();
-                let ty = self.func_sigs.get(name).cloned().unwrap_or(BirType::I32);
+                let resolved = self.resolve_name(name);
+                let ty = self
+                    .func_sigs
+                    .get(&resolved)
+                    .cloned()
+                    .unwrap_or(BirType::I32);
                 let result = self.fresh_value();
                 self.emit(Instruction::Call {
                     result,
-                    func_name: name.clone(),
+                    func_name: resolved,
                     args: arg_vals,
                     ty: ty.clone(),
                 });
@@ -1031,10 +1049,11 @@ impl Lowering {
                     Some(BirType::Struct(n)) => n.clone(),
                     _ => return self.record_error("method call on non-struct value"),
                 };
-                let mangled = format!("{}_{}", struct_name, method);
+                let local_mangled = format!("{}_{}", struct_name, method);
+                let resolved = self.resolve_name(&local_mangled);
                 let ret_ty = self
                     .func_sigs
-                    .get(&mangled)
+                    .get(&resolved)
                     .cloned()
                     .unwrap_or(BirType::Unit);
                 let mut call_args = vec![obj_val];
@@ -1044,7 +1063,7 @@ impl Lowering {
                 let result = self.fresh_value();
                 self.emit(Instruction::Call {
                     result,
-                    func_name: mangled,
+                    func_name: resolved,
                     args: call_args,
                     ty: ret_ty.clone(),
                 });
@@ -1607,7 +1626,7 @@ fn convert_compare_op(op: BinOp) -> BirCompareOp {
     }
 }
 
-fn semantic_type_to_bir(ty: &crate::semantic::types::Type) -> BirType {
+pub fn semantic_type_to_bir(ty: &crate::semantic::types::Type) -> BirType {
     match ty {
         crate::semantic::types::Type::I32 => BirType::I32,
         crate::semantic::types::Type::I64 => BirType::I64,
@@ -1750,6 +1769,129 @@ pub fn lower_program(
                 let func = Function {
                     visibility: Visibility::Internal,
                     name: mangled_name,
+                    params: all_params,
+                    return_type: return_type.clone(),
+                    body: body.clone(),
+                };
+
+                // Set up self context for lowering
+                lowering.self_var_name = Some("self".to_string());
+                let bir_func = lowering.lower_function(&func);
+                lowering.self_var_name = None;
+                functions.push(bir_func);
+            }
+        }
+    }
+
+    if let Some(err) = lowering.lowering_error {
+        return Err(err);
+    }
+
+    Ok(BirModule {
+        struct_layouts,
+        functions,
+    })
+}
+
+/// Lower a single module's AST to BIR with name mangling.
+///
+/// `name_map` maps local names (function names, `StructName_method` method names)
+/// to their mangled equivalents. The caller is responsible for building this map
+/// using `mangle::mangle_function()` and `mangle::mangle_method()`.
+///
+/// For the entry module's `main` function, the name_map should map "main" -> "main"
+/// (i.e., not mangled) so that the linker can find the entry point.
+pub fn lower_module(
+    program: &Program,
+    sem_info: &crate::semantic::SemanticInfo,
+    name_map: &HashMap<String, String>,
+) -> Result<BirModule> {
+    // Build struct_layouts from semantic StructInfo
+    let mut struct_layouts: HashMap<String, Vec<(String, BirType)>> = HashMap::new();
+    for (name, info) in &sem_info.struct_defs {
+        let fields: Vec<(String, BirType)> = info
+            .fields
+            .iter()
+            .map(|(n, t)| (n.clone(), semantic_type_to_bir(t)))
+            .collect();
+        struct_layouts.insert(name.clone(), fields);
+    }
+
+    // Reject Unit-typed stored fields
+    for (name, fields) in &struct_layouts {
+        for (fname, fty) in fields {
+            if matches!(fty, BirType::Unit) {
+                return Err(BengalError::LoweringError {
+                    message: format!(
+                        "struct `{}` has Unit-typed stored field `{}`; Unit fields are not supported",
+                        name, fname
+                    ),
+                });
+            }
+        }
+    }
+
+    // Reject recursive structs (infinitely sized)
+    check_acyclic_structs(&struct_layouts)?;
+
+    let sem_info_ref = SemInfoRef {
+        struct_defs: sem_info.struct_defs.clone(),
+        struct_init_calls: sem_info.struct_init_calls.clone(),
+    };
+    let mut lowering = Lowering::new(HashMap::new(), sem_info_ref);
+    lowering.name_map = Some(name_map.clone());
+
+    // Build func_sigs using mangled names
+    for func in &program.functions {
+        let bir_ty = lowering.convert_type_with_structs(&func.return_type);
+        let resolved = lowering.resolve_name(&func.name);
+        lowering.func_sigs.insert(resolved, bir_ty);
+    }
+
+    // Register mangled method signatures
+    for (struct_name, info) in &sem_info.struct_defs {
+        for method in &info.methods {
+            let local_mangled = format!("{}_{}", struct_name, method.name);
+            let resolved = lowering.resolve_name(&local_mangled);
+            let bir_ret = semantic_type_to_bir(&method.return_type);
+            lowering.func_sigs.insert(resolved, bir_ret);
+        }
+    }
+
+    // Also register imported function signatures under their mangled names.
+    // These are already in the name_map; we need to register their return types
+    // in func_sigs so that Call instructions can look up the return type.
+    // (imported funcs' sigs are in sem_info via the resolver, but we need them
+    // under their mangled names in func_sigs.)
+
+    let mut functions: Vec<BirFunction> = program
+        .functions
+        .iter()
+        .map(|f| lowering.lower_function(f))
+        .collect();
+
+    // Lower methods as flattened functions
+    for struct_def in &program.structs {
+        for member in &struct_def.members {
+            if let StructMember::Method {
+                visibility: _,
+                name: mname,
+                params,
+                return_type,
+                body,
+            } = member
+            {
+                let local_mangled_name = format!("{}_{}", struct_def.name, mname);
+                // Build synthetic function with `self` as first param
+                let mut all_params = vec![Param {
+                    name: "self".to_string(),
+                    ty: TypeAnnotation::Named(struct_def.name.clone()),
+                }];
+                all_params.extend(params.clone());
+                // Use the local_mangled_name so resolve_name can map it
+                let func = Function {
+                    visibility: Visibility::Internal,
+                    name: local_mangled_name,
                     params: all_params,
                     return_type: return_type.clone(),
                     body: body.clone(),
@@ -2076,6 +2218,75 @@ bb0:
                 .unwrap_err()
                 .to_string()
                 .contains("nested field assignment")
+        );
+    }
+
+    // --- Per-module lowering tests ---
+
+    #[test]
+    fn lower_module_mangles_function_names() {
+        let input = "func add(a: Int32, b: Int32) -> Int32 { return a + b; } func main() -> Int32 { return add(3, 4); }";
+        let tokens = tokenize(input).unwrap();
+        let program = parse(tokens).unwrap();
+        let sem_info = semantic::analyze(&program).unwrap();
+
+        // Build name_map: main stays as "main", add gets mangled
+        let mut name_map = HashMap::new();
+        name_map.insert("main".to_string(), "main".to_string());
+        name_map.insert(
+            "add".to_string(),
+            crate::mangle::mangle_function("my_app", &[""], "add"),
+        );
+
+        let module = lower_module(&program, &sem_info, &name_map).unwrap();
+        let output = print_module(&module);
+
+        // "main" function name should NOT be mangled
+        assert!(output.contains("@main("));
+        // "add" function name should be mangled
+        let mangled_add = crate::mangle::mangle_function("my_app", &[""], "add");
+        assert!(
+            output.contains(&format!("@{}(", mangled_add)),
+            "expected mangled add function, got:\n{}",
+            output
+        );
+        // Call to add should also use the mangled name
+        assert!(
+            output.contains(&format!("call @{}", mangled_add)),
+            "expected mangled call target, got:\n{}",
+            output
+        );
+    }
+
+    #[test]
+    fn lower_module_mangles_method_names() {
+        let input = "struct Point { var x: Int32; func get_x() -> Int32 { return self.x; } } func main() -> Int32 { var p = Point(x: 42); return p.get_x(); }";
+        let tokens = tokenize(input).unwrap();
+        let program = parse(tokens).unwrap();
+        let sem_info = semantic::analyze(&program).unwrap();
+
+        let mut name_map = HashMap::new();
+        name_map.insert("main".to_string(), "main".to_string());
+        name_map.insert(
+            "Point_get_x".to_string(),
+            crate::mangle::mangle_method("my_app", &[""], "Point", "get_x"),
+        );
+
+        let module = lower_module(&program, &sem_info, &name_map).unwrap();
+        let output = print_module(&module);
+
+        let mangled_method = crate::mangle::mangle_method("my_app", &[""], "Point", "get_x");
+        // The method function should have the mangled name
+        assert!(
+            output.contains(&format!("@{}", mangled_method)),
+            "expected mangled method name, got:\n{}",
+            output
+        );
+        // The call to the method should also use the mangled name
+        assert!(
+            output.contains(&format!("call @{}", mangled_method)),
+            "expected mangled method call, got:\n{}",
+            output
         );
     }
 }

@@ -178,6 +178,15 @@ impl Resolver {
         std::mem::take(&mut self.struct_defs)
     }
 
+    /// Take all struct definitions (local + imported) for use in BIR lowering.
+    pub fn take_all_struct_defs(&mut self) -> HashMap<String, StructInfo> {
+        let mut all = std::mem::take(&mut self.struct_defs);
+        for (name, info) in std::mem::take(&mut self.imported_structs) {
+            all.entry(name).or_insert(info);
+        }
+        all
+    }
+
     pub fn take_struct_init_calls(&mut self) -> HashSet<NodeId> {
         std::mem::take(&mut self.struct_init_calls)
     }

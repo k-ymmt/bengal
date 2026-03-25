@@ -18,6 +18,9 @@ pub struct SemanticInfo {
 #[derive(Debug)]
 pub struct PackageSemanticInfo {
     pub module_infos: HashMap<ModulePath, SemanticInfo>,
+    /// For each module, maps imported symbol names to their source module path.
+    /// Key: (importing module, local symbol name) -> source module path.
+    pub import_sources: HashMap<(ModulePath, String), ModulePath>,
 }
 
 fn sem_err(message: impl Into<String>) -> BengalError {
@@ -72,18 +75,24 @@ pub fn analyze_package(graph: &ModuleGraph, _package_name: &str) -> Result<Packa
     // Phase 2 + 3: For each module, resolve imports then run analysis
     // ---------------------------------------------------------------
     let mut module_infos: HashMap<ModulePath, SemanticInfo> = HashMap::new();
+    let mut import_sources: HashMap<(ModulePath, String), ModulePath> = HashMap::new();
 
     for (mod_path, mod_info) in &graph.modules {
         let mut resolver = Resolver::new();
 
         // Resolve imports and populate the resolver's import maps
-        resolve_imports_for_module(
+        let module_import_sources = resolve_imports_for_module(
             mod_path,
             &mod_info.ast.import_decls,
             &global_symbols,
             graph,
             &mut resolver,
         )?;
+
+        // Record import sources for this module
+        for (name, source_module) in module_import_sources {
+            import_sources.insert((mod_path.clone(), name), source_module);
+        }
 
         // Run the standard single-module analysis (same as `analyze()` but
         // parameterised on whether to require `main`).
@@ -92,7 +101,10 @@ pub fn analyze_package(graph: &ModuleGraph, _package_name: &str) -> Result<Packa
         module_infos.insert(mod_path.clone(), sem_info);
     }
 
-    Ok(PackageSemanticInfo { module_infos })
+    Ok(PackageSemanticInfo {
+        module_infos,
+        import_sources,
+    })
 }
 
 /// Phase 1: Walk every module in the graph, register all top-level symbols,
@@ -222,14 +234,17 @@ fn collect_global_symbols(graph: &ModuleGraph) -> Result<GlobalSymbolTable> {
 }
 
 /// Phase 2: Resolve all import declarations for a given module and populate
-/// the resolver's import maps.
+/// the resolver's import maps. Returns a map of (local_name -> source_module_path)
+/// for all imported symbols.
 fn resolve_imports_for_module(
     current_module: &ModulePath,
     import_decls: &[ImportDecl],
     global_symbols: &GlobalSymbolTable,
     graph: &ModuleGraph,
     resolver: &mut Resolver,
-) -> Result<()> {
+) -> Result<Vec<(String, ModulePath)>> {
+    let mut sources = Vec::new();
+
     for import in import_decls {
         // Resolve the target module path from the prefix + path segments
         let target_module =
@@ -251,6 +266,7 @@ fn resolve_imports_for_module(
                     current_module,
                     resolver,
                 )?;
+                sources.push((name.clone(), target_module.clone()));
             }
             ImportTail::Group(names) => {
                 for name in names {
@@ -261,6 +277,7 @@ fn resolve_imports_for_module(
                         current_module,
                         resolver,
                     )?;
+                    sources.push((name.clone(), target_module.clone()));
                 }
             }
             ImportTail::Glob => {
@@ -268,12 +285,13 @@ fn resolve_imports_for_module(
                 for (name, sym) in target_symbols {
                     if is_accessible(sym.visibility, &sym.module, current_module) {
                         import_symbol_to_resolver(name, sym, resolver);
+                        sources.push((name.clone(), target_module.clone()));
                     }
                 }
             }
         }
     }
-    Ok(())
+    Ok(sources)
 }
 
 /// Import a single named symbol, checking visibility.
@@ -601,7 +619,7 @@ fn analyze_single_module(
     }
 
     Ok(SemanticInfo {
-        struct_defs: resolver.take_struct_defs(),
+        struct_defs: resolver.take_all_struct_defs(),
         struct_init_calls: resolver.take_struct_init_calls(),
     })
 }
