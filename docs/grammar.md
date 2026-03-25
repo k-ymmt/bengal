@@ -1,9 +1,9 @@
-# Bengal Language Grammar — Phase 8
+# Bengal Language Grammar — Phase 9
 
 ## Overview
 
 Bengal is an expression-oriented language that compiles to native code via LLVM.
-Features include loop control (`break`/`continue`), multiple numeric types (`Int64`, `Float32`, `Float64`), local type inference, `as` casts, `while` expressions with `break` values and `nobreak` blocks, constant folding optimization, structs with stored/computed properties, initializers, and methods, protocols for shared interfaces, a module system for multi-file compilation with hierarchical namespaces and visibility control, and generics with monomorphization and optional protocol constraints.
+Features include loop control (`break`/`continue`), multiple numeric types (`Int64`, `Float32`, `Float64`), local type inference, `as` casts, `while` expressions with `break` values and `nobreak` blocks, constant folding optimization, structs with stored/computed properties, initializers, and methods, protocols for shared interfaces, a module system for multi-file compilation with hierarchical namespaces and visibility control, generics with monomorphization and optional protocol constraints, and fixed-size arrays as stack-allocated value types.
 
 Key design principles:
 
@@ -15,6 +15,7 @@ Key design principles:
 - **Protocols**: Shared interfaces that structs can conform to, enabling compile-time checked structural contracts.
 - **Module system**: Multi-file compilation with hierarchical modules, five-level visibility control, and import paths using `::` as the separator.
 - **Generics**: Parametric polymorphism on functions and structs with optional protocol constraints, compiled via monomorphization.
+- **Fixed-size arrays**: Stack-allocated value-type arrays with compile-time known size, element access by index, and runtime bounds checking.
 
 ## Lexical Grammar
 
@@ -61,10 +62,12 @@ eq         = "=" ;
 dot        = "." ;
 
 (* Delimiters *)
-lparen = "(" ;
-rparen = ")" ;
-lbrace = "{" ;
-rbrace = "}" ;
+lparen   = "(" ;
+rparen   = ")" ;
+lbrace   = "{" ;
+rbrace   = "}" ;
+lbracket = "[" ;
+rbracket = "]" ;
 
 (* Whitespace — skipped *)
 whitespace = " " | "\t" | "\n" | "\r" ;
@@ -106,16 +109,19 @@ function   = "func" , identifier , [ type_params ] , param_list , [ "->" , type 
 param_list = "(" , [ param , { "," , param } ] , ")" ;
 param      = identifier , ":" , type ;
 type       = "Int32" | "Int64" | "Float32" | "Float64" | "Bool" | "Void" | "(" , ")"
-           | identifier , [ type_args ] ;   (* named struct/generic type *)
+           | identifier , [ type_args ]     (* named struct/generic type *)
+           | array_type ;
+array_type = "[" , type , ";" , integer_literal , "]" ;
 
 block      = "{" , { statement } , "}" ;
 
-statement  = let_stmt | var_stmt | assign_stmt | field_assign_stmt
+statement  = let_stmt | var_stmt | assign_stmt | field_assign_stmt | index_assign_stmt
            | return_stmt | yield_stmt | break_stmt | continue_stmt | expr_stmt ;
 let_stmt          = "let" , identifier , [ ":" , type ] , "=" , expression , ";" ;
 var_stmt          = "var" , identifier , [ ":" , type ] , "=" , expression , ";" ;
 assign_stmt       = identifier , "=" , expression , ";" ;
 field_assign_stmt = field_access , "=" , expression , ";" ;
+index_assign_stmt = identifier , "[" , expression , "]" , "=" , expression , ";" ;
 return_stmt       = "return" , [ expression ] , ";" ;
 yield_stmt        = "yield" , expression , ";" ;
 break_stmt        = "break" , [ expression ] , ";" ;
@@ -134,6 +140,7 @@ unary            = "!" , unary | factor ;
 factor           = integer_literal
                  | float_literal
                  | bool_literal
+                 | array_literal                                                     (* array *)
                  | identifier , "(" , labeled_args , ")"                            (* struct init *)
                  | identifier , "(" , [ expression , { "," , expression } ] , ")"   (* call *)
                  | identifier                                                        (* variable *)
@@ -144,10 +151,15 @@ factor           = integer_literal
                  | while_expr
                  ;
 
-(* Postfix operators: field/method access binds tighter than all binary operators *)
-postfix    = factor , { "." , identifier , [ "(" , [ arg_list ] , ")" ] } ;
+array_literal    = "[" , expression , { "," , expression } , "]" ;
+index_access     = postfix , "[" , expression , "]" ;
+
+(* Postfix operators: field/method access and index access bind tighter than all binary operators *)
+postfix    = factor , { "." , identifier , [ "(" , [ arg_list ] , ")" ]
+                       | "[" , expression , "]" } ;
            (* field access: a.b.c → (a.b).c — left-associative *)
            (* method call: obj.method(args) — identifier followed by parenthesized arguments *)
+           (* index access: arr[i] — bracket-delimited index expression *)
            (* postfix replaces factor in the precedence chain: unary uses postfix *)
 
 arg_list   = expression , { "," , expression } ;
@@ -211,6 +223,7 @@ property_req  = "var" , identifier , ":" , type , "{" , "get" , [ "set" ] , "}" 
 | `Float32` | 32-bit floating point | 4 |
 | `Float64` | 64-bit floating point | 4 |
 | *StructName* | User-defined struct type (value type) | 5 |
+| `[T; N]` | Fixed-size array of `N` elements of type `T` (value type) | 9 |
 
 ### Default literal types
 - Integer literals (`42`) default to `Int32`.
@@ -359,6 +372,36 @@ The type of a `while` expression is determined by its `break` statements:
 #### Monomorphization
 - Generics are compiled via monomorphization: each unique set of type arguments generates a specialized copy of the function or struct.
 - Specialized names use the pattern `name_TypeArg1_TypeArg2` (e.g., `identity_Int32`, `Pair_Int32_Bool`).
+
+### Fixed-Size Arrays
+
+Fixed-size arrays are stack-allocated value types with a compile-time known size.
+
+#### Type syntax
+- `[T; N]` where `T` is the element type and `N` is an integer literal specifying the number of elements.
+- Arrays can be used as variable types, function parameter types, and return types.
+- Array types work with generics: `func first<T>(arr: [T; 3]) -> T { ... }`.
+
+#### Literals
+- `[expr1, expr2, ..., exprN]` creates a fixed-size array.
+- All elements must have the same type.
+- When a type annotation is present (e.g., `let a: [Int32; 3] = [1, 2, 3]`), the number of elements must match the declared size.
+- Without a type annotation, the size is inferred from the number of elements and the element type from the first element.
+
+#### Index access
+- `arr[index]` reads the element at the given index.
+- The index must be an integer type (`Int32` or `Int64`).
+- Constant indices are bounds-checked at compile time.
+- Non-constant indices are bounds-checked at runtime (program aborts on out-of-bounds access).
+
+#### Index assignment
+- `arr[index] = value;` writes a value to the element at the given index.
+- The array variable must be mutable (`var`, not `let`).
+- The same bounds-checking rules as index access apply.
+
+#### Value semantics
+- Arrays are value types: assigning an array copies all elements.
+- Passing an array to a function copies it.
 
 ### Module System
 
@@ -597,11 +640,33 @@ func main() -> Int32 {
 }
 ```
 
+### Fixed-size array usage
+
+```bengal
+func sum(arr: [Int32; 3]) -> Int32 {
+    return arr[0] + arr[1] + arr[2];
+}
+
+func makeArray() -> [Int32; 2] {
+    return [5, 10];
+}
+
+func main() -> Int32 {
+    let a: [Int32; 3] = [1, 2, 3];
+    let b = [10, 20, 30];
+    var c = [100, 200, 300];
+    c[0] = 999;
+    let d = makeArray();
+    return sum(b) + c[0] + d[1];
+}
+```
+
 ## Features Not Yet Supported
 
 - **Unary minus**: `-x` negation
 - **String type**: string literals and operations
-- **Arrays**: array data type
+- **Variable-length arrays**: heap-allocated resizable arrays (`[T]`, `Array<T>`)
+- **Array operations**: `.count` property, `==`/`!=` comparison, slicing
 - **Closures/first-class functions**
 - **Integer literal suffixes**: `42i64` (use `42 as Int64` instead)
 - **Import aliases**: `import math::Vector as Vec`
