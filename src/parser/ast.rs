@@ -141,6 +141,10 @@ pub enum TypeAnnotation {
         name: String,
         args: Vec<TypeAnnotation>,
     },
+    Array {
+        element: Box<TypeAnnotation>,
+        size: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -172,6 +176,11 @@ pub enum Stmt {
     FieldAssign {
         object: Box<Expr>,
         field: String,
+        value: Expr,
+    },
+    IndexAssign {
+        object: Box<Expr>,
+        index: Box<Expr>,
         value: Expr,
     },
 }
@@ -247,6 +256,13 @@ pub enum ExprKind {
         object: Box<Expr>,
         method: String,
         args: Vec<Expr>,
+    },
+    ArrayLiteral {
+        elements: Vec<Expr>,
+    },
+    IndexAccess {
+        object: Box<Expr>,
+        index: Box<Expr>,
     },
 }
 

@@ -714,6 +714,15 @@ fn validate_generics_stmt(
             validate_generics_expr(object, func_map, struct_map)?;
             validate_generics_expr(value, func_map, struct_map)?;
         }
+        Stmt::IndexAssign {
+            object,
+            index,
+            value,
+        } => {
+            validate_generics_expr(object, func_map, struct_map)?;
+            validate_generics_expr(index, func_map, struct_map)?;
+            validate_generics_expr(value, func_map, struct_map)?;
+        }
         Stmt::Return(None) | Stmt::Break(None) | Stmt::Continue => {}
     }
     Ok(())
@@ -854,6 +863,15 @@ fn validate_generics_expr(
             for arg in args {
                 validate_generics_expr(arg, func_map, struct_map)?;
             }
+        }
+        ExprKind::ArrayLiteral { elements } => {
+            for elem in elements {
+                validate_generics_expr(elem, func_map, struct_map)?;
+            }
+        }
+        ExprKind::IndexAccess { object, index } => {
+            validate_generics_expr(object, func_map, struct_map)?;
+            validate_generics_expr(index, func_map, struct_map)?;
         }
         ExprKind::Number(_)
         | ExprKind::Float(_)
@@ -1677,6 +1695,9 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
                 }
             }
         }
+        Stmt::IndexAssign { .. } => {
+            todo!("semantic analysis for IndexAssign")
+        }
     }
     Ok(())
 }
@@ -2004,6 +2025,12 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                     obj_ty
                 ))),
             }
+        }
+        ExprKind::ArrayLiteral { .. } => {
+            todo!("semantic analysis for ArrayLiteral")
+        }
+        ExprKind::IndexAccess { .. } => {
+            todo!("semantic analysis for IndexAccess")
         }
     }
 }

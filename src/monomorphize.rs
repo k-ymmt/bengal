@@ -45,6 +45,9 @@ fn type_annotation_to_string(ta: &TypeAnnotation) -> String {
             }
             result
         }
+        TypeAnnotation::Array { element, size } => {
+            format!("Array_{}_{}", type_annotation_to_string(element), size)
+        }
     }
 }
 
@@ -141,6 +144,15 @@ impl<'a> Monomorphizer<'a> {
                 self.collect_from_expr(object);
                 self.collect_from_expr(value);
             }
+            Stmt::IndexAssign {
+                object,
+                index,
+                value,
+            } => {
+                self.collect_from_expr(object);
+                self.collect_from_expr(index);
+                self.collect_from_expr(value);
+            }
             Stmt::Return(None) | Stmt::Break(None) | Stmt::Continue => {}
         }
     }
@@ -229,6 +241,15 @@ impl<'a> Monomorphizer<'a> {
                 for arg in args {
                     self.collect_from_expr(arg);
                 }
+            }
+            ExprKind::ArrayLiteral { elements } => {
+                for elem in elements {
+                    self.collect_from_expr(elem);
+                }
+            }
+            ExprKind::IndexAccess { object, index } => {
+                self.collect_from_expr(object);
+                self.collect_from_expr(index);
             }
             ExprKind::Number(_)
             | ExprKind::Float(_)
@@ -426,6 +447,15 @@ fn substitute_stmt(
             field: field.clone(),
             value: substitute_expr(value, subst, struct_rename_map),
         },
+        Stmt::IndexAssign {
+            object,
+            index,
+            value,
+        } => Stmt::IndexAssign {
+            object: Box::new(substitute_expr(object, subst, struct_rename_map)),
+            index: Box::new(substitute_expr(index, subst, struct_rename_map)),
+            value: substitute_expr(value, subst, struct_rename_map),
+        },
     }
 }
 
@@ -564,6 +594,16 @@ fn substitute_expr(
                 .iter()
                 .map(|a| substitute_expr(a, subst, struct_rename_map))
                 .collect(),
+        },
+        ExprKind::ArrayLiteral { elements } => ExprKind::ArrayLiteral {
+            elements: elements
+                .iter()
+                .map(|e| substitute_expr(e, subst, struct_rename_map))
+                .collect(),
+        },
+        ExprKind::IndexAccess { object, index } => ExprKind::IndexAccess {
+            object: Box::new(substitute_expr(object, subst, struct_rename_map)),
+            index: Box::new(substitute_expr(index, subst, struct_rename_map)),
         },
         ExprKind::Number(_)
         | ExprKind::Float(_)
@@ -793,6 +833,15 @@ fn rewrite_stmt(stmt: &Stmt, rename_map: &RenameMap) -> Stmt {
             field: field.clone(),
             value: rewrite_expr(value, rename_map),
         },
+        Stmt::IndexAssign {
+            object,
+            index,
+            value,
+        } => Stmt::IndexAssign {
+            object: Box::new(rewrite_expr(object, rename_map)),
+            index: Box::new(rewrite_expr(index, rename_map)),
+            value: rewrite_expr(value, rename_map),
+        },
     }
 }
 
@@ -911,6 +960,16 @@ fn rewrite_expr(expr: &Expr, rename_map: &RenameMap) -> Expr {
             object: Box::new(rewrite_expr(object, rename_map)),
             method: method.clone(),
             args: args.iter().map(|a| rewrite_expr(a, rename_map)).collect(),
+        },
+        ExprKind::ArrayLiteral { elements } => ExprKind::ArrayLiteral {
+            elements: elements
+                .iter()
+                .map(|e| rewrite_expr(e, rename_map))
+                .collect(),
+        },
+        ExprKind::IndexAccess { object, index } => ExprKind::IndexAccess {
+            object: Box::new(rewrite_expr(object, rename_map)),
+            index: Box::new(rewrite_expr(index, rename_map)),
         },
         ExprKind::Number(_)
         | ExprKind::Float(_)

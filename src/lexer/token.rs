@@ -107,6 +107,13 @@ pub enum Token {
     LBrace,
     #[token("}")]
     RBrace,
+
+    // Array: symbols
+    #[token("[")]
+    LBracket,
+    #[token("]")]
+    RBracket,
+
     #[token("=")]
     Eq,
 
@@ -165,6 +172,8 @@ impl fmt::Display for Token {
             Token::Comma => write!(f, ","),
             Token::LBrace => write!(f, "{{"),
             Token::RBrace => write!(f, "}}"),
+            Token::LBracket => write!(f, "["),
+            Token::RBracket => write!(f, "]"),
             Token::Eq => write!(f, "="),
             Token::True => write!(f, "true"),
             Token::False => write!(f, "false"),

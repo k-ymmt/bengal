@@ -844,6 +844,9 @@ impl Lowering {
                 self.lower_field_assign_recursive(object, field, new_val);
                 StmtResult::None
             }
+            Stmt::IndexAssign { .. } => {
+                todo!("BIR lowering for IndexAssign")
+            }
         }
     }
 
@@ -1127,6 +1130,12 @@ impl Lowering {
                 });
                 self.value_types.insert(result, ret_ty);
                 result
+            }
+            ExprKind::ArrayLiteral { .. } => {
+                todo!("BIR lowering for ArrayLiteral")
+            }
+            ExprKind::IndexAccess { .. } => {
+                todo!("BIR lowering for IndexAccess")
             }
         }
     }
@@ -1773,6 +1782,9 @@ fn convert_type(ty: &TypeAnnotation) -> BirType {
         }
         TypeAnnotation::Generic { name, .. } => {
             panic!("Generic type `{}` not yet supported in convert_type", name)
+        }
+        TypeAnnotation::Array { .. } => {
+            todo!("Array type not yet supported in convert_type")
         }
     }
 }

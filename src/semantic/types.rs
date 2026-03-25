@@ -65,5 +65,6 @@ pub fn resolve_type(annotation: &TypeAnnotation) -> Type {
             name: name.clone(),
             args: args.iter().map(resolve_type).collect(),
         },
+        TypeAnnotation::Array { .. } => todo!("Type::Array not yet implemented"),
     }
 }

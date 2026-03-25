@@ -1241,6 +1241,13 @@ mod tests {
                 method: method.clone(),
                 args: args.iter().map(normalize_expr).collect(),
             },
+            ExprKind::ArrayLiteral { elements } => ExprKind::ArrayLiteral {
+                elements: elements.iter().map(normalize_expr).collect(),
+            },
+            ExprKind::IndexAccess { object, index } => ExprKind::IndexAccess {
+                object: Box::new(normalize_expr(object)),
+                index: Box::new(normalize_expr(index)),
+            },
         };
         Expr {
             id: NodeId(0),
@@ -1276,6 +1283,15 @@ mod tests {
             } => Stmt::FieldAssign {
                 object: Box::new(normalize_expr(object)),
                 field: field.clone(),
+                value: normalize_expr(value),
+            },
+            Stmt::IndexAssign {
+                object,
+                index,
+                value,
+            } => Stmt::IndexAssign {
+                object: Box::new(normalize_expr(object)),
+                index: Box::new(normalize_expr(index)),
                 value: normalize_expr(value),
             },
         }
@@ -1361,6 +1377,15 @@ mod tests {
                 }
                 Stmt::FieldAssign { object, value, .. } => {
                     collect_expr_ids(object, ids);
+                    collect_expr_ids(value, ids);
+                }
+                Stmt::IndexAssign {
+                    object,
+                    index,
+                    value,
+                } => {
+                    collect_expr_ids(object, ids);
+                    collect_expr_ids(index, ids);
                     collect_expr_ids(value, ids);
                 }
                 _ => {}
