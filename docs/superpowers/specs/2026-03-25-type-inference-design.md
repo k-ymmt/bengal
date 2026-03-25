@@ -73,6 +73,9 @@ pub enum Type {
 ```rust
 pub struct InferenceContext {
     var_states: Vec<VarState>,
+    /// Tracks which NodeIds have inferred type args and their corresponding InferVarIds.
+    /// Populated during expression checking when a generic call site has empty type_args.
+    pending_type_args: Vec<(NodeId, Vec<InferVarId>)>,
 }
 
 enum VarState {
@@ -88,19 +91,36 @@ Operations:
 - `fresh_float()` — create a new `FloatLiteral`
 - `resolve(id)` — follow Union-Find chain to current type (with path compression)
 - `unify(ty1, ty2)` — unify two types, fail on conflict
+- `register_call_site(node_id, infer_var_ids)` — record that a call site needs inferred type args
+- `record_inferred_type_args(inferred)` — after `apply_defaults`, resolve all pending call sites
+  through Union-Find, convert to `TypeAnnotation` via `type_to_annotation`, and populate the
+  side table
 
 #### Unification Rules
+
+Unification is **symmetric**: `unify(A, B)` and `unify(B, A)` always produce the same result.
+The implementation must resolve both sides through Union-Find before applying rules.
 
 | ty1 | ty2 | Result |
 |---|---|---|
 | `InferVar(a)` | any type `T` | `a → T` |
 | `IntegerLiteral(a)` | `I32` or `I64` | `a → I32/I64` |
-| `IntegerLiteral(a)` | `InferVar(b)` | `b → IntegerLiteral(a)` |
+| `IntegerLiteral(a)` | `InferVar(b)` | `b → IntegerLiteral(a)` (preserves literal flexibility) |
 | `IntegerLiteral(a)` | `IntegerLiteral(b)` | link `a` and `b` |
-| `IntegerLiteral(a)` | `Bool`, etc. | error |
-| `FloatLiteral` | analogous rules for `F32`/`F64` | |
+| `IntegerLiteral(a)` | `FloatLiteral(b)` | error: cannot unify integer literal with float literal |
+| `IntegerLiteral(a)` | `Bool`, `Unit`, etc. | error |
+| `FloatLiteral(a)` | `F32` or `F64` | `a → F32/F64` |
+| `FloatLiteral(a)` | `InferVar(b)` | `b → FloatLiteral(a)` |
+| `FloatLiteral(a)` | `FloatLiteral(b)` | link `a` and `b` |
+| `FloatLiteral(a)` | `I32`, `Bool`, etc. | error |
+| `Struct(name1)` | `Struct(name2)` | success if name1 == name2, else error |
+| `Struct(name)` | `Generic { .. }` | error (arity mismatch: non-generic vs generic) |
 | `Array { elem: T1, size: N }` | `Array { elem: T2, size: N }` | recursively unify T1, T2 |
-| `Generic { name, args1 }` | `Generic { name, args2 }` | pairwise unify args |
+| `Array { size: N1 }` | `Array { size: N2 }` | error if N1 != N2 |
+| `Generic { name, args1 }` | `Generic { name, args2 }` | pairwise unify args (same name, same arity) |
+| `Generic { name1 }` | `Generic { name2 }` | error if name1 != name2 |
+| `TypeParam { name }` | `TypeParam { name }` (same name) | success |
+| `TypeParam` | different type | error (TypeParam is opaque in pre-mono pass) |
 | same concrete types | success | |
 | different concrete types | error | |
 
@@ -130,10 +150,18 @@ fn check_expr(
 | `3.14` | return `FloatLiteral(fresh)` | unify with expected type |
 | `true`/`false` | return `Bool` | unify `Bool` with expected |
 | `x` (variable) | return type from scope | unify with expected |
+| `self` | return self context type | unify with expected |
 | `a + b` | unify operands, return result type | unify result with expected |
+| `!a` | check `a` as `Bool`, return `Bool` | unify `Bool` with expected |
 | `foo(args)` | see generic inference section | unify return type with expected |
+| `obj.method(args)` | same as `foo(args)` using method sig | unify return type with expected |
 | `Foo(fields)` | see generic inference section | unify struct type with expected |
 | `if`/`block` | infer from branches | propagate expected into branches |
+| `while` | infer from break/nobreak | propagate expected into break/nobreak |
+| `expr as T` | infer `expr`, return `T` | return `T` (cast target is explicit) |
+| `obj.field` | return field type from struct info | unify with expected |
+| `obj[index]` | return element type from array | unify with expected |
+| `[a, b, c]` | infer from first element, check rest | propagate expected element type |
 
 #### Expected Type Propagation in Statements
 
@@ -151,12 +179,34 @@ let x = 42;
 1. Infer `42` → `IntegerLiteral(v0)`
 2. After function body completes, `v0` falls back to `I32`
 
-**Assignment (check mode from target type):**
+**Assignment / FieldAssign / IndexAssign (check mode from target type):**
 ```
 var x: Int64 = 0;
-x = 42;
+x = 42;              // check 42 against x's type (I64)
+obj.field = 42;      // check 42 against field's type
+arr[0] = 42;         // check 42 against array element type
 ```
-1. Look up `x` → `I64`, check `42` with expected `I64`
+
+**return (check mode from function return type):**
+```
+func foo() -> Int64 { return 42; }
+```
+1. Function return type `I64` is the expected type for the return expression
+2. Check `42` with expected `I64` → resolved
+
+**yield (check mode from enclosing block's expected type):**
+```
+let x: Int64 = { yield 42; };
+```
+1. Block is checked with expected `I64`
+2. `yield 42` propagates expected `I64` into `42`
+
+**break with value (check mode from loop's expected type):**
+```
+let x: Int64 = while cond { break 42; } nobreak { yield 0; };
+```
+1. Loop expression is checked with expected `I64`
+2. `break 42` and `yield 0` both propagate expected `I64`
 
 ### 3. Numeric Literals and Binary Operations
 
@@ -187,7 +237,7 @@ Result type is always `Bool`. Expected type does NOT propagate to operands
 
 #### Default Fallback
 
-After checking each function body, resolve remaining variables:
+After checking each function/struct-member body, resolve remaining variables:
 
 ```rust
 fn apply_defaults(ctx: &mut InferenceContext) -> Result<()> {
@@ -202,6 +252,14 @@ fn apply_defaults(ctx: &mut InferenceContext) -> Result<()> {
     Ok(())
 }
 ```
+
+#### Float Literal Precision Note
+
+The AST currently stores float literals as `f64` (`ExprKind::Float(f64)`). When a float literal
+resolves to `F32`, there may be precision loss since the value was already parsed as `f64`.
+This is acceptable for now — the same behavior exists in Rust (`3.14f32` is parsed as `f64` then
+narrowed). If this becomes a problem in the future, the AST can be changed to store the literal
+as a string and defer parsing to after type resolution.
 
 ### 4. Generic Type Argument Inference
 
@@ -218,10 +276,11 @@ let x = identity(42);
 ```
 1. Signature: `<T>(value: T) -> T`
 2. Type args omitted → `T` = `InferVar(v0)`
-3. Substitution map: `{T → InferVar(v0)}`
-4. Parameter type after substitution: `value: InferVar(v0)`
-5. Check argument `42` with expected `InferVar(v0)` → `unify(IntegerLiteral(v1), InferVar(v0))` → `v0 = IntegerLiteral(v1)`
-6. Return type: `InferVar(v0)` → `IntegerLiteral(v1)` → fallback `I32`
+3. `ctx.register_call_site(expr.id, vec![v0])` — record for side table
+4. Substitution map: `{T → InferVar(v0)}`
+5. Parameter type after substitution: `value: InferVar(v0)`
+6. Check argument `42` with expected `InferVar(v0)` → `unify(IntegerLiteral(v1), InferVar(v0))` → `v0 = IntegerLiteral(v1)`
+7. Return type: `InferVar(v0)` → `IntegerLiteral(v1)` → fallback `I32`
 
 #### Return-Type-Only Inference
 
@@ -258,6 +317,23 @@ let b: Box<Int64> = Box(value: 42);
 **Key:** unify result type with expected type BEFORE checking arguments, so expected type
 information flows into argument checking.
 
+#### Method Calls
+
+Method calls follow the same inference pattern as free function calls:
+
+```
+let b = Box(value: 42);
+let v = b.get_value();     // return type inferred from method signature
+```
+
+1. Resolve `b`'s type to determine which struct's method to call
+2. Look up method signature (with type parameters substituted from the receiver's generic args)
+3. Check arguments against parameter types
+4. Return type unified with expected type (if any)
+
+For generic structs, the struct's type arguments are already resolved (from the receiver),
+so method calls do not introduce additional type parameter inference beyond numeric literals.
+
 #### Nested Generics
 
 ```
@@ -274,11 +350,53 @@ let x = Box(value: Pair(first: 1, second: true));
 7. Unify with `InferVar(v0)` → `v0` resolved
 8. Fallback → `Box<Pair<Int32, Bool>>`
 
+#### Generic Function Bodies (Pre-Monomorphization)
+
+During the pre-mono analysis pass, generic function bodies ARE analyzed. `TypeParam` types are
+treated as opaque concrete types — they unify only with themselves (same name). This allows
+inference within generic bodies:
+
+```
+func wrap<T>(value: T) -> Box<T> {
+    return Box(value: value);  // infers Box's type arg as T
+}
+```
+1. `Box.U` → `InferVar(v0)` (fresh var for Box's type param)
+2. `value` has type `TypeParam("T")`
+3. `unify(InferVar(v0), TypeParam("T"))` → `v0 = TypeParam("T")`
+4. Result: `Box<T>` — correct, will be specialized after monomorphization
+
+When `v0` resolves to `TypeParam("T")`, `type_to_annotation` converts it to
+`TypeAnnotation::Named("T")`. The monomorphizer's `substitute_type` already handles `Named`
+names that match substitution keys, so this works correctly during monomorphization.
+
 #### validate_generics Changes
 
 - Omitted type arguments at generic call sites → **no longer an error** (inference will handle it)
 - Partial type argument specification (not 0, not all) → still an error
 - Type arguments on non-generic functions/structs → still an error
+
+#### Protocol Constraint Validation for Inferred Type Args
+
+The current `validate_generics` checks protocol constraints when explicit type arguments are
+present. For inferred type arguments, constraint validation moves to after `apply_defaults`
+in the analysis pass:
+
+```rust
+fn validate_inferred_constraints(
+    inferred: &InferredTypeArgs,
+    resolver: &Resolver,
+) -> Result<()> {
+    for (node_id, type_args) in &inferred.map {
+        // Look up the type params with bounds for this call site
+        // Check each inferred type arg satisfies its protocol bound
+    }
+    Ok(())
+}
+```
+
+This runs after all type variables are resolved to concrete types, ensuring accurate
+constraint checking.
 
 ### 5. Pipeline Integration
 
@@ -303,7 +421,38 @@ The AST remains immutable. Inferred type arguments are stored in a side table:
 
 ```rust
 pub struct InferredTypeArgs {
-    map: HashMap<NodeId, Vec<Type>>,
+    map: HashMap<NodeId, Vec<TypeAnnotation>>,
+}
+```
+
+The side table stores `Vec<TypeAnnotation>` (not `Vec<Type>`) because `monomorphize` operates
+on AST-level types (`TypeAnnotation`). After inference resolves a type variable to a concrete
+`Type`, it is converted back to `TypeAnnotation` before storing:
+
+```rust
+fn type_to_annotation(ty: &Type) -> TypeAnnotation {
+    match ty {
+        Type::I32 => TypeAnnotation::I32,
+        Type::I64 => TypeAnnotation::I64,
+        Type::F32 => TypeAnnotation::F32,
+        Type::F64 => TypeAnnotation::F64,
+        Type::Bool => TypeAnnotation::Bool,
+        Type::Unit => TypeAnnotation::Unit,
+        Type::Struct(name) => TypeAnnotation::Named(name.clone()),
+        Type::TypeParam { name, .. } => TypeAnnotation::Named(name.clone()),
+        Type::Generic { name, args } => TypeAnnotation::Generic {
+            name: name.clone(),
+            args: args.iter().map(type_to_annotation).collect(),
+        },
+        Type::Array { element, size } => TypeAnnotation::Array {
+            element: Box::new(type_to_annotation(element)),
+            size: *size,
+        },
+        // InferVar/IntegerLiteral/FloatLiteral must be resolved before calling this
+        Type::InferVar(_) | Type::IntegerLiteral(_) | Type::FloatLiteral(_) => {
+            unreachable!("unresolved type variable in side table")
+        }
+    }
 }
 ```
 
@@ -320,23 +469,49 @@ New:      validate_generics(relaxed) → analyze(with inference) → monomorphiz
 Key change: `monomorphize` moves AFTER `analyze` because type inference must resolve
 generic type arguments before monomorphization can specialize them.
 
-#### analyze Function
+#### analyze Function (Pre-Mono, With Inference)
 
 ```rust
-pub fn analyze(program: &Program) -> Result<(SemanticInfo, InferredTypeArgs)> {
+pub fn analyze(program: &Program) -> Result<InferredTypeArgs> {
     let mut ctx = InferenceContext::new();
     let mut inferred = InferredTypeArgs::new();
-    // Phase 1a, 1b, 2: unchanged
-    // Phase 3: function body analysis uses ctx
+    let mut resolver = Resolver::new();
+    // Phase 1a, 1b, 2: unchanged (register symbols, resolve types, validate main)
+    // Phase 3a: struct member bodies (initializers, methods, computed properties)
+    for struct_def in &program.structs {
+        analyze_struct_member_bodies(struct_def, &mut resolver, &mut ctx)?;
+        ctx.apply_defaults()?;
+        ctx.record_inferred_type_args(&mut inferred);
+        ctx.reset();
+    }
+    // Phase 3b: function bodies
     for func in &program.functions {
-        analyze_function_body(func, &mut resolver, &mut ctx, &mut inferred)?;
+        analyze_function_body(func, &mut resolver, &mut ctx)?;
         ctx.apply_defaults()?;
         ctx.record_inferred_type_args(&mut inferred);
         ctx.reset(); // reset per function
     }
-    Ok((sem_info, inferred))
+    // Phase 4: validate protocol constraints for inferred type args
+    validate_inferred_constraints(&inferred, &resolver)?;
+    Ok(inferred)
 }
 ```
+
+#### analyze_post_mono Function
+
+`analyze_post_mono` is the current `analyze` function — full semantic checking on the
+monomorphized program. After monomorphization, all generic definitions have been replaced
+with specialized versions, so this pass sees only concrete types. It produces the `SemanticInfo`
+needed by BIR lowering.
+
+Responsibilities:
+- Symbol registration and type resolution (same as current Phase 1)
+- main function validation (same as current Phase 2)
+- Full body analysis with type checking (same as current Phase 3)
+- Protocol conformance checking (same as current Phase 3b)
+- Produce `SemanticInfo` (node type map, struct layouts, etc.) for BIR
+
+This function does NOT use `InferenceContext` — all types are concrete at this point.
 
 #### lib.rs
 
@@ -345,7 +520,7 @@ pub fn compile_source(source: &str) -> Result<Vec<u8>> {
     let tokens = lexer::tokenize(source)?;
     let program = parser::parse(tokens)?;
     semantic::validate_generics(&program)?;
-    let (_, inferred) = semantic::analyze(&program)?;
+    let inferred = semantic::analyze(&program)?;
     let program = monomorphize::monomorphize(&program, &inferred);
     let sem_info = semantic::analyze_post_mono(&program)?;
     let mut bir = bir::lower_program(&program, &sem_info)?;
@@ -354,6 +529,22 @@ pub fn compile_source(source: &str) -> Result<Vec<u8>> {
     Ok(obj_bytes)
 }
 ```
+
+#### Other Compilation Paths
+
+The same pipeline change applies to all compilation entry points:
+
+- `compile_source` — single-file compilation (shown above)
+- `compile_to_bir` — compile to BIR for testing; same pipeline change
+- `compile_package_to_executable` — multi-module compilation; each module gets
+  `analyze` (with inference) before `monomorphize`, and `analyze_package` is updated
+  to use the new pipeline order
+- Inline tests (e.g., `test_compile_to_module_reexport`) that call `analyze` directly
+  must be updated to the new pipeline order
+
+The multi-module path in `analyze_package` follows the same pattern: global symbol
+collection → per-module inference analysis → per-module monomorphization →
+per-module post-mono analysis.
 
 ### 6. Error Messages and Edge Cases
 
@@ -378,6 +569,13 @@ let x: Int32 = 9999999999;
 ```
 
 Range checking happens when unification resolves a literal to a concrete integer type.
+
+**Integer/float literal mismatch:**
+```
+func choose<T>(a: T, b: T) -> T { ... }
+let x = choose(42, 3.14);
+→ type mismatch: cannot unify integer literal with float literal
+```
 
 #### Edge Cases
 
@@ -404,7 +602,8 @@ let arr = [];               // error: cannot infer type of empty array literal
 struct Wrapper<T: Summable> { var value: T; }
 let w = Wrapper(value: true);  // error: 'Bool' does not conform to 'Summable'
 ```
-After unification resolves `T = Bool`, constraint checking verifies protocol conformance.
+After `apply_defaults`, `validate_inferred_constraints` checks that inferred type args
+satisfy their protocol bounds.
 
 ### 7. Test Strategy
 
@@ -412,8 +611,13 @@ After unification resolves `T = Bool`, constraint checking verifies protocol con
 - Variable annotation: `let x: Int64 = 42`
 - Function argument: `takes_i64(42)`
 - Assignment: `var x: Int64 = 0; x = 42;`
+- Field assignment: `obj.field = 42;` (where field is Int64)
+- Index assignment: `arr[0] = 42;` (where arr is [Int64; N])
 - Binary operand: `let x: Int64 = 100; let y = x + 42;`
 - Default fallback: `let a = 42;` → Int32, `let b = 3.14;` → Float64
+- Return statement: `func foo() -> Int64 { return 42; }`
+- Yield in block: `let x: Int64 = { yield 42; };`
+- Break with value: `let x: Int64 = while cond { break 42; } nobreak { yield 0; };`
 
 #### Generic Function Inference
 - From arguments: `identity(42)`
@@ -425,6 +629,10 @@ After unification resolves `T = Bool`, constraint checking verifies protocol con
 - From expected type: `let b: Box<Int64> = Box(value: 42)`
 - Nested: `Box(value: Pair(first: 1, second: true))`
 
+#### Array Literal Inference
+- Element type from annotation: `let arr: [Int64; 3] = [1, 2, 3];`
+- Empty array with annotation: `let arr: [Int32; 0] = [];`
+
 #### Coexistence With Explicit Type Arguments
 - Explicit still works: `identity<Int64>(42)`
 - Explicit takes precedence over context: `let x: Int32 = identity<Int64>(42)` → error
@@ -435,6 +643,7 @@ After unification resolves `T = Bool`, constraint checking verifies protocol con
 - Literal out of range: `let x: Int32 = 9999999999;`
 - Constraint violation: `Wrapper(value: true)` when `T: Summable`
 - Type mismatch: `let x: Bool = 42;`
+- Integer/float mismatch: `choose(42, 3.14)` where T must be one type
 
 #### Regression
 - All existing tests continue to pass unchanged
