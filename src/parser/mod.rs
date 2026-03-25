@@ -48,26 +48,201 @@ impl Parser {
         }
     }
 
+    // --- Visibility helpers ---
+
+    fn is_visibility_token(token: &Token) -> bool {
+        matches!(
+            token,
+            Token::Public | Token::Package | Token::Internal | Token::Fileprivate | Token::Private
+        )
+    }
+
+    fn try_parse_visibility(&mut self) -> Visibility {
+        match &self.peek().node {
+            Token::Public => {
+                self.advance();
+                Visibility::Public
+            }
+            Token::Package => {
+                self.advance();
+                Visibility::Package
+            }
+            Token::Internal => {
+                self.advance();
+                Visibility::Internal
+            }
+            Token::Fileprivate => {
+                self.advance();
+                Visibility::Fileprivate
+            }
+            Token::Private => {
+                self.advance();
+                Visibility::Private
+            }
+            _ => Visibility::Internal,
+        }
+    }
+
     // --- Program / Function ---
 
     fn parse_program(&mut self) -> Result<Program> {
+        let mut module_decls = Vec::new();
+        let mut import_decls = Vec::new();
         let mut structs = Vec::new();
         let mut protocols = Vec::new();
         let mut functions = Vec::new();
+
+        // Phase 1: Module declarations
         while self.peek().node != Token::Eof {
-            match self.peek().node {
-                Token::Struct => structs.push(self.parse_struct_def()?),
-                Token::Protocol => protocols.push(self.parse_protocol_def()?),
-                _ => functions.push(self.parse_function()?),
+            let next = if Self::is_visibility_token(&self.peek().node) {
+                self.tokens.get(self.pos + 1).map(|t| &t.node)
+            } else {
+                Some(&self.peek().node)
+            };
+            if next == Some(&Token::Module) {
+                let visibility = self.try_parse_visibility();
+                self.expect(Token::Module)?;
+                let name = self.expect_ident()?;
+                self.expect(Token::Semicolon)?;
+                module_decls.push(ModuleDecl { visibility, name });
+            } else {
+                break;
             }
         }
+
+        // Phase 2: Import declarations
+        while self.peek().node != Token::Eof {
+            let next = if Self::is_visibility_token(&self.peek().node) {
+                self.tokens.get(self.pos + 1).map(|t| &t.node)
+            } else {
+                Some(&self.peek().node)
+            };
+            if next == Some(&Token::Import) {
+                let visibility = self.try_parse_visibility();
+                self.expect(Token::Import)?;
+                let mut import_decl = self.parse_import_path()?;
+                import_decl.visibility = visibility;
+                self.expect(Token::Semicolon)?;
+                import_decls.push(import_decl);
+            } else {
+                break;
+            }
+        }
+
+        // Phase 3: Top-level declarations with visibility
+        while self.peek().node != Token::Eof {
+            let visibility = self.try_parse_visibility();
+            match self.peek().node {
+                Token::Struct => {
+                    let mut s = self.parse_struct_def()?;
+                    s.visibility = visibility;
+                    structs.push(s);
+                }
+                Token::Protocol => {
+                    let mut p = self.parse_protocol_def()?;
+                    p.visibility = visibility;
+                    protocols.push(p);
+                }
+                _ => {
+                    let mut f = self.parse_function()?;
+                    f.visibility = visibility;
+                    functions.push(f);
+                }
+            }
+        }
+
         Ok(Program {
-            module_decls: vec![],
-            import_decls: vec![],
+            module_decls,
+            import_decls,
             structs,
             protocols,
             functions,
         })
+    }
+
+    fn parse_import_path(&mut self) -> Result<ImportDecl> {
+        // Parse prefix: self::, super::, or named::
+        let prefix = match &self.peek().node {
+            Token::SelfKw => {
+                self.advance();
+                self.expect(Token::ColonColon)?;
+                PathPrefix::SelfKw
+            }
+            Token::Super => {
+                self.advance();
+                self.expect(Token::ColonColon)?;
+                PathPrefix::Super
+            }
+            _ => {
+                let name = self.expect_ident()?;
+                self.expect(Token::ColonColon)?;
+                PathPrefix::Named(name)
+            }
+        };
+
+        let mut path = Vec::new();
+        let tail = self.parse_import_tail(&mut path)?;
+
+        Ok(ImportDecl {
+            visibility: Visibility::Internal,
+            prefix,
+            path,
+            tail,
+        })
+    }
+
+    /// Expects an identifier or a keyword that can appear as a path segment in imports.
+    fn expect_path_ident(&mut self) -> Result<String> {
+        let tok = &self.tokens[self.pos];
+        let name = match &tok.node {
+            Token::Ident(s) => s.clone(),
+            // Keywords that may appear as path segments
+            Token::Public => "public".to_string(),
+            Token::Package => "package".to_string(),
+            Token::Internal => "internal".to_string(),
+            Token::Fileprivate => "fileprivate".to_string(),
+            Token::Private => "private".to_string(),
+            Token::Module => "module".to_string(),
+            Token::Import => "import".to_string(),
+            _ => {
+                return Err(BengalError::ParseError {
+                    message: format!("expected identifier, found `{}`", tok.node),
+                    span: tok.span,
+                });
+            }
+        };
+        self.pos += 1;
+        Ok(name)
+    }
+
+    fn parse_import_tail(&mut self, path: &mut Vec<String>) -> Result<ImportTail> {
+        match &self.peek().node {
+            Token::Star => {
+                self.advance();
+                Ok(ImportTail::Glob)
+            }
+            Token::LBrace => {
+                self.advance();
+                let mut names = Vec::new();
+                names.push(self.expect_path_ident()?);
+                while self.peek().node == Token::Comma {
+                    self.advance();
+                    names.push(self.expect_path_ident()?);
+                }
+                self.expect(Token::RBrace)?;
+                Ok(ImportTail::Group(names))
+            }
+            _ => {
+                let name = self.expect_path_ident()?;
+                if self.peek().node == Token::ColonColon {
+                    self.advance();
+                    path.push(name);
+                    self.parse_import_tail(path)
+                } else {
+                    Ok(ImportTail::Single(name))
+                }
+            }
+        }
     }
 
     fn parse_function(&mut self) -> Result<Function> {
@@ -123,6 +298,7 @@ impl Parser {
     }
 
     fn parse_struct_member(&mut self) -> Result<StructMember> {
+        let visibility = self.try_parse_visibility();
         match &self.peek().node {
             Token::Var => {
                 self.advance();
@@ -141,7 +317,7 @@ impl Parser {
                     self.expect(Token::RBrace)?;
                     self.expect(Token::Semicolon)?;
                     Ok(StructMember::ComputedProperty {
-                        visibility: Visibility::Internal,
+                        visibility,
                         name,
                         ty,
                         getter,
@@ -151,7 +327,7 @@ impl Parser {
                     // Stored property: var name: Type;
                     self.expect(Token::Semicolon)?;
                     Ok(StructMember::StoredProperty {
-                        visibility: Visibility::Internal,
+                        visibility,
                         name,
                         ty,
                     })
@@ -162,7 +338,7 @@ impl Parser {
                 let params = self.parse_param_list()?;
                 let body = self.parse_block()?;
                 Ok(StructMember::Initializer {
-                    visibility: Visibility::Internal,
+                    visibility,
                     params,
                     body,
                 })
@@ -179,7 +355,7 @@ impl Parser {
                 };
                 let body = self.parse_block()?;
                 Ok(StructMember::Method {
-                    visibility: Visibility::Internal,
+                    visibility,
                     name,
                     params,
                     return_type,
@@ -776,10 +952,19 @@ impl Parser {
 pub fn parse(tokens: Vec<SpannedToken>) -> Result<Program> {
     let mut parser = Parser::new(tokens);
 
-    // Phase 1 compatibility: if the first token is not `func`, treat as a bare expression
+    // Phase 1 compatibility: if the first token is not a declaration keyword, treat as a bare expression
     if matches!(
         parser.peek().node,
-        Token::Func | Token::Struct | Token::Protocol
+        Token::Func
+            | Token::Struct
+            | Token::Protocol
+            | Token::Module
+            | Token::Import
+            | Token::Public
+            | Token::Package
+            | Token::Internal
+            | Token::Fileprivate
+            | Token::Private
     ) {
         let program = parser.parse_program()?;
         let next = parser.peek();
@@ -1679,5 +1864,128 @@ mod tests {
         assert_eq!(program.protocols.len(), 1);
         assert_eq!(program.protocols[0].name, "Summable");
         assert_eq!(program.protocols[0].members.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod module_tests {
+    use super::*;
+    use crate::lexer::tokenize;
+
+    fn parse_source(source: &str) -> Program {
+        let tokens = tokenize(source).unwrap();
+        parse(tokens).unwrap()
+    }
+
+    #[test]
+    fn parse_module_decl() {
+        let prog = parse_source("module math; func main() -> Int32 { return 0; }");
+        assert_eq!(prog.module_decls.len(), 1);
+        assert_eq!(prog.module_decls[0].name, "math");
+        assert_eq!(prog.module_decls[0].visibility, Visibility::Internal);
+    }
+
+    #[test]
+    fn parse_public_module_decl() {
+        let prog = parse_source("public module math; func main() -> Int32 { return 0; }");
+        assert_eq!(prog.module_decls[0].visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn parse_import_single() {
+        let prog = parse_source("import math::Vector; func main() -> Int32 { return 0; }");
+        assert_eq!(prog.import_decls.len(), 1);
+        assert_eq!(
+            prog.import_decls[0].prefix,
+            PathPrefix::Named("math".to_string())
+        );
+        assert_eq!(
+            prog.import_decls[0].tail,
+            ImportTail::Single("Vector".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_import_group() {
+        let prog =
+            parse_source("import math::{Vector, Matrix}; func main() -> Int32 { return 0; }");
+        assert_eq!(
+            prog.import_decls[0].tail,
+            ImportTail::Group(vec!["Vector".to_string(), "Matrix".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_import_glob() {
+        let prog = parse_source("import math::*; func main() -> Int32 { return 0; }");
+        assert_eq!(prog.import_decls[0].tail, ImportTail::Glob);
+    }
+
+    #[test]
+    fn parse_import_self_path() {
+        let prog = parse_source("import self::sub::helper; func main() -> Int32 { return 0; }");
+        assert_eq!(prog.import_decls[0].prefix, PathPrefix::SelfKw);
+        assert_eq!(prog.import_decls[0].path, vec!["sub".to_string()]);
+        assert_eq!(
+            prog.import_decls[0].tail,
+            ImportTail::Single("helper".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_import_super_path() {
+        let prog = parse_source("import super::common::Util; func main() -> Int32 { return 0; }");
+        assert_eq!(prog.import_decls[0].prefix, PathPrefix::Super);
+        assert_eq!(prog.import_decls[0].path, vec!["common".to_string()]);
+        assert_eq!(
+            prog.import_decls[0].tail,
+            ImportTail::Single("Util".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_public_import_reexport() {
+        let prog = parse_source(
+            "public import self::internal::Vector; func main() -> Int32 { return 0; }",
+        );
+        assert_eq!(prog.import_decls[0].visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn parse_visibility_on_func() {
+        let prog = parse_source(
+            "public func add(a: Int32, b: Int32) -> Int32 { return a + b; } func main() -> Int32 { return 0; }",
+        );
+        assert_eq!(prog.functions[0].visibility, Visibility::Public);
+        assert_eq!(prog.functions[1].visibility, Visibility::Internal);
+    }
+
+    #[test]
+    fn parse_visibility_on_struct() {
+        let prog = parse_source(
+            "public struct Foo { private var x: Int32; } func main() -> Int32 { return 0; }",
+        );
+        assert_eq!(prog.structs[0].visibility, Visibility::Public);
+        match &prog.structs[0].members[0] {
+            StructMember::StoredProperty { visibility, .. } => {
+                assert_eq!(*visibility, Visibility::Private);
+            }
+            _ => panic!("expected StoredProperty"),
+        }
+    }
+
+    #[test]
+    fn parse_nested_import_path() {
+        let prog =
+            parse_source("import graphics::renderer::Shader; func main() -> Int32 { return 0; }");
+        assert_eq!(
+            prog.import_decls[0].prefix,
+            PathPrefix::Named("graphics".to_string())
+        );
+        assert_eq!(prog.import_decls[0].path, vec!["renderer".to_string()]);
+        assert_eq!(
+            prog.import_decls[0].tail,
+            ImportTail::Single("Shader".to_string())
+        );
     }
 }
