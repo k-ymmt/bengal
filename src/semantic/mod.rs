@@ -295,7 +295,11 @@ fn resolve_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
 
     for member in &struct_def.members {
         match member {
-            StructMember::StoredProperty { name: fname, ty } => {
+            StructMember::StoredProperty {
+                visibility: _,
+                name: fname,
+                ty,
+            } => {
                 if field_index.contains_key(fname) || computed_index.contains_key(fname) {
                     return Err(sem_err(format!(
                         "duplicate field `{}` in struct `{}`",
@@ -308,6 +312,7 @@ fn resolve_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
                 field_index.insert(fname.clone(), idx);
             }
             StructMember::ComputedProperty {
+                visibility: _,
                 name: pname,
                 ty,
                 getter,
@@ -372,7 +377,11 @@ fn resolve_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
     }
 
     let init = match explicit_init {
-        Some(StructMember::Initializer { params, body }) => {
+        Some(StructMember::Initializer {
+            visibility: _,
+            params,
+            body,
+        }) => {
             let resolved_params: Vec<(String, Type)> = params
                 .iter()
                 .map(|p| Ok((p.name.clone(), resolve_type_checked(&p.ty, resolver)?)))
@@ -1038,7 +1047,11 @@ fn analyze_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
 
     for member in &struct_def.members {
         match member {
-            StructMember::Initializer { params, body } => {
+            StructMember::Initializer {
+                visibility: _,
+                params,
+                body,
+            } => {
                 let prev_self = resolver.self_context.clone();
                 resolver.self_context = Some(SelfContext {
                     struct_name: struct_def.name.clone(),
@@ -1119,6 +1132,7 @@ fn analyze_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
             }
             StructMember::StoredProperty { .. } => {}
             StructMember::Method {
+                visibility: _,
                 name: mname,
                 params,
                 return_type,

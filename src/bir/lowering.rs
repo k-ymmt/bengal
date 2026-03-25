@@ -1733,6 +1733,7 @@ pub fn lower_program(
     for struct_def in &program.structs {
         for member in &struct_def.members {
             if let StructMember::Method {
+                visibility: _,
                 name: mname,
                 params,
                 return_type,
@@ -1747,6 +1748,7 @@ pub fn lower_program(
                 }];
                 all_params.extend(params.clone());
                 let func = Function {
+                    visibility: Visibility::Internal,
                     name: mangled_name,
                     params: all_params,
                     return_type: return_type.clone(),

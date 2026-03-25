@@ -1,8 +1,48 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId(pub u32);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Visibility {
+    Public,
+    Package,
+    #[default]
+    Internal,
+    Fileprivate,
+    Private,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModuleDecl {
+    pub visibility: Visibility,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImportTail {
+    Single(String),
+    Group(Vec<String>),
+    Glob,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PathPrefix {
+    SelfKw,
+    Super,
+    Named(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportDecl {
+    pub visibility: Visibility,
+    pub prefix: PathPrefix,
+    pub path: Vec<String>,
+    pub tail: ImportTail,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
+    pub module_decls: Vec<ModuleDecl>,
+    pub import_decls: Vec<ImportDecl>,
     pub structs: Vec<StructDef>,
     pub protocols: Vec<ProtocolDef>,
     pub functions: Vec<Function>,
@@ -10,6 +50,7 @@ pub struct Program {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructDef {
+    pub visibility: Visibility,
     pub name: String,
     pub conformances: Vec<String>,
     pub members: Vec<StructMember>,
@@ -17,6 +58,7 @@ pub struct StructDef {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProtocolDef {
+    pub visibility: Visibility,
     pub name: String,
     pub members: Vec<ProtocolMember>,
 }
@@ -38,20 +80,24 @@ pub enum ProtocolMember {
 #[derive(Debug, Clone, PartialEq)]
 pub enum StructMember {
     StoredProperty {
+        visibility: Visibility,
         name: String,
         ty: TypeAnnotation,
     },
     ComputedProperty {
+        visibility: Visibility,
         name: String,
         ty: TypeAnnotation,
         getter: Block,
         setter: Option<Block>,
     },
     Initializer {
+        visibility: Visibility,
         params: Vec<Param>,
         body: Block,
     },
     Method {
+        visibility: Visibility,
         name: String,
         params: Vec<Param>,
         return_type: TypeAnnotation,
@@ -61,6 +107,7 @@ pub enum StructMember {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Function {
+    pub visibility: Visibility,
     pub name: String,
     pub params: Vec<Param>,
     pub return_type: TypeAnnotation,

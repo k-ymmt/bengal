@@ -62,6 +62,8 @@ impl Parser {
             }
         }
         Ok(Program {
+            module_decls: vec![],
+            import_decls: vec![],
             structs,
             protocols,
             functions,
@@ -84,6 +86,7 @@ impl Parser {
         };
         let body = self.parse_block()?;
         Ok(Function {
+            visibility: Visibility::Internal,
             name,
             params,
             return_type,
@@ -112,6 +115,7 @@ impl Parser {
         }
         self.expect(Token::RBrace)?;
         Ok(StructDef {
+            visibility: Visibility::Internal,
             name,
             conformances,
             members,
@@ -137,6 +141,7 @@ impl Parser {
                     self.expect(Token::RBrace)?;
                     self.expect(Token::Semicolon)?;
                     Ok(StructMember::ComputedProperty {
+                        visibility: Visibility::Internal,
                         name,
                         ty,
                         getter,
@@ -145,14 +150,22 @@ impl Parser {
                 } else {
                     // Stored property: var name: Type;
                     self.expect(Token::Semicolon)?;
-                    Ok(StructMember::StoredProperty { name, ty })
+                    Ok(StructMember::StoredProperty {
+                        visibility: Visibility::Internal,
+                        name,
+                        ty,
+                    })
                 }
             }
             Token::Init => {
                 self.advance();
                 let params = self.parse_param_list()?;
                 let body = self.parse_block()?;
-                Ok(StructMember::Initializer { params, body })
+                Ok(StructMember::Initializer {
+                    visibility: Visibility::Internal,
+                    params,
+                    body,
+                })
             }
             Token::Func => {
                 self.advance(); // consume `func`
@@ -166,6 +179,7 @@ impl Parser {
                 };
                 let body = self.parse_block()?;
                 Ok(StructMember::Method {
+                    visibility: Visibility::Internal,
                     name,
                     params,
                     return_type,
@@ -191,7 +205,11 @@ impl Parser {
             members.push(self.parse_protocol_member()?);
         }
         self.expect(Token::RBrace)?;
-        Ok(ProtocolDef { name, members })
+        Ok(ProtocolDef {
+            visibility: Visibility::Internal,
+            name,
+            members,
+        })
     }
 
     fn parse_protocol_member(&mut self) -> Result<ProtocolMember> {
@@ -782,9 +800,12 @@ pub fn parse(tokens: Vec<SpannedToken>) -> Result<Program> {
             });
         }
         Ok(Program {
+            module_decls: vec![],
+            import_decls: vec![],
             structs: vec![],
             protocols: vec![],
             functions: vec![Function {
+                visibility: Visibility::Internal,
                 name: "main".to_string(),
                 params: vec![],
                 return_type: TypeAnnotation::I32,
@@ -1437,11 +1458,11 @@ mod tests {
         assert_eq!(s.members.len(), 2);
         assert!(matches!(
             &s.members[0],
-            StructMember::StoredProperty { name, ty } if name == "x" && *ty == TypeAnnotation::I32
+            StructMember::StoredProperty { name, ty, .. } if name == "x" && *ty == TypeAnnotation::I32
         ));
         assert!(matches!(
             &s.members[1],
-            StructMember::StoredProperty { name, ty } if name == "y" && *ty == TypeAnnotation::I32
+            StructMember::StoredProperty { name, ty, .. } if name == "y" && *ty == TypeAnnotation::I32
         ));
     }
 
