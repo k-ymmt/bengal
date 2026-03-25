@@ -155,9 +155,11 @@ Uses length-prefixed segments to avoid ambiguity when identifiers contain unders
 
 ## Grammar Changes
 
-### New Keywords
+### New Keywords and Tokens
 
-`module`, `import`, `public`, `package`, `internal`, `fileprivate`, `private`, `super`
+**Keywords:** `module`, `import`, `public`, `package`, `internal`, `fileprivate`, `private`, `super`
+
+**Tokens:** `::` (`ColonColon`) — path separator for import paths and module paths. Must be added to the lexer as a distinct token alongside the existing `:` (`Colon`).
 
 Note: `self` is already a keyword (`Token::SelfKw`) used for struct self-reference (`self.field`). In the module system, `self` also serves as a path prefix (`self::sub::helper`). The parser disambiguates by lookahead: `self` followed by `::` is a module path prefix; otherwise it is a struct self-reference expression.
 
@@ -166,7 +168,7 @@ Note: `self` is already a keyword (`Token::SelfKw`) used for struct self-referen
 ```ebnf
 (* Top level *)
 Program        = { ModuleDecl } { ImportDecl } { TopLevelDecl } ;
-ModuleDecl     = "module" Identifier ";" ;
+ModuleDecl     = [ Visibility ] "module" Identifier ";" ;
 ImportDecl     = [ Visibility ] "import" ImportPath ";" ;
 
 (* Import path *)
