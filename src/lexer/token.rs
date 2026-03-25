@@ -68,6 +68,10 @@ pub enum Token {
     #[token("self")]
     SelfKw,
 
+    // Protocol: keywords
+    #[token("protocol")]
+    Protocol,
+
     // Phase 2: symbols
     #[token("->")]
     Arrow,
@@ -152,6 +156,7 @@ impl fmt::Display for Token {
             Token::Struct => write!(f, "struct"),
             Token::Init => write!(f, "init"),
             Token::SelfKw => write!(f, "self"),
+            Token::Protocol => write!(f, "protocol"),
             Token::Dot => write!(f, "."),
             Token::EqEq => write!(f, "=="),
             Token::NotEq => write!(f, "!="),
