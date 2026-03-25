@@ -93,6 +93,17 @@ impl Parser {
     fn parse_struct_def(&mut self) -> Result<StructDef> {
         self.expect(Token::Struct)?;
         let name = self.expect_ident()?;
+        let conformances = if self.peek().node == Token::Colon {
+            self.advance(); // consume `:`
+            let mut list = vec![self.expect_ident()?];
+            while self.peek().node == Token::Comma {
+                self.advance();
+                list.push(self.expect_ident()?);
+            }
+            list
+        } else {
+            vec![]
+        };
         self.expect(Token::LBrace)?;
         let mut members = Vec::new();
         while self.peek().node != Token::RBrace {
@@ -101,7 +112,7 @@ impl Parser {
         self.expect(Token::RBrace)?;
         Ok(StructDef {
             name,
-            conformances: vec![],
+            conformances,
             members,
         })
     }
@@ -1525,5 +1536,18 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m, StructMember::Method { name, .. } if name == "sum"))
         );
+    }
+
+    #[test]
+    fn parse_struct_conformance() {
+        let source = r#"
+            struct Point: Foo, Bar {
+                var x: Int32;
+            }
+            func main() -> Int32 { return 0; }
+        "#;
+        let tokens = crate::lexer::tokenize(source).unwrap();
+        let program = parse(tokens).unwrap();
+        assert_eq!(program.structs[0].conformances, vec!["Foo", "Bar"]);
     }
 }
