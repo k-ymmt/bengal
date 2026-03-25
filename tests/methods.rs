@@ -247,6 +247,27 @@ fn method_in_while_loop() {
     );
 }
 
+#[test]
+fn method_exhaustive_return() {
+    assert_eq!(
+        compile_and_run(
+            r#"
+            struct Chooser {
+                var threshold: Int32;
+                func classify(x: Int32) -> Int32 {
+                    if x > self.threshold { return 1; } else { return 0; };
+                }
+            }
+            func main() -> Int32 {
+                let c = Chooser(threshold: 5);
+                return c.classify(10);
+            }
+        "#,
+        ),
+        1
+    );
+}
+
 // --- Error cases ---
 
 #[test]

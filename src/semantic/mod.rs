@@ -1778,13 +1778,13 @@ fn analyze_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
                     );
                 }
 
-                let stmts = &body.stmts;
-                if stmts.is_empty() || !matches!(stmts.last(), Some(Stmt::Return(_))) {
+                if !block_always_returns(body) {
                     return Err(sem_err(format!(
                         "method `{}` must end with a `return` statement",
                         mname
                     )));
                 }
+                let stmts = &body.stmts;
                 for stmt in stmts {
                     if matches!(stmt, Stmt::Yield(_)) {
                         return Err(sem_err(
@@ -1838,11 +1838,10 @@ fn check_all_fields_initialized(
 }
 
 fn analyze_getter_block(block: &Block, resolver: &mut Resolver) -> Result<()> {
-    let stmts = &block.stmts;
-    if stmts.is_empty() || !matches!(stmts.last(), Some(Stmt::Return(_))) {
+    if !block_always_returns(block) {
         return Err(sem_err("getter must end with a `return` statement"));
     }
-    for stmt in stmts {
+    for stmt in &block.stmts {
         analyze_stmt(stmt, resolver)?;
     }
     Ok(())
