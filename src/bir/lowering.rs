@@ -1729,6 +1729,9 @@ pub fn semantic_type_to_bir(ty: &crate::semantic::types::Type) -> BirType {
         crate::semantic::types::Type::Generic { name, .. } => {
             panic!("unresolved generic type `{}` in BIR lowering", name)
         }
+        crate::semantic::types::Type::Array { .. } => {
+            panic!("Array type not yet supported in semantic_type_to_bir")
+        }
     }
 }
 

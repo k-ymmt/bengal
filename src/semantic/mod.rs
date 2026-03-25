@@ -1198,6 +1198,36 @@ fn resolve_type_checked(ty: &TypeAnnotation, resolver: &Resolver) -> Result<Type
     }
 }
 
+/// Check that `declared` and `actual` types match, with a specific error for array size mismatch.
+fn check_type_match(declared: &Type, actual: &Type) -> Result<()> {
+    if actual == declared {
+        return Ok(());
+    }
+    // Provide a specific error for array size mismatch
+    if let (
+        Type::Array {
+            element: d_elem,
+            size: d_size,
+        },
+        Type::Array {
+            element: a_elem,
+            size: a_size,
+        },
+    ) = (declared, actual)
+        && d_elem == a_elem
+        && d_size != a_size
+    {
+        return Err(sem_err(format!(
+            "expected array of size {}, found array of size {}",
+            d_size, a_size
+        )));
+    }
+    Err(sem_err(format!(
+        "type mismatch: expected `{}`, found `{}`",
+        declared, actual
+    )))
+}
+
 /// Check whether two types are compatible for type checking purposes.
 /// A TypeParam is compatible with any type (will be checked at monomorphization time).
 fn types_compatible(a: &Type, b: &Type) -> bool {
@@ -1215,6 +1245,10 @@ fn substitute_type(ty: &Type, subst: &HashMap<String, Type>) -> Type {
         Type::Generic { name, args } => Type::Generic {
             name: name.clone(),
             args: args.iter().map(|a| substitute_type(a, subst)).collect(),
+        },
+        Type::Array { element, size } => Type::Array {
+            element: Box::new(substitute_type(element, subst)),
+            size: *size,
         },
         other => other.clone(),
     }
@@ -1544,12 +1578,7 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
             let var_ty = match ty {
                 Some(ann) => {
                     let declared = resolve_type_checked(ann, resolver)?;
-                    if val_ty != declared {
-                        return Err(sem_err(format!(
-                            "type mismatch: expected `{}`, found `{}`",
-                            declared, val_ty
-                        )));
-                    }
+                    check_type_match(&declared, &val_ty)?;
                     declared
                 }
                 None => val_ty,
@@ -1567,12 +1596,7 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
             let var_ty = match ty {
                 Some(ann) => {
                     let declared = resolve_type_checked(ann, resolver)?;
-                    if val_ty != declared {
-                        return Err(sem_err(format!(
-                            "type mismatch: expected `{}`, found `{}`",
-                            declared, val_ty
-                        )));
-                    }
+                    check_type_match(&declared, &val_ty)?;
                     declared
                 }
                 None => val_ty,
@@ -1695,8 +1719,63 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
                 }
             }
         }
-        Stmt::IndexAssign { .. } => {
-            todo!("semantic analysis for IndexAssign")
+        Stmt::IndexAssign {
+            object,
+            index,
+            value,
+        } => {
+            let obj_ty = analyze_expr(object, resolver)?;
+            let idx_ty = analyze_expr(index, resolver)?;
+            let val_ty = analyze_expr(value, resolver)?;
+            match &obj_ty {
+                Type::Array { element, size } => {
+                    if !idx_ty.is_integer() {
+                        return Err(sem_err(format!(
+                            "array index must be an integer type, found '{}'",
+                            idx_ty
+                        )));
+                    }
+                    if val_ty != **element {
+                        return Err(sem_err(format!(
+                            "type mismatch in index assignment: expected '{}', found '{}'",
+                            element, val_ty
+                        )));
+                    }
+                    // Compile-time bounds check for constant indices
+                    if let ExprKind::Number(n) = &index.kind {
+                        let idx = *n;
+                        if idx < 0 || idx as u64 >= *size {
+                            return Err(sem_err(format!(
+                                "array index {} is out of bounds for array of size {}",
+                                idx, size
+                            )));
+                        }
+                    }
+                    // Check mutability: object must be a mutable variable
+                    match &object.kind {
+                        ExprKind::Ident(name) => match resolver.lookup_var(name) {
+                            Some(info) if !info.mutable => {
+                                return Err(sem_err(format!(
+                                    "cannot assign to index of immutable variable '{}'",
+                                    name
+                                )));
+                            }
+                            Some(_) => {}
+                            None => {
+                                return Err(sem_err(format!("undefined variable '{}'", name)));
+                            }
+                        },
+                        _ => {
+                            return Err(sem_err(
+                                "cannot assign to index of non-variable expression",
+                            ));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(sem_err(format!("cannot index into type '{}'", obj_ty)));
+                }
+            }
         }
     }
     Ok(())
@@ -2026,11 +2105,50 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                 ))),
             }
         }
-        ExprKind::ArrayLiteral { .. } => {
-            todo!("semantic analysis for ArrayLiteral")
+        ExprKind::ArrayLiteral { elements } => {
+            if elements.is_empty() {
+                return Err(sem_err("cannot infer type of empty array literal"));
+            }
+            let first_ty = analyze_expr(&elements[0], resolver)?;
+            for elem in &elements[1..] {
+                let elem_ty = analyze_expr(elem, resolver)?;
+                if elem_ty != first_ty {
+                    return Err(sem_err(format!(
+                        "array elements must all have the same type: expected '{}', found '{}'",
+                        first_ty, elem_ty
+                    )));
+                }
+            }
+            Ok(Type::Array {
+                element: Box::new(first_ty),
+                size: elements.len() as u64,
+            })
         }
-        ExprKind::IndexAccess { .. } => {
-            todo!("semantic analysis for IndexAccess")
+        ExprKind::IndexAccess { object, index } => {
+            let obj_ty = analyze_expr(object, resolver)?;
+            let idx_ty = analyze_expr(index, resolver)?;
+            match &obj_ty {
+                Type::Array { element, size } => {
+                    if !idx_ty.is_integer() {
+                        return Err(sem_err(format!(
+                            "array index must be an integer type, found '{}'",
+                            idx_ty
+                        )));
+                    }
+                    // Compile-time bounds check for constant indices
+                    if let ExprKind::Number(n) = &index.kind {
+                        let idx = *n;
+                        if idx < 0 || idx as u64 >= *size {
+                            return Err(sem_err(format!(
+                                "array index {} is out of bounds for array of size {}",
+                                idx, size
+                            )));
+                        }
+                    }
+                    Ok(*element.clone())
+                }
+                _ => Err(sem_err(format!("cannot index into type '{}'", obj_ty))),
+            }
         }
     }
 }
