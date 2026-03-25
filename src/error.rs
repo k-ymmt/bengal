@@ -25,6 +25,9 @@ pub enum BengalError {
 
     #[error("Codegen error: {message}")]
     CodegenError { message: String },
+
+    #[error("Package error: {message}")]
+    PackageError { message: String },
 }
 
 pub type Result<T> = std::result::Result<T, BengalError>;
@@ -69,6 +72,12 @@ impl BengalError {
                 label: String::new(),
             },
             BengalError::CodegenError { message } => BengalDiagnostic {
+                message,
+                src_code: source,
+                span: None,
+                label: String::new(),
+            },
+            BengalError::PackageError { message } => BengalDiagnostic {
                 message,
                 src_code: source,
                 span: None,
