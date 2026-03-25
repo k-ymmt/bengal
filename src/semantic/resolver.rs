@@ -90,6 +90,8 @@ pub struct Resolver {
     protocol_defs: HashMap<String, ProtocolInfo>,
     pub self_context: Option<SelfContext>,
     pub struct_init_calls: HashSet<NodeId>,
+    // Type parameters currently in scope (for generic functions/structs)
+    current_type_params: Vec<TypeParam>,
     // Import maps: symbols brought in from other modules
     imported_funcs: HashMap<String, FuncSig>,
     imported_structs: HashMap<String, StructInfo>,
@@ -224,6 +226,24 @@ impl Resolver {
                 Ok(())
             }
         }
+    }
+
+    // Type parameter scope management
+
+    pub fn push_type_params(&mut self, params: &[TypeParam]) {
+        self.current_type_params.extend(params.iter().cloned());
+    }
+
+    pub fn pop_type_params(&mut self, count: usize) {
+        let new_len = self.current_type_params.len().saturating_sub(count);
+        self.current_type_params.truncate(new_len);
+    }
+
+    pub fn lookup_type_param(&self, name: &str) -> Option<&TypeParam> {
+        self.current_type_params
+            .iter()
+            .rev()
+            .find(|tp| tp.name == name)
     }
 
     // Import methods for cross-module analysis

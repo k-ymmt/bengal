@@ -139,12 +139,14 @@ fn collect_global_symbols(graph: &ModuleGraph) -> Result<GlobalSymbolTable> {
         }
         // Register function signatures (need types already registered)
         for func in &ast.functions {
+            tmp_resolver.push_type_params(&func.type_params);
             let params: Vec<Type> = func
                 .params
                 .iter()
                 .map(|p| resolve_type_checked(&p.ty, &tmp_resolver))
                 .collect::<Result<Vec<_>>>()?;
             let return_type = resolve_type_checked(&func.return_type, &tmp_resolver)?;
+            tmp_resolver.pop_type_params(func.type_params.len());
             let sig = FuncSig {
                 type_params: func.type_params.clone(),
                 params,
@@ -416,12 +418,15 @@ fn analyze_single_module(
         {
             return Err(sem_err(format!("duplicate definition `{}`", func.name)));
         }
+        // Push type params into scope so that parameter/return types can reference them
+        resolver.push_type_params(&func.type_params);
         let params: Vec<Type> = func
             .params
             .iter()
             .map(|p| resolve_type_checked(&p.ty, resolver))
             .collect::<Result<Vec<_>>>()?;
         let return_type = resolve_type_checked(&func.return_type, resolver)?;
+        resolver.pop_type_params(func.type_params.len());
         resolver.define_func(
             func.name.clone(),
             FuncSig {
@@ -665,12 +670,14 @@ pub fn analyze(program: &Program) -> Result<SemanticInfo> {
         {
             return Err(sem_err(format!("duplicate definition `{}`", func.name)));
         }
+        resolver.push_type_params(&func.type_params);
         let params: Vec<Type> = func
             .params
             .iter()
             .map(|p| resolve_type_checked(&p.ty, &resolver))
             .collect::<Result<Vec<_>>>()?;
         let return_type = resolve_type_checked(&func.return_type, &resolver)?;
+        resolver.pop_type_params(func.type_params.len());
         resolver.define_func(
             func.name.clone(),
             FuncSig {
@@ -879,17 +886,60 @@ pub fn analyze(program: &Program) -> Result<SemanticInfo> {
 fn resolve_type_checked(ty: &TypeAnnotation, resolver: &Resolver) -> Result<Type> {
     match ty {
         TypeAnnotation::Named(name) => {
+            // Check if the name refers to a type parameter currently in scope
+            if let Some(tp) = resolver.lookup_type_param(name) {
+                return Ok(Type::TypeParam {
+                    name: tp.name.clone(),
+                    bound: tp.bound.clone(),
+                });
+            }
             if resolver.lookup_struct(name).is_none() {
                 return Err(sem_err(format!("undefined type `{}`", name)));
             }
             Ok(Type::Struct(name.clone()))
         }
+        TypeAnnotation::Generic { name, args } => {
+            // Resolve all type arguments
+            let resolved_args = args
+                .iter()
+                .map(|a| resolve_type_checked(a, resolver))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Type::Generic {
+                name: name.clone(),
+                args: resolved_args,
+            })
+        }
         other => Ok(resolve_type(other)),
+    }
+}
+
+/// Check whether two types are compatible for type checking purposes.
+/// A TypeParam is compatible with any type (will be checked at monomorphization time).
+fn types_compatible(a: &Type, b: &Type) -> bool {
+    if a == b {
+        return true;
+    }
+    matches!(a, Type::TypeParam { .. }) || matches!(b, Type::TypeParam { .. })
+}
+
+/// Substitute type parameters in a type using the given mapping.
+/// Type params not in the map are left as-is.
+fn substitute_type(ty: &Type, subst: &HashMap<String, Type>) -> Type {
+    match ty {
+        Type::TypeParam { name, .. } => subst.get(name).cloned().unwrap_or_else(|| ty.clone()),
+        Type::Generic { name, args } => Type::Generic {
+            name: name.clone(),
+            args: args.iter().map(|a| substitute_type(a, subst)).collect(),
+        },
+        other => other.clone(),
     }
 }
 
 fn resolve_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Result<()> {
     let name = &struct_def.name;
+
+    // Push type params into scope for struct member type resolution
+    resolver.push_type_params(&struct_def.type_params);
 
     let mut fields: Vec<(String, Type)> = Vec::new();
     let mut field_index: HashMap<String, usize> = HashMap::new();
@@ -1003,6 +1053,8 @@ fn resolve_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
         }
     };
 
+    resolver.pop_type_params(struct_def.type_params.len());
+
     resolver.define_struct(
         name.clone(),
         resolver::StructInfo {
@@ -1045,6 +1097,9 @@ fn block_always_returns(block: &Block) -> bool {
 }
 
 fn analyze_function(func: &Function, resolver: &mut Resolver) -> Result<()> {
+    // Push type params into scope for the duration of this function analysis
+    resolver.push_type_params(&func.type_params);
+
     let return_type = resolve_type_checked(&func.return_type, resolver)?;
     resolver.current_return_type = Some(return_type.clone());
     resolver.push_scope();
@@ -1064,6 +1119,7 @@ fn analyze_function(func: &Function, resolver: &mut Resolver) -> Result<()> {
 
     // Check that all paths end with a return
     if !block_always_returns(&func.body) {
+        resolver.pop_type_params(func.type_params.len());
         return Err(sem_err(format!(
             "function `{}` must end with a `return` statement",
             func.name
@@ -1073,6 +1129,7 @@ fn analyze_function(func: &Function, resolver: &mut Resolver) -> Result<()> {
     for stmt in stmts.iter() {
         // Yield is not allowed in function bodies
         if matches!(stmt, Stmt::Yield(_)) {
+            resolver.pop_type_params(func.type_params.len());
             return Err(sem_err(
                 "`yield` cannot be used in function body (use `return` instead)",
             ));
@@ -1083,6 +1140,7 @@ fn analyze_function(func: &Function, resolver: &mut Resolver) -> Result<()> {
 
     resolver.pop_scope();
     resolver.current_return_type = None;
+    resolver.pop_type_params(func.type_params.len());
     Ok(())
 }
 
@@ -1267,7 +1325,7 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
         Stmt::Return(Some(expr)) => {
             let ty = analyze_expr(expr, resolver)?;
             if let Some(ref return_type) = resolver.current_return_type
-                && ty != *return_type
+                && !types_compatible(&ty, return_type)
             {
                 return Err(sem_err(format!(
                     "return type mismatch: expected `{}`, found `{}`",
@@ -1277,7 +1335,7 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
         }
         Stmt::Return(None) => {
             if let Some(ref return_type) = resolver.current_return_type
-                && *return_type != Type::Unit
+                && !types_compatible(&Type::Unit, return_type)
             {
                 return Err(sem_err(format!(
                     "return type mismatch: expected `{}`, found `()`",
@@ -1414,7 +1472,11 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                 }
             }
         }
-        ExprKind::Call { name, args, .. } => {
+        ExprKind::Call {
+            name,
+            type_args,
+            args,
+        } => {
             // Empty-arg call may be a struct init
             if args.is_empty()
                 && let Some(struct_info) = resolver.lookup_struct(name)
@@ -1443,16 +1505,29 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                     args.len()
                 )));
             }
+
+            // Build type param substitution map if type args are provided
+            let subst: HashMap<String, Type> = if !type_args.is_empty() {
+                sig.type_params
+                    .iter()
+                    .zip(type_args.iter())
+                    .map(|(tp, ta)| Ok((tp.name.clone(), resolve_type_checked(ta, resolver)?)))
+                    .collect::<Result<HashMap<_, _>>>()?
+            } else {
+                HashMap::new()
+            };
+
             for (arg, expected_ty) in args.iter().zip(sig.params.iter()) {
                 let arg_ty = analyze_expr(arg, resolver)?;
-                if arg_ty != *expected_ty {
+                let effective_ty = substitute_type(expected_ty, &subst);
+                if !types_compatible(&arg_ty, &effective_ty) {
                     return Err(sem_err(format!(
                         "argument type mismatch: expected `{}`, found `{}`",
-                        expected_ty, arg_ty
+                        effective_ty, arg_ty
                     )));
                 }
             }
-            Ok(sig.return_type.clone())
+            Ok(substitute_type(&sig.return_type, &subst))
         }
         ExprKind::Block(block) => analyze_block_expr(block, resolver),
         ExprKind::If {
@@ -1565,7 +1640,7 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                     )));
                 }
                 let arg_ty = analyze_expr(arg_expr, resolver)?;
-                if arg_ty != *param_ty {
+                if !types_compatible(&arg_ty, param_ty) {
                     return Err(sem_err(format!(
                         "argument type mismatch: expected `{}`, found `{}`",
                         param_ty, arg_ty
