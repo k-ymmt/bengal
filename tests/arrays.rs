@@ -82,3 +82,22 @@ fn error_non_integer_index() {
     let err = compile_should_fail("func main() -> Int32 { let a = [1, 2, 3]; return a[true]; }");
     assert!(err.contains("integer"), "got: {}", err);
 }
+
+#[test]
+fn spec_comprehensive() {
+    assert_eq!(
+        compile_and_run(
+            "func sum(arr: [Int32; 3]) -> Int32 { return arr[0] + arr[1] + arr[2]; }
+             func makeArray() -> [Int32; 2] { return [10, 20]; }
+             func main() -> Int32 {
+                 let a: [Int32; 3] = [1, 2, 3];
+                 let b = [1, 2, 3];
+                 var c = [10, 20, 30];
+                 c[0] = 100;
+                 let d = makeArray();
+                 return c[0] + sum(b) + d[1];
+             }",
+        ),
+        126
+    ); // 100 + 6 + 20
+}
