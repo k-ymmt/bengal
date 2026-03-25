@@ -1,21 +1,21 @@
 ---
-name: review-task-md
-description: Review Task.md implementation plans, engineering task breakdowns, and milestone checklists for correctness, sequencing, feasibility, missing prerequisites, and validation gaps. Use when Codex is asked to review a Task.md, phased implementation plan, execution checklist, or similar Markdown task specification before coding starts or before approving the plan.
+name: review-plan-md
+description: Review Plan.md implementation plans, engineering task breakdowns, and milestone checklists for correctness, sequencing, feasibility, missing prerequisites, and validation gaps. Use when Codex is asked to review a Plan.md, phased implementation plan, execution checklist, or similar Markdown task specification before coding starts or before approving the plan.
 ---
 
-# Review Task.md
+# Review Plan.md
 
 ## Overview
 
-Review `Task.md` as an execution plan, not as prose. Find concrete risks that would cause incorrect implementation, wasted effort, hidden regressions, or weak validation if the plan were followed literally.
+Review `Plan.md` as an execution plan, not as prose. Find concrete risks that would cause incorrect implementation, wasted effort, hidden regressions, or weak validation if the plan were followed literally.
 
-Read the full `Task.md` first, then inspect the referenced code, modules, tests, and surrounding architecture before judging the plan. Use [`references/review-checklist.md`](references/review-checklist.md) as the detailed rubric.
+Read the full `Plan.md` first, then inspect the referenced code, modules, tests, and surrounding architecture before judging the plan. Use [`references/review-checklist.md`](references/review-checklist.md) as the detailed rubric.
 
 ## Workflow
 
 ### 1. Build execution context
 
-Read the entire `Task.md` from top to bottom.
+Read the entire `Plan.md` from top to bottom.
 
 Identify:
 
@@ -47,7 +47,7 @@ Report findings first, ordered by severity.
 
 For each finding:
 
-- cite the relevant `Task.md` section or checkbox item
+- cite the relevant `Plan.md` section or checkbox item
 - explain the implementation risk or likely failure mode
 - reference supporting code or tests when available
 - suggest the narrowest correction that makes the plan executable

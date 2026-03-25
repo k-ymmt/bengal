@@ -142,6 +142,24 @@ impl Parser {
                 let body = self.parse_block()?;
                 Ok(StructMember::Initializer { params, body })
             }
+            Token::Func => {
+                self.advance(); // consume `func`
+                let name = self.expect_ident()?;
+                let params = self.parse_param_list()?;
+                let return_type = if self.peek().node == Token::Arrow {
+                    self.advance();
+                    self.parse_type()?
+                } else {
+                    TypeAnnotation::Unit
+                };
+                let body = self.parse_block()?;
+                Ok(StructMember::Method {
+                    name,
+                    params,
+                    return_type,
+                    body,
+                })
+            }
             _ => {
                 let tok = self.peek();
                 Err(BengalError::ParseError {
@@ -1484,6 +1502,28 @@ mod tests {
                 })),
                 field: "x".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn parse_struct_method() {
+        let source = r#"
+            struct Point {
+                var x: Int32;
+                func sum() -> Int32 {
+                    return self.x;
+                }
+            }
+            func main() -> Int32 { return 0; }
+        "#;
+        let tokens = crate::lexer::tokenize(source).unwrap();
+        let program = parse(tokens).unwrap();
+        assert_eq!(program.structs.len(), 1);
+        let s = &program.structs[0];
+        assert!(
+            s.members
+                .iter()
+                .any(|m| matches!(m, StructMember::Method { name, .. } if name == "sum"))
         );
     }
 }

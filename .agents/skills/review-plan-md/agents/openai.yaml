@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plan.md Reviewer"
+  short_description: "Review Plan.md plans for risk, gaps, and testability"
+  default_prompt: "Use $review-plan-md to review this Plan.md in detail and identify ambiguities, sequencing risks, and missing validation."
