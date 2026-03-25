@@ -71,14 +71,17 @@ func_def          = "func" IDENT type_params? "(" params ")" ("->" type)? block
 struct_def        = "struct" IDENT type_params? (":" protocols)? "{" members "}"
 type              = ... | IDENT type_args?
 call_expr         = IDENT type_args? "(" args ")"
-constructor_expr  = IDENT type_args? "(" args ")"
 ```
+
+Note: `call_expr` covers both function calls and struct constructors at the parser level. The parser produces a `Call` node in all cases. The semantic analyzer distinguishes function calls from struct constructors (via `struct_init_calls`) as it does today -- no change to this logic is needed.
 
 ## `<>` Disambiguation Strategy
 
-### The rule
+### New language rule: infix operator spacing
 
-Infix operators in Bengal must be surrounded by spaces on both sides. This eliminates the ambiguity between `<`/`>` as comparison operators and as type parameter delimiters:
+This spec introduces a new language-wide rule: **all infix operators must be surrounded by spaces on both sides.** This is not generics-specific -- it applies to all infix operators (`+`, `-`, `*`, `/`, `<`, `>`, `<=`, `>=`, `==`, `!=`, `&&`, `||`). Violation produces a compile error. Existing tests may need updating to comply with this rule.
+
+This rule eliminates the ambiguity between `<`/`>` as comparison operators and as type parameter delimiters:
 
 - `foo<Int32>(bar: x)` -- no space before `<` -- type arguments
 - `a < b` -- spaces around `<` -- comparison operator
@@ -89,8 +92,6 @@ Each token already carries span information via `Spanned<Token>`. The parser com
 
 - If `prev_token.span.end == current_token.span.start` (no space), `<` is a type parameter opener
 - If there is a gap, `<` is a comparison operator
-
-This also applies as a general language rule: all infix operators (`+`, `-`, `*`, `/`, `<`, `>`, `<=`, `>=`, `==`, `!=`, `&&`, `||`) require spaces on both sides. Violation produces a compile error.
 
 No lookahead or backtracking is needed.
 
@@ -161,6 +162,18 @@ StructInit {
     name: String,
     type_args: Vec<TypeAnnotation>,  // new
     fields: Vec<(String, Expr)>,
+}
+```
+
+### ExprKind::MethodCall (no AST change needed)
+
+`MethodCall` does not need `type_args`. Method calls on generic structs (e.g., `w.getSum()`) resolve the struct's type arguments through the receiver's type, not through explicit type arguments on the method call itself. The semantic analyzer knows the concrete type of `w` (e.g., `Wrapper<Point>`) and uses that to look up the monomorphized method during monomorphization. The `MethodCall` AST node remains unchanged:
+
+```rust
+MethodCall {
+    object: Box<Expr>,  // receiver whose type carries the type args
+    method: String,
+    args: Vec<CallArg>,
 }
 ```
 
