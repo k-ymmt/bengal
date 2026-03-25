@@ -961,3 +961,139 @@ fn fibonacci() {
         55
     );
 }
+
+// --- Phase 6a: struct methods ---
+
+#[test]
+fn method_basic() {
+    let result = compile_and_run(
+        r#"
+        struct Point {
+            var x: Int32;
+            var y: Int32;
+            func sum() -> Int32 {
+                return self.x + self.y;
+            }
+        }
+        func main() -> Int32 {
+            let p = Point(x: 3, y: 4);
+            return p.sum();
+        }
+    "#,
+    );
+    assert_eq!(result, 7);
+}
+
+#[test]
+fn method_with_args() {
+    let result = compile_and_run(
+        r#"
+        struct Point {
+            var x: Int32;
+            var y: Int32;
+            func add(other: Point) -> Point {
+                return Point(x: self.x + other.x, y: self.y + other.y);
+            }
+        }
+        func main() -> Int32 {
+            let a = Point(x: 1, y: 2);
+            let b = Point(x: 10, y: 20);
+            let c = a.add(b);
+            return c.x + c.y;
+        }
+    "#,
+    );
+    assert_eq!(result, 33);
+}
+
+#[test]
+fn method_chaining() {
+    let result = compile_and_run(
+        r#"
+        struct Wrapper {
+            var value: Int32;
+            func doubled() -> Wrapper {
+                return Wrapper(value: self.value * 2);
+            }
+            func get() -> Int32 {
+                return self.value;
+            }
+        }
+        func main() -> Int32 {
+            let w = Wrapper(value: 5);
+            return w.doubled().doubled().get();
+        }
+    "#,
+    );
+    assert_eq!(result, 20);
+}
+
+#[test]
+fn method_calls_other_method() {
+    let result = compile_and_run(
+        r#"
+        struct Calc {
+            var a: Int32;
+            var b: Int32;
+            func sum() -> Int32 {
+                return self.a + self.b;
+            }
+            func doubled_sum() -> Int32 {
+                return self.sum() * 2;
+            }
+        }
+        func main() -> Int32 {
+            let c = Calc(a: 3, b: 4);
+            return c.doubled_sum();
+        }
+    "#,
+    );
+    assert_eq!(result, 14);
+}
+
+#[test]
+fn method_in_control_flow() {
+    let result = compile_and_run(
+        r#"
+        struct Counter {
+            var n: Int32;
+            func value() -> Int32 {
+                return self.n;
+            }
+        }
+        func main() -> Int32 {
+            let c = Counter(n: 10);
+            let result = if c.value() > 5 {
+                yield c.value() + 1;
+            } else {
+                yield 0;
+            };
+            return result;
+        }
+    "#,
+    );
+    assert_eq!(result, 11);
+}
+
+#[test]
+fn method_unit_return() {
+    let result = compile_and_run(
+        r#"
+        struct Point {
+            var x: Int32;
+            func noop() {
+                return;
+            }
+            func get() -> Int32 {
+                return self.x;
+            }
+        }
+        func main() -> Int32 {
+            let p = Point(x: 42);
+            p.noop();
+            return p.get();
+        }
+    "#,
+    );
+    assert_eq!(result, 42);
+}
