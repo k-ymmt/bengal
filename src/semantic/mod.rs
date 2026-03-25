@@ -1016,6 +1016,30 @@ fn resolve_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
     Ok(())
 }
 
+/// Check whether a statement guarantees all control-flow paths end with `return`.
+fn stmt_always_returns(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(_) => true,
+        Stmt::Expr(expr) => match &expr.kind {
+            ExprKind::If {
+                then_block,
+                else_block: Some(else_blk),
+                ..
+            } => block_always_returns(then_block) && block_always_returns(else_blk),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Check whether a block guarantees all control-flow paths end with `return`.
+fn block_always_returns(block: &Block) -> bool {
+    match block.stmts.last() {
+        Some(stmt) => stmt_always_returns(stmt),
+        None => false,
+    }
+}
+
 fn analyze_function(func: &Function, resolver: &mut Resolver) -> Result<()> {
     let return_type = resolve_type_checked(&func.return_type, resolver)?;
     resolver.current_return_type = Some(return_type.clone());
@@ -1034,15 +1058,8 @@ fn analyze_function(func: &Function, resolver: &mut Resolver) -> Result<()> {
 
     let stmts = &func.body.stmts;
 
-    if stmts.is_empty() {
-        return Err(sem_err(format!(
-            "function `{}` must end with a `return` statement",
-            func.name
-        )));
-    }
-
-    // Check that the last statement is Return
-    if !matches!(stmts.last(), Some(Stmt::Return(_))) {
+    // Check that all paths end with a return
+    if !block_always_returns(&func.body) {
         return Err(sem_err(format!(
             "function `{}` must end with a `return` statement",
             func.name

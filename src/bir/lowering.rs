@@ -59,6 +59,8 @@ struct Lowering {
     lowering_error: Option<BengalError>,
     // Name mangling map for per-module lowering: local name -> mangled name
     name_map: Option<HashMap<String, String>>,
+    // Set by lower_if when both branches diverge (all paths return/break/continue)
+    last_expr_diverged: bool,
 }
 
 impl Lowering {
@@ -82,6 +84,7 @@ impl Lowering {
             init_struct_name: None,
             lowering_error: None,
             name_map: None,
+            last_expr_diverged: false,
         }
     }
 
@@ -697,8 +700,13 @@ impl Lowering {
                 StmtResult::Yield(val)
             }
             Stmt::Expr(expr) => {
+                self.last_expr_diverged = false;
                 let _val = self.lower_expr(expr);
-                StmtResult::None
+                if self.last_expr_diverged {
+                    StmtResult::ReturnVoid
+                } else {
+                    StmtResult::None
+                }
             }
             Stmt::Break(opt_expr) => {
                 let loop_ctx = self.loop_stack.last().unwrap();
@@ -1311,6 +1319,23 @@ impl Lowering {
                 }
                 else_region.push(CfgRegion::Block(bb_else));
 
+                // Detect whether both branches diverge (all paths return/break/continue)
+                let then_diverges = matches!(
+                    &then_result,
+                    Some(StmtResult::Return(_))
+                        | Some(StmtResult::ReturnVoid)
+                        | Some(StmtResult::Break)
+                        | Some(StmtResult::Continue)
+                );
+                let else_diverges = matches!(
+                    &else_result,
+                    Some(StmtResult::Return(_))
+                        | Some(StmtResult::ReturnVoid)
+                        | Some(StmtResult::Break)
+                        | Some(StmtResult::Continue)
+                );
+                let both_diverge = then_diverges && else_diverges;
+
                 // merge block
                 let merge_params = if has_merge_value {
                     let result = self.fresh_value();
@@ -1320,6 +1345,10 @@ impl Lowering {
                 } else {
                     let result = self.fresh_value(); // dummy for Unit
                     self.start_block(bb_merge, vec![]);
+                    if both_diverge {
+                        // merge block is unreachable; signal caller to seal it
+                        self.last_expr_diverged = true;
+                    }
                     result
                 };
 
