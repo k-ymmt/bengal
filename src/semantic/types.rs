@@ -48,5 +48,8 @@ pub fn resolve_type(annotation: &TypeAnnotation) -> Type {
         TypeAnnotation::Bool => Type::Bool,
         TypeAnnotation::Unit => Type::Unit,
         TypeAnnotation::Named(name) => Type::Struct(name.clone()),
+        TypeAnnotation::Generic { name, .. } => {
+            panic!("Generic type `{}` not yet supported in resolve_type", name)
+        }
     }
 }

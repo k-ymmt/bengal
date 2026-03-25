@@ -938,7 +938,7 @@ impl Lowering {
                     result
                 }
             },
-            ExprKind::Call { name, args } => {
+            ExprKind::Call { name, args, .. } => {
                 let sem = self.sem_info.as_ref().unwrap();
                 if sem.struct_init_calls.contains(&expr.id) {
                     let struct_info = sem.struct_defs.get(name).unwrap().clone();
@@ -1006,7 +1006,7 @@ impl Lowering {
                 self.value_types.insert(result, to_ty);
                 result
             }
-            ExprKind::StructInit { name, args } => {
+            ExprKind::StructInit { name, args, .. } => {
                 let sem = self.sem_info.as_ref().unwrap();
                 let struct_info = sem.struct_defs.get(name).unwrap().clone();
                 if struct_info.init.body.is_some() {
@@ -1765,6 +1765,9 @@ fn convert_type(ty: &TypeAnnotation) -> BirType {
         TypeAnnotation::Named(name) => {
             panic!("Named type `{}` not yet supported in convert_type", name)
         }
+        TypeAnnotation::Generic { name, .. } => {
+            panic!("Generic type `{}` not yet supported in convert_type", name)
+        }
     }
 }
 
@@ -1848,6 +1851,7 @@ pub fn lower_program(
                 let func = Function {
                     visibility: Visibility::Internal,
                     name: mangled_name,
+                    type_params: vec![],
                     params: all_params,
                     return_type: return_type.clone(),
                     body: body.clone(),
@@ -1971,6 +1975,7 @@ pub fn lower_module(
                 let func = Function {
                     visibility: Visibility::Internal,
                     name: local_mangled_name,
+                    type_params: vec![],
                     params: all_params,
                     return_type: return_type.clone(),
                     body: body.clone(),

@@ -263,6 +263,7 @@ impl Parser {
         Ok(Function {
             visibility: Visibility::Internal,
             name,
+            type_params: vec![],
             params,
             return_type,
             body,
@@ -292,6 +293,7 @@ impl Parser {
         Ok(StructDef {
             visibility: Visibility::Internal,
             name,
+            type_params: vec![],
             conformances,
             members,
         })
@@ -880,7 +882,11 @@ impl Parser {
         // Empty args → Call (semantic layer resolves if it's a struct init)
         if self.peek().node == Token::RParen {
             self.advance();
-            return Ok(self.expr(ExprKind::Call { name, args: vec![] }));
+            return Ok(self.expr(ExprKind::Call {
+                name,
+                type_args: vec![],
+                args: vec![],
+            }));
         }
 
         // Lookahead: IDENT followed by `:` → named args → StructInit
@@ -901,7 +907,11 @@ impl Parser {
                 args.push((label, value));
             }
             self.expect(Token::RParen)?;
-            Ok(self.expr(ExprKind::StructInit { name, args }))
+            Ok(self.expr(ExprKind::StructInit {
+                name,
+                type_args: vec![],
+                args,
+            }))
         } else {
             let mut args = Vec::new();
             args.push(self.parse_expr()?);
@@ -910,7 +920,11 @@ impl Parser {
                 args.push(self.parse_expr()?);
             }
             self.expect(Token::RParen)?;
-            Ok(self.expr(ExprKind::Call { name, args }))
+            Ok(self.expr(ExprKind::Call {
+                name,
+                type_args: vec![],
+                args,
+            }))
         }
     }
 
@@ -992,6 +1006,7 @@ pub fn parse(tokens: Vec<SpannedToken>) -> Result<Program> {
             functions: vec![Function {
                 visibility: Visibility::Internal,
                 name: "main".to_string(),
+                type_params: vec![],
                 params: vec![],
                 return_type: TypeAnnotation::I32,
                 body: Block {
@@ -1034,8 +1049,13 @@ mod tests {
                 op: *op,
                 operand: Box::new(normalize_expr(operand)),
             },
-            ExprKind::Call { name, args } => ExprKind::Call {
+            ExprKind::Call {
+                name,
+                type_args,
+                args,
+            } => ExprKind::Call {
                 name: name.clone(),
+                type_args: type_args.clone(),
                 args: args.iter().map(normalize_expr).collect(),
             },
             ExprKind::Block(block) => ExprKind::Block(normalize_block(block)),
@@ -1061,8 +1081,13 @@ mod tests {
                 expr: Box::new(normalize_expr(expr)),
                 target_type: target_type.clone(),
             },
-            ExprKind::StructInit { name, args } => ExprKind::StructInit {
+            ExprKind::StructInit {
+                name,
+                type_args,
+                args,
+            } => ExprKind::StructInit {
                 name: name.clone(),
+                type_args: type_args.clone(),
                 args: args
                     .iter()
                     .map(|(l, e)| (l.clone(), normalize_expr(e)))
@@ -1152,6 +1177,7 @@ mod tests {
                     collect_expr_ids(arg, ids);
                 }
             }
+
             ExprKind::Cast { expr, .. } => {
                 collect_expr_ids(expr, ids);
             }
@@ -1738,6 +1764,7 @@ mod tests {
             expr,
             e(ExprKind::StructInit {
                 name: "Foo".to_string(),
+                type_args: vec![],
                 args: vec![
                     ("x".to_string(), e(ExprKind::Number(1))),
                     ("y".to_string(), e(ExprKind::Number(2))),
@@ -1753,6 +1780,7 @@ mod tests {
             expr,
             e(ExprKind::Call {
                 name: "Foo".to_string(),
+                type_args: vec![],
                 args: vec![],
             })
         );
@@ -1808,6 +1836,7 @@ mod tests {
             e(ExprKind::FieldAccess {
                 object: Box::new(e(ExprKind::Call {
                     name: "get_foo".to_string(),
+                    type_args: vec![],
                     args: vec![],
                 })),
                 field: "x".to_string(),
@@ -1987,5 +2016,16 @@ mod module_tests {
             prog.import_decls[0].tail,
             ImportTail::Single("Shader".to_string())
         );
+    }
+
+    #[test]
+    fn parse_generic_function_def() {
+        let tokens = tokenize("func identity<T>(value: T) -> T { return value; }").unwrap();
+        let program = parse(tokens).unwrap();
+        assert_eq!(program.functions.len(), 1);
+        let func = &program.functions[0];
+        assert_eq!(func.type_params.len(), 1);
+        assert_eq!(func.type_params[0].name, "T");
+        assert_eq!(func.type_params[0].bound, None);
     }
 }

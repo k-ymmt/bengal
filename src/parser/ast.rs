@@ -52,6 +52,7 @@ pub struct Program {
 pub struct StructDef {
     pub visibility: Visibility,
     pub name: String,
+    pub type_params: Vec<TypeParam>,
     pub conformances: Vec<String>,
     pub members: Vec<StructMember>,
 }
@@ -109,6 +110,7 @@ pub enum StructMember {
 pub struct Function {
     pub visibility: Visibility,
     pub name: String,
+    pub type_params: Vec<TypeParam>,
     pub params: Vec<Param>,
     pub return_type: TypeAnnotation,
     pub body: Block,
@@ -121,6 +123,12 @@ pub struct Param {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeParam {
+    pub name: String,
+    pub bound: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeAnnotation {
     I32,
     I64,
@@ -129,6 +137,10 @@ pub enum TypeAnnotation {
     Bool,
     Unit,
     Named(String),
+    Generic {
+        name: String,
+        args: Vec<TypeAnnotation>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -197,6 +209,7 @@ pub enum ExprKind {
     },
     Call {
         name: String,
+        type_args: Vec<TypeAnnotation>,
         args: Vec<Expr>,
     },
     Block(Block),
@@ -222,6 +235,7 @@ pub enum ExprKind {
     // Struct: expressions
     StructInit {
         name: String,
+        type_args: Vec<TypeAnnotation>,
         args: Vec<(String, Expr)>,
     },
     FieldAccess {

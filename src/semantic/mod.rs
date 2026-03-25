@@ -1410,7 +1410,7 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                 }
             }
         }
-        ExprKind::Call { name, args } => {
+        ExprKind::Call { name, args, .. } => {
             // Empty-arg call may be a struct init
             if args.is_empty()
                 && let Some(struct_info) = resolver.lookup_struct(name)
@@ -1539,7 +1539,7 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             Ok(while_ty)
         }
         ExprKind::Float(_) => Ok(Type::F64),
-        ExprKind::StructInit { name, args } => {
+        ExprKind::StructInit { name, args, .. } => {
             let struct_info = resolver
                 .lookup_struct(name)
                 .ok_or_else(|| sem_err(format!("undefined struct `{}`", name)))?
