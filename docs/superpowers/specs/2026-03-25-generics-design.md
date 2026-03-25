@@ -122,15 +122,16 @@ pub struct TypeParam {
 }
 ```
 
-### FuncDef
+### Function
 
 ```rust
-pub struct FuncDef {
+pub struct Function {
+    pub visibility: Visibility,
     pub name: String,
     pub type_params: Vec<TypeParam>,  // new
     pub params: Vec<Param>,
     pub return_type: TypeAnnotation,
-    pub body: Vec<Stmt>,
+    pub body: Block,
 }
 ```
 
@@ -138,6 +139,7 @@ pub struct FuncDef {
 
 ```rust
 pub struct StructDef {
+    pub visibility: Visibility,
     pub name: String,
     pub type_params: Vec<TypeParam>,  // new
     pub conformances: Vec<String>,
@@ -151,7 +153,7 @@ pub struct StructDef {
 Call {
     name: String,
     type_args: Vec<TypeAnnotation>,  // new
-    args: Vec<CallArg>,
+    args: Vec<Expr>,
 }
 ```
 
@@ -161,7 +163,7 @@ Call {
 StructInit {
     name: String,
     type_args: Vec<TypeAnnotation>,  // new
-    fields: Vec<(String, Expr)>,
+    args: Vec<(String, Expr)>,
 }
 ```
 
@@ -173,7 +175,7 @@ StructInit {
 MethodCall {
     object: Box<Expr>,  // receiver whose type carries the type args
     method: String,
-    args: Vec<CallArg>,
+    args: Vec<Expr>,
 }
 ```
 
@@ -212,6 +214,7 @@ pub struct StructInfo {
     pub field_index: HashMap<String, usize>,
     pub methods: Vec<MethodInfo>,
     pub method_index: HashMap<String, usize>,
+    // existing fields (computed, computed_index, init) omitted for brevity
 }
 ```
 
@@ -267,13 +270,15 @@ struct Pair_Int32_Bool { var first: Int32; var second: Bool; }
 
 ### Name mangling
 
-Extend the existing module mangling scheme `_BG<len><segment>...` with type arguments using `_I` (Instantiation) prefix:
+Extend the existing module mangling scheme `_BG<len><segment>...` by appending an `_I` (Instantiation) suffix after the existing segments, followed by length-prefixed type argument names (`<len><name>` for each type arg):
 
 ```
 identity<Int32>            -> _BG8identity_I5Int32
 Pair<Int32, Bool>          -> _BG4Pair_I5Int324Bool
-Wrapper<Point>_getSum      -> _BG7Wrapper_I5Point6getSum
+Wrapper<Point>.getSum      -> _BG7Wrapper_I5Point6getSum
 ```
+
+For example, `_BG4Pair_I5Int324Bool` is read as: `4:Pair` (base name) + `_I` (instantiation marker) + `5:Int32` (first type arg) + `4:Bool` (second type arg). Module path segments precede the base name as usual.
 
 ### Impact on BIR / LLVM
 
