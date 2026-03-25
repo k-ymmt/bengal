@@ -131,6 +131,32 @@ fn generic_struct_with_constraint() {
 }
 
 #[test]
+fn error_wrong_type_arg_count() {
+    let err = compile_should_fail(
+        "struct Pair<A, B> { var first: A; var second: B; }
+         func main() -> Int32 { let p = Pair<Int32>(first: 1, second: 2); return 0; }",
+    );
+    assert!(
+        err.contains("expected 2 type argument"),
+        "expected type arg count error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn error_type_args_on_non_generic() {
+    let err = compile_should_fail(
+        "func bar(x: Int32) -> Int32 { return x; }
+         func main() -> Int32 { return bar<Int32>(1); }",
+    );
+    assert!(
+        err.contains("does not take type arguments"),
+        "expected 'does not take type arguments' error, got: {}",
+        err
+    );
+}
+
+#[test]
 fn generic_same_func_multiple_types() {
     assert_eq!(
         compile_and_run(
