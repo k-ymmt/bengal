@@ -85,7 +85,9 @@ fn find_block(blocks: &[BasicBlock], label: u32) -> &BasicBlock {
 /// Shared context for instruction/terminator emission within a single function.
 struct EmitCtx<'a, 'ctx> {
     context: &'ctx Context,
+    module: &'a Module<'ctx>,
     builder: &'a Builder<'ctx>,
+    current_fn: FunctionValue<'ctx>,
     alloca_map: &'a HashMap<Value, PointerValue<'ctx>>,
     value_types: &'a HashMap<Value, BirType>,
     struct_types: &'a HashMap<String, inkwell::types::StructType<'ctx>>,
@@ -104,6 +106,45 @@ fn load_value<'ctx>(ctx: &EmitCtx<'_, 'ctx>, val: &Value) -> Option<BasicValueEn
             .build_load(llvm_ty, *ptr, &format!("v{}", val.0))
             .unwrap(),
     )
+}
+
+/// Emit a runtime bounds check: if index >= size, call llvm.trap.
+fn emit_bounds_check<'ctx>(
+    ctx: &EmitCtx<'_, 'ctx>,
+    index_val: inkwell::values::IntValue<'ctx>,
+    size: u64,
+) -> Result<()> {
+    let size_const = index_val.get_type().const_int(size, false);
+    let in_bounds = ctx
+        .builder
+        .build_int_compare(IntPredicate::ULT, index_val, size_const, "bounds_check")
+        .map_err(|e| codegen_err(e.to_string()))?;
+
+    let ok_bb = ctx.context.append_basic_block(ctx.current_fn, "bounds_ok");
+    let trap_bb = ctx
+        .context
+        .append_basic_block(ctx.current_fn, "bounds_trap");
+
+    ctx.builder
+        .build_conditional_branch(in_bounds, ok_bb, trap_bb)
+        .map_err(|e| codegen_err(e.to_string()))?;
+
+    // Trap block: call llvm.trap then unreachable
+    ctx.builder.position_at_end(trap_bb);
+    let trap_fn = ctx.module.get_function("llvm.trap").unwrap_or_else(|| {
+        let fn_type = ctx.context.void_type().fn_type(&[], false);
+        ctx.module.add_function("llvm.trap", fn_type, None)
+    });
+    ctx.builder
+        .build_call(trap_fn, &[], "")
+        .map_err(|e| codegen_err(e.to_string()))?;
+    ctx.builder
+        .build_unreachable()
+        .map_err(|e| codegen_err(e.to_string()))?;
+
+    // Continue in ok block
+    ctx.builder.position_at_end(ok_bb);
+    Ok(())
 }
 
 /// Emit a single BIR instruction.
@@ -467,14 +508,130 @@ fn emit_instruction<'ctx>(
                 .map_err(|e| codegen_err(e.to_string()))?;
         }
 
-        Instruction::ArrayInit { .. } => {
-            return Err(codegen_err("ArrayInit codegen not yet implemented"));
+        Instruction::ArrayInit {
+            result,
+            ty,
+            elements,
+        } => {
+            let llvm_ty = bir_type_to_llvm_type(ctx.context, ty, ctx.struct_types)
+                .ok_or_else(|| codegen_err("ArrayInit: unsupported type"))?;
+            let arr_ty = llvm_ty.into_array_type();
+            let mut agg: inkwell::values::AggregateValueEnum = arr_ty.get_undef().into();
+            for (i, elem_val) in elements.iter().enumerate() {
+                let val = load_value(ctx, elem_val)
+                    .ok_or_else(|| codegen_err("ArrayInit: failed to load element"))?;
+                agg = ctx
+                    .builder
+                    .build_insert_value(agg, val, i as u32, "arr_insert")
+                    .map_err(|e| codegen_err(e.to_string()))?;
+            }
+            ctx.builder
+                .build_store(ctx.alloca_map[result], agg.into_array_value())
+                .map_err(|e| codegen_err(e.to_string()))?;
         }
-        Instruction::ArrayGet { .. } => {
-            return Err(codegen_err("ArrayGet codegen not yet implemented"));
+
+        Instruction::ArrayGet {
+            result,
+            ty,
+            array,
+            index,
+            array_size,
+        } => {
+            let arr_val = load_value(ctx, array)
+                .ok_or_else(|| codegen_err("ArrayGet: failed to load array"))?;
+            let idx_val = load_value(ctx, index)
+                .ok_or_else(|| codegen_err("ArrayGet: failed to load index"))?;
+
+            // Determine the LLVM array type for GEP
+            let arr_bir_ty = ctx
+                .value_types
+                .get(array)
+                .ok_or_else(|| codegen_err("ArrayGet: missing array type"))?;
+            let arr_llvm_ty = bir_type_to_llvm_type(ctx.context, arr_bir_ty, ctx.struct_types)
+                .ok_or_else(|| codegen_err("ArrayGet: unsupported array type"))?;
+
+            // Store the array to a temporary alloca for GEP
+            let tmp_alloca = ctx
+                .builder
+                .build_alloca(arr_llvm_ty, "arr_tmp")
+                .map_err(|e| codegen_err(e.to_string()))?;
+            ctx.builder
+                .build_store(tmp_alloca, arr_val)
+                .map_err(|e| codegen_err(e.to_string()))?;
+
+            // Runtime bounds check for variable indices
+            let idx_int = idx_val.into_int_value();
+            emit_bounds_check(ctx, idx_int, *array_size)?;
+
+            // GEP to element: [0, index]
+            let zero = ctx.context.i32_type().const_zero();
+            let elem_ptr = unsafe {
+                ctx.builder
+                    .build_in_bounds_gep(arr_llvm_ty, tmp_alloca, &[zero, idx_int], "arr_elem_ptr")
+                    .map_err(|e| codegen_err(e.to_string()))?
+            };
+
+            let elem_llvm_ty = bir_type_to_llvm_type(ctx.context, ty, ctx.struct_types)
+                .ok_or_else(|| codegen_err("ArrayGet: unsupported element type"))?;
+            let elem = ctx
+                .builder
+                .build_load(elem_llvm_ty, elem_ptr, "arr_elem")
+                .map_err(|e| codegen_err(e.to_string()))?;
+            ctx.builder
+                .build_store(ctx.alloca_map[result], elem)
+                .map_err(|e| codegen_err(e.to_string()))?;
         }
-        Instruction::ArraySet { .. } => {
-            return Err(codegen_err("ArraySet codegen not yet implemented"));
+
+        Instruction::ArraySet {
+            result,
+            ty,
+            array,
+            index,
+            value,
+            array_size,
+        } => {
+            let arr_val = load_value(ctx, array)
+                .ok_or_else(|| codegen_err("ArraySet: failed to load array"))?;
+            let idx_val = load_value(ctx, index)
+                .ok_or_else(|| codegen_err("ArraySet: failed to load index"))?;
+            let new_val = load_value(ctx, value)
+                .ok_or_else(|| codegen_err("ArraySet: failed to load value"))?;
+
+            let arr_llvm_ty = bir_type_to_llvm_type(ctx.context, ty, ctx.struct_types)
+                .ok_or_else(|| codegen_err("ArraySet: unsupported array type"))?;
+
+            // Store the array to a temporary alloca for GEP
+            let tmp_alloca = ctx
+                .builder
+                .build_alloca(arr_llvm_ty, "arr_tmp")
+                .map_err(|e| codegen_err(e.to_string()))?;
+            ctx.builder
+                .build_store(tmp_alloca, arr_val)
+                .map_err(|e| codegen_err(e.to_string()))?;
+
+            // Runtime bounds check for variable indices
+            let idx_int = idx_val.into_int_value();
+            emit_bounds_check(ctx, idx_int, *array_size)?;
+
+            // GEP to element and store
+            let zero = ctx.context.i32_type().const_zero();
+            let elem_ptr = unsafe {
+                ctx.builder
+                    .build_in_bounds_gep(arr_llvm_ty, tmp_alloca, &[zero, idx_int], "arr_elem_ptr")
+                    .map_err(|e| codegen_err(e.to_string()))?
+            };
+            ctx.builder
+                .build_store(elem_ptr, new_val)
+                .map_err(|e| codegen_err(e.to_string()))?;
+
+            // Load updated array and store to result
+            let updated_arr = ctx
+                .builder
+                .build_load(arr_llvm_ty, tmp_alloca, "arr_updated")
+                .map_err(|e| codegen_err(e.to_string()))?;
+            ctx.builder
+                .build_store(ctx.alloca_map[result], updated_arr)
+                .map_err(|e| codegen_err(e.to_string()))?;
         }
     }
     Ok(())
@@ -591,8 +748,10 @@ fn emit_terminator<'ctx>(
 }
 
 /// Compile a single BIR function into LLVM IR.
+#[allow(clippy::too_many_arguments)]
 fn compile_function<'ctx>(
     context: &'ctx Context,
+    module: &Module<'ctx>,
     builder: &Builder<'ctx>,
     bir_func: &BirFunction,
     llvm_func: FunctionValue<'ctx>,
@@ -642,7 +801,9 @@ fn compile_function<'ctx>(
     // Pass 3: Emit instructions and terminators for each block
     let ctx = EmitCtx {
         context,
+        module,
         builder,
+        current_fn: llvm_func,
         alloca_map: &alloca_map,
         value_types: &value_types,
         struct_types,
@@ -753,6 +914,7 @@ pub fn compile_to_module<'ctx>(
         let llvm_func = func_map[&bir_func.name];
         compile_function(
             context,
+            &module,
             &builder,
             bir_func,
             llvm_func,
@@ -864,6 +1026,7 @@ pub fn compile_module(
         let llvm_func = func_map[&bir_func.name];
         compile_function(
             &context,
+            &module,
             &builder,
             bir_func,
             llvm_func,
