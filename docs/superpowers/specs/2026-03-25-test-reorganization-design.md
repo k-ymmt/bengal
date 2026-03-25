@@ -216,9 +216,9 @@ Notes:
 - `native_control_flow` — While loop
 - `native_i64_cast` (renamed: `native_type_cast`) — Cast between numeric types
 
-**New tests (filling native coverage gaps):**
+**Retained and new (filling native coverage gaps):**
 - `native_struct_basic` — Struct creation and field access (kept as native alongside JIT version in structs.rs)
-- `native_method_call` — Method invocation on struct
+- `native_method_call` — Method invocation on struct (new)
 
 **Removed (covered by JIT tests in feature files):**
 - `native_simple_return` — covered by `functions::simple`
