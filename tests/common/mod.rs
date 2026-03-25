@@ -91,10 +91,7 @@ pub fn compile_source_should_fail(source: &str) -> String {
 pub fn compile_and_run_package(files: &[(&str, &str)]) -> i32 {
     let dir = tempfile::TempDir::new().unwrap();
 
-    let toml_content = format!(
-        "[package]\nname = \"test_pkg\"\nentry = \"{}\"",
-        files[0].0
-    );
+    let toml_content = format!("[package]\nname = \"test_pkg\"\nentry = \"{}\"", files[0].0);
     std::fs::write(dir.path().join("Bengal.toml"), toml_content).unwrap();
 
     for (path, source) in files {
@@ -119,10 +116,7 @@ pub fn compile_and_run_package(files: &[(&str, &str)]) -> i32 {
 pub fn compile_package_should_fail(files: &[(&str, &str)]) -> String {
     let dir = tempfile::TempDir::new().unwrap();
 
-    let toml_content = format!(
-        "[package]\nname = \"test_pkg\"\nentry = \"{}\"",
-        files[0].0
-    );
+    let toml_content = format!("[package]\nname = \"test_pkg\"\nentry = \"{}\"", files[0].0);
     std::fs::write(dir.path().join("Bengal.toml"), toml_content).unwrap();
 
     for (path, source) in files {
