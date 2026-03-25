@@ -1,9 +1,9 @@
-# Bengal Language Grammar — Phase 6
+# Bengal Language Grammar — Phase 7
 
 ## Overview
 
 Bengal is an expression-oriented language that compiles to native code via LLVM.
-Features include loop control (`break`/`continue`), multiple numeric types (`Int64`, `Float32`, `Float64`), local type inference, `as` casts, `while` expressions with `break` values and `nobreak` blocks, constant folding optimization, structs with stored/computed properties, initializers, and methods, and protocols for shared interfaces.
+Features include loop control (`break`/`continue`), multiple numeric types (`Int64`, `Float32`, `Float64`), local type inference, `as` casts, `while` expressions with `break` values and `nobreak` blocks, constant folding optimization, structs with stored/computed properties, initializers, and methods, protocols for shared interfaces, and a module system for multi-file compilation with hierarchical namespaces and visibility control.
 
 Key design principles:
 
@@ -13,6 +13,7 @@ Key design principles:
 - **Expression-oriented**: `if`/`else` and `while` are expressions that produce values.
 - **Value-type structs**: Structs are stack-allocated value types with stored properties, computed properties, custom initializers, and methods.
 - **Protocols**: Shared interfaces that structs can conform to, enabling compile-time checked structural contracts.
+- **Module system**: Multi-file compilation with hierarchical modules, five-level visibility control, and import paths using `::` as the separator.
 
 ## Lexical Grammar
 
@@ -32,7 +33,9 @@ keyword = "func" | "let" | "var" | "return" | "yield"
         | "true" | "false" | "if" | "else" | "while"
         | "break" | "continue" | "as" | "nobreak"
         | "struct" | "init" | "self" | "get" | "set"
-        | "protocol" ;
+        | "protocol"
+        | "module" | "import" | "public" | "package"
+        | "internal" | "fileprivate" | "private" | "super" ;
 
 (* Arithmetic operators *)
 additive_op       = "+" | "-" ;
@@ -48,12 +51,13 @@ logical_and = "&&" ;
 logical_not = "!" ;
 
 (* Symbols *)
-arrow     = "->" ;
-colon     = ":" ;
-semicolon = ";" ;
-comma     = "," ;
-eq        = "=" ;
-dot       = "." ;
+arrow      = "->" ;
+colon      = ":" ;
+coloncolon = "::" ;
+semicolon  = ";" ;
+comma      = "," ;
+eq         = "=" ;
+dot        = "." ;
 
 (* Delimiters *)
 lparen = "(" ;
@@ -68,8 +72,23 @@ whitespace = " " | "\t" | "\n" | "\r" ;
 ## Syntactic Grammar
 
 ```ebnf
-program    = { top_level } ;
-top_level  = function | struct_def | protocol_def ;
+program    = { module_decl } , { import_decl } , { top_level } ;
+top_level  = [ visibility ] , ( function | struct_def | protocol_def ) ;
+
+(* Module declarations *)
+module_decl = [ visibility ] , "module" , identifier , ";" ;
+
+(* Import declarations *)
+import_decl = [ visibility ] , "import" , import_path , ";" ;
+import_path = path_prefix , "::" , import_tail ;
+path_prefix = "self" | "super" | identifier ;
+import_tail = "*"
+            | identifier
+            | "{" , identifier , { "," , identifier } , "}"
+            | identifier , "::" , import_tail ;
+
+(* Visibility modifiers *)
+visibility = "public" | "package" | "internal" | "fileprivate" | "private" ;
 
 function   = "func" , identifier , param_list , [ "->" , type ] , block ;
            (* return type defaults to () if omitted *)
@@ -134,7 +153,7 @@ struct_def = "struct" , identifier , [ ":" , identifier_list ] , "{" , { struct_
 
 identifier_list = identifier , { "," , identifier } ;
 
-struct_member = stored_property | computed_property | initializer | method ;
+struct_member = [ visibility ] , ( stored_property | computed_property | initializer | method ) ;
 
 stored_property   = "var" , identifier , ":" , type , ";" ;
 
@@ -309,6 +328,66 @@ The type of a `while` expression is determined by its `break` statements:
 - Method signatures must match exactly (name, parameter types, return type).
 - Conformance is checked at compile time (static dispatch, no vtable).
 
+### Module System
+
+#### Package configuration
+
+A package is defined by a `Bengal.toml` file at the project root.
+
+```toml
+[package]
+name = "my_app"
+entry = "src/main.bengal"
+```
+
+- `name`: Package identifier used in module paths and name mangling.
+- `entry`: Path to the root module file (relative to `Bengal.toml`).
+- When no `Bengal.toml` is found, the compiler operates in single-file mode for backward compatibility.
+
+#### Module declarations
+- `module` declarations must appear at the top of a file, before `import` declarations and other definitions.
+- `module foo;` maps to `foo.bengal` in the current module's directory. If not found, maps to `foo/module.bengal`.
+- Circular module declarations are a compile error.
+- A file may only belong to one module.
+- Modules form a tree rooted at the entry file.
+
+#### Import declarations
+- `import` declarations must appear after `module` declarations and before other definitions.
+- Import path forms:
+  - Single: `import math::Vector;` — imports one symbol.
+  - Group: `import math::{Vector, Matrix};` — imports multiple symbols.
+  - Glob: `import math::*;` — imports all public symbols.
+  - Self: `import self::sub::helper;` — relative path from current module.
+  - Super: `import super::common::Util;` — relative path from parent module.
+  - Re-export: `public import self::internal::Vector;` — re-exports a symbol.
+- `super` at the package root is a compile error.
+- Conflicting names from separate imports are a compile error.
+- Glob import conflicts: error only at usage site if ambiguous (unused conflicts are tolerated).
+- Symbols within the same module are accessible without `import`.
+- Re-exporting (`public import`) requires the original symbol to have `public` or `package` visibility.
+
+#### Visibility
+- Five levels: `public`, `package`, `internal` (default), `fileprivate`, `private`.
+- Omitting a visibility modifier defaults to `internal`.
+- Struct member default visibility is also `internal`.
+
+| Keyword | Scope |
+|---|---|
+| `public` | Accessible from outside the package |
+| `package` | Accessible from any module in the same package |
+| `internal` | Accessible within the same module (default) |
+| `fileprivate` | Accessible within the same file |
+| `private` | Accessible within the same declaration scope |
+
+- Applicable to top-level declarations: `func`, `struct`, `protocol`, `module`.
+- Applicable to struct members: stored properties, computed properties, methods, `init`.
+- `private` on struct fields: only accessible from methods and `init` within the same struct definition.
+- A child module's `internal` symbols are not visible to its parent module.
+
+#### Path resolution
+- `self` is already a keyword for struct self-reference (`self.field`). In import paths, `self` followed by `::` is a module path prefix; otherwise it is a struct self-reference expression.
+- `::` (`ColonColon`) is a distinct token from `:` (`Colon`), used as the path separator in import and module paths.
+
 ### Operators
 - Arithmetic (`+`, `-`, `*`, `/`): both operands must be the same numeric type. Result is that type.
 - Comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`): both operands must be the same numeric type. Result is `Bool`.
@@ -396,6 +475,61 @@ struct Square: HasArea, HasPerimeter {
 }
 ```
 
+### Module declarations and imports
+
+```bengal
+// src/main.bengal (root module)
+module math;
+module graphics;
+
+import math::Vector;
+import graphics::{Renderer, Color};
+
+func main() -> Int32 {
+    let v = Vector(x: 1, y: 2);
+    return v.sum();
+}
+```
+
+```bengal
+// src/math.bengal
+public struct Vector {
+    var x: Int32;
+    var y: Int32;
+
+    public func sum() -> Int32 {
+        return self.x + self.y;
+    }
+}
+```
+
+### Visibility modifiers
+
+```bengal
+public struct Counter {
+    private var value: Int32;
+
+    public init(start: Int32) {
+        self.value = start;
+    }
+
+    public func get() -> Int32 {
+        return self.value;
+    }
+}
+```
+
+### Re-exports and relative imports
+
+```bengal
+// src/graphics/module.bengal
+module renderer;
+
+public import self::renderer::Renderer;
+
+import super::math::Vector;
+```
+
 ## Features Not Yet Supported
 
 - **Unary minus**: `-x` negation
@@ -403,6 +537,7 @@ struct Square: HasArea, HasPerimeter {
 - **Arrays**: array data type
 - **Closures/first-class functions**
 - **Integer literal suffixes**: `42i64` (use `42 as Int64` instead)
+- **Import aliases**: `import math::Vector as Vec`
 - **Existential types**: using a protocol as a variable/argument type (`var x: Summable = ...`)
 - **Extension conformance**: `extension Point: Drawable { ... }` for retroactive conformance
 - **Default implementations in protocols**
