@@ -159,6 +159,107 @@ pub fn analyze(program: &Program) -> Result<SemanticInfo> {
     for struct_def in &program.structs {
         analyze_struct_members(struct_def, &mut resolver)?;
     }
+
+    // Pass 3b: check protocol conformance
+    for struct_def in &program.structs {
+        for proto_name in &struct_def.conformances {
+            let proto_info = resolver
+                .lookup_protocol(proto_name)
+                .ok_or_else(|| sem_err(format!("unknown protocol `{}`", proto_name)))?
+                .clone();
+            let struct_info = resolver
+                .lookup_struct(&struct_def.name)
+                .ok_or_else(|| sem_err(format!("undefined struct `{}`", struct_def.name)))?
+                .clone();
+
+            // Check methods
+            for req_method in &proto_info.methods {
+                match struct_info.method_index.get(&req_method.name) {
+                    Some(&idx) => {
+                        let impl_method = &struct_info.methods[idx];
+                        if impl_method.params.len() != req_method.params.len() {
+                            return Err(sem_err(format!(
+                                "method `{}` expects {} parameter(s) but protocol `{}` requires {}",
+                                req_method.name,
+                                impl_method.params.len(),
+                                proto_name,
+                                req_method.params.len()
+                            )));
+                        }
+                        for ((impl_name, impl_ty), (req_name, req_ty)) in
+                            impl_method.params.iter().zip(req_method.params.iter())
+                        {
+                            if impl_ty != req_ty {
+                                return Err(sem_err(format!(
+                                    "method `{}` has parameter `{}` of type `{}` but protocol `{}` requires `{}`",
+                                    req_method.name, impl_name, impl_ty, proto_name, req_ty
+                                )));
+                            }
+                            if impl_name != req_name {
+                                return Err(sem_err(format!(
+                                    "method `{}` has parameter `{}` but protocol `{}` requires `{}`",
+                                    req_method.name, impl_name, proto_name, req_name
+                                )));
+                            }
+                        }
+                        if impl_method.return_type != req_method.return_type {
+                            return Err(sem_err(format!(
+                                "method `{}` has return type `{}` but protocol `{}` requires `{}`",
+                                req_method.name,
+                                impl_method.return_type,
+                                proto_name,
+                                req_method.return_type
+                            )));
+                        }
+                    }
+                    None => {
+                        return Err(sem_err(format!(
+                            "type `{}` does not implement method `{}` required by protocol `{}`",
+                            struct_def.name, req_method.name, proto_name
+                        )));
+                    }
+                }
+            }
+
+            // Check properties
+            for req_prop in &proto_info.properties {
+                // Check stored properties first
+                if let Some(&idx) = struct_info.field_index.get(&req_prop.name) {
+                    let (_, field_ty) = &struct_info.fields[idx];
+                    if *field_ty != req_prop.ty {
+                        return Err(sem_err(format!(
+                            "property `{}` has type `{}` but protocol `{}` requires `{}`",
+                            req_prop.name, field_ty, proto_name, req_prop.ty
+                        )));
+                    }
+                    // stored var always satisfies { get } and { get set }
+                    continue;
+                }
+                // Check computed properties
+                if let Some(&idx) = struct_info.computed_index.get(&req_prop.name) {
+                    let computed = &struct_info.computed[idx];
+                    if computed.ty != req_prop.ty {
+                        return Err(sem_err(format!(
+                            "property `{}` has type `{}` but protocol `{}` requires `{}`",
+                            req_prop.name, computed.ty, proto_name, req_prop.ty
+                        )));
+                    }
+                    if req_prop.has_setter && !computed.has_setter {
+                        return Err(sem_err(format!(
+                            "property `{}` requires a setter to conform to protocol `{}`",
+                            req_prop.name, proto_name
+                        )));
+                    }
+                    continue;
+                }
+                return Err(sem_err(format!(
+                    "type `{}` does not implement property `{}` required by protocol `{}`",
+                    struct_def.name, req_prop.name, proto_name
+                )));
+            }
+        }
+    }
+
     for func in &program.functions {
         analyze_function(func, &mut resolver)?;
     }
