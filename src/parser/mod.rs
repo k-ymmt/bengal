@@ -543,6 +543,21 @@ impl Parser {
     }
 
     fn parse_type(&mut self) -> Result<TypeAnnotation> {
+        if self.peek().node == Token::LBracket {
+            self.advance(); // consume [
+            let element = self.parse_type()?;
+            self.expect(Token::Semicolon)?;
+            let size_tok = self.expect(Token::Number(0))?;
+            let size = match &size_tok.node {
+                Token::Number(n) => *n as u64,
+                _ => unreachable!(),
+            };
+            self.expect(Token::RBracket)?;
+            return Ok(TypeAnnotation::Array {
+                element: Box::new(element),
+                size,
+            });
+        }
         if self.peek().node == Token::LParen {
             self.advance();
             self.expect(Token::RParen)?;
@@ -653,6 +668,11 @@ impl Parser {
                         ExprKind::FieldAccess { object, field } => Stmt::FieldAssign {
                             object: Box::new((**object).clone()),
                             field: field.clone(),
+                            value,
+                        },
+                        ExprKind::IndexAccess { object, index } => Stmt::IndexAssign {
+                            object: Box::new((**object).clone()),
+                            index: Box::new((**index).clone()),
                             value,
                         },
                         _ => {
@@ -876,6 +896,15 @@ impl Parser {
                     }
                     expr = self.parse_postfix_call_with_type_args(name, type_args)?;
                 }
+                Token::LBracket => {
+                    self.advance();
+                    let index = self.parse_expr()?;
+                    self.expect(Token::RBracket)?;
+                    expr = self.expr(ExprKind::IndexAccess {
+                        object: Box::new(expr),
+                        index: Box::new(index),
+                    });
+                }
                 Token::LParen => {
                     expr = self.parse_postfix_call(expr)?;
                 }
@@ -915,6 +944,19 @@ impl Parser {
             Token::Ident(_) => {
                 let name = self.expect_ident()?;
                 Ok(self.expr(ExprKind::Ident(name)))
+            }
+            Token::LBracket => {
+                self.advance();
+                let mut elements = Vec::new();
+                if self.peek().node != Token::RBracket {
+                    elements.push(self.parse_expr()?);
+                    while self.peek().node == Token::Comma {
+                        self.advance();
+                        elements.push(self.parse_expr()?);
+                    }
+                }
+                self.expect(Token::RBracket)?;
+                Ok(self.expr(ExprKind::ArrayLiteral { elements }))
             }
             Token::LBrace => {
                 let block = self.parse_block()?;
@@ -2252,5 +2294,36 @@ mod module_tests {
             },
             other => panic!("expected Return, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parse_array_type() {
+        let tokens =
+            tokenize("func main() -> Int32 { let a: [Int32; 3] = [1, 2, 3]; return 0; }").unwrap();
+        let program = parse(tokens).unwrap();
+        assert_eq!(program.functions.len(), 1);
+    }
+
+    #[test]
+    fn parse_array_literal() {
+        let tokens = tokenize("func main() -> Int32 { let a = [1, 2, 3]; return 0; }").unwrap();
+        let program = parse(tokens).unwrap();
+        assert_eq!(program.functions.len(), 1);
+    }
+
+    #[test]
+    fn parse_index_access() {
+        let tokens = tokenize("func main() -> Int32 { let a = [1, 2, 3]; return a[0]; }").unwrap();
+        let program = parse(tokens).unwrap();
+        assert_eq!(program.functions.len(), 1);
+    }
+
+    #[test]
+    fn parse_index_assign() {
+        let tokens =
+            tokenize("func main() -> Int32 { var a = [1, 2, 3]; a[0] = 10; return a[0]; }")
+                .unwrap();
+        let program = parse(tokens).unwrap();
+        assert_eq!(program.functions.len(), 1);
     }
 }
