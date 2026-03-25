@@ -1,3 +1,3 @@
 pub mod llvm;
 
-pub use llvm::{compile, compile_to_module};
+pub use llvm::{compile, compile_module, compile_to_module, link_objects};

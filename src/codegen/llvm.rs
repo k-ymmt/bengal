@@ -747,6 +747,135 @@ pub fn compile_to_module<'ctx>(
     Ok(module)
 }
 
+/// Compile a BIR module to native object code bytes, with external function declarations.
+///
+/// `external_functions` lists functions that are called by this module but defined in
+/// other modules. Each entry is (mangled_name, param_types, return_type).
+/// These are declared (but not defined) in the LLVM module so that call instructions
+/// can reference them; the linker resolves them at link time.
+pub fn compile_module(
+    bir_module: &BirModule,
+    external_functions: &[(String, Vec<BirType>, BirType)],
+) -> Result<Vec<u8>> {
+    let context = Context::create();
+    let module = context.create_module("bengal");
+    let builder = context.create_builder();
+
+    Target::initialize_native(&InitializationConfig {
+        asm_printer: true,
+        ..Default::default()
+    })
+    .map_err(|e| codegen_err(e.to_string()))?;
+
+    let triple = TargetMachine::get_default_triple();
+    let target = Target::from_triple(&triple).map_err(|e| codegen_err(e.to_string()))?;
+    let target_machine = target
+        .create_target_machine(
+            &triple,
+            "generic",
+            "",
+            OptimizationLevel::Default,
+            RelocMode::Default,
+            CodeModel::Default,
+        )
+        .ok_or_else(|| codegen_err("failed to create target machine"))?;
+
+    module.set_data_layout(&target_machine.get_target_data().get_data_layout());
+    module.set_triple(&triple);
+
+    let struct_types = build_struct_types(&context, bir_module);
+
+    // Declare external functions first
+    let mut func_map: HashMap<String, FunctionValue> = HashMap::new();
+    for (name, param_tys, ret_ty) in external_functions {
+        let param_types: Vec<BasicMetadataTypeEnum> = param_tys
+            .iter()
+            .filter(|ty| !matches!(ty, BirType::Unit))
+            .map(|ty| {
+                bir_type_to_llvm_type(&context, ty, &struct_types).ok_or_else(|| {
+                    codegen_err(format!("non-Unit param must have LLVM type: {:?}", ty))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(|t| t.into())
+            .collect();
+
+        let fn_type = if *ret_ty == BirType::Unit {
+            context.void_type().fn_type(&param_types, false)
+        } else {
+            let llvm_ret_ty = bir_type_to_llvm_type(&context, ret_ty, &struct_types)
+                .ok_or_else(|| codegen_err("unsupported return type"))?;
+            llvm_ret_ty.fn_type(&param_types, false)
+        };
+
+        let llvm_func = module.add_function(name, fn_type, None);
+        func_map.insert(name.clone(), llvm_func);
+    }
+
+    // Declare all functions defined in this module
+    for bir_func in &bir_module.functions {
+        let param_types: Vec<BasicMetadataTypeEnum> = bir_func
+            .params
+            .iter()
+            .filter(|(_, ty)| !matches!(ty, BirType::Unit))
+            .map(|(_, ty)| {
+                bir_type_to_llvm_type(&context, ty, &struct_types).ok_or_else(|| {
+                    codegen_err(format!("non-Unit param must have LLVM type: {:?}", ty))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(|t| t.into())
+            .collect();
+
+        let fn_type = if bir_func.return_type == BirType::Unit {
+            context.void_type().fn_type(&param_types, false)
+        } else {
+            let ret_ty = bir_type_to_llvm_type(&context, &bir_func.return_type, &struct_types)
+                .ok_or_else(|| codegen_err("unsupported return type"))?;
+            ret_ty.fn_type(&param_types, false)
+        };
+
+        let llvm_func = module.add_function(&bir_func.name, fn_type, None);
+        func_map.insert(bir_func.name.clone(), llvm_func);
+    }
+
+    // Compile each function
+    for bir_func in &bir_module.functions {
+        let llvm_func = func_map[&bir_func.name];
+        compile_function(
+            &context,
+            &builder,
+            bir_func,
+            llvm_func,
+            &func_map,
+            &struct_types,
+            bir_module,
+        )?;
+    }
+
+    let buf = target_machine
+        .write_to_memory_buffer(&module, FileType::Object)
+        .map_err(|e| codegen_err(e.to_string()))?;
+
+    Ok(buf.as_slice().to_vec())
+}
+
+/// Link multiple object files into an executable using the system linker.
+pub fn link_objects(obj_files: &[std::path::PathBuf], output: &std::path::Path) -> Result<()> {
+    let status = std::process::Command::new("cc")
+        .args(obj_files.iter().map(|p| p.as_os_str()))
+        .arg("-o")
+        .arg(output)
+        .status()
+        .map_err(|e| codegen_err(format!("linker failed: {}", e)))?;
+    if !status.success() {
+        return Err(codegen_err("linker failed"));
+    }
+    Ok(())
+}
+
 /// Compile BIR module to native object code bytes.
 pub fn compile(bir_module: &BirModule) -> Result<Vec<u8>> {
     let context = Context::create();
