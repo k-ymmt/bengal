@@ -518,10 +518,29 @@ impl Parser {
                 Token::Dot => {
                     self.advance();
                     let field = self.expect_ident()?;
-                    expr = self.expr(ExprKind::FieldAccess {
-                        object: Box::new(expr),
-                        field,
-                    });
+                    // Check if this is a method call: field followed by `(`
+                    if self.peek().node == Token::LParen {
+                        self.advance(); // consume `(`
+                        let mut args = Vec::new();
+                        if self.peek().node != Token::RParen {
+                            args.push(self.parse_expr()?);
+                            while self.peek().node == Token::Comma {
+                                self.advance();
+                                args.push(self.parse_expr()?);
+                            }
+                        }
+                        self.expect(Token::RParen)?;
+                        expr = self.expr(ExprKind::MethodCall {
+                            object: Box::new(expr),
+                            method: field,
+                            args,
+                        });
+                    } else {
+                        expr = self.expr(ExprKind::FieldAccess {
+                            object: Box::new(expr),
+                            field,
+                        });
+                    }
                 }
                 Token::LParen => {
                     expr = self.parse_postfix_call(expr)?;

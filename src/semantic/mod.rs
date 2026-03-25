@@ -802,9 +802,52 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             }
             Ok(target_ty)
         }
-        ExprKind::MethodCall { .. } => {
-            // MethodCall analysis will be added in a later task
-            Err(sem_err("method calls are not yet supported"))
+        ExprKind::MethodCall {
+            object,
+            method,
+            args,
+        } => {
+            let obj_ty = analyze_expr(object, resolver)?;
+            match &obj_ty {
+                Type::Struct(struct_name) => {
+                    let struct_info = resolver
+                        .lookup_struct(struct_name)
+                        .ok_or_else(|| sem_err(format!("undefined struct `{}`", struct_name)))?
+                        .clone();
+                    let method_info = match struct_info.method_index.get(method.as_str()) {
+                        Some(&idx) => struct_info.methods[idx].clone(),
+                        None => {
+                            return Err(sem_err(format!(
+                                "type `{}` has no method `{}`",
+                                struct_name, method
+                            )));
+                        }
+                    };
+                    if args.len() != method_info.params.len() {
+                        return Err(sem_err(format!(
+                            "method `{}` expects {} argument(s) but {} were given",
+                            method,
+                            method_info.params.len(),
+                            args.len()
+                        )));
+                    }
+                    for (arg, (param_name, param_ty)) in args.iter().zip(method_info.params.iter())
+                    {
+                        let arg_ty = analyze_expr(arg, resolver)?;
+                        if arg_ty != *param_ty {
+                            return Err(sem_err(format!(
+                                "expected `{}` but got `{}` in argument `{}` of method `{}`",
+                                param_ty, arg_ty, param_name, method
+                            )));
+                        }
+                    }
+                    Ok(method_info.return_type)
+                }
+                _ => Err(sem_err(format!(
+                    "method call on non-struct type `{}`",
+                    obj_ty
+                ))),
+            }
         }
     }
 }
