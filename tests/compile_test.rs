@@ -1337,3 +1337,249 @@ fn protocol_error_missing_setter() {
     );
     assert!(err.contains("requires a setter"), "got: {}", err);
 }
+
+// ========================
+// Module System Integration Tests
+// ========================
+
+fn compile_and_run_package(files: &[(&str, &str)]) -> i32 {
+    let dir = tempfile::TempDir::new().unwrap();
+
+    // Write Bengal.toml
+    let toml_content = format!("[package]\nname = \"test_pkg\"\nentry = \"{}\"", files[0].0);
+    std::fs::write(dir.path().join("Bengal.toml"), toml_content).unwrap();
+
+    // Write source files
+    for (path, source) in files {
+        let full_path = dir.path().join(path);
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&full_path, source).unwrap();
+    }
+
+    // Compile
+    let entry_path = dir.path().join(files[0].0);
+    let exe_path = dir.path().join("test_exe");
+    bengal::compile_package_to_executable(&entry_path, &exe_path).unwrap();
+
+    // Run and get exit code
+    let output = std::process::Command::new(&exe_path)
+        .output()
+        .expect("failed to run compiled executable");
+    output.status.code().unwrap_or(-1)
+}
+
+fn compile_package_should_fail(files: &[(&str, &str)]) -> String {
+    let dir = tempfile::TempDir::new().unwrap();
+
+    let toml_content = format!("[package]\nname = \"test_pkg\"\nentry = \"{}\"", files[0].0);
+    std::fs::write(dir.path().join("Bengal.toml"), toml_content).unwrap();
+
+    for (path, source) in files {
+        let full_path = dir.path().join(path);
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&full_path, source).unwrap();
+    }
+
+    let entry_path = dir.path().join(files[0].0);
+    let exe_path = dir.path().join("test_exe");
+    let err = bengal::compile_package_to_executable(&entry_path, &exe_path).unwrap_err();
+    err.to_string()
+}
+
+#[test]
+fn multi_file_cross_module_function_call() {
+    let result = compile_and_run_package(&[
+        (
+            "main.bengal",
+            r#"
+            module math;
+            import math::add;
+            func main() -> Int32 {
+                return add(1, 2);
+            }
+        "#,
+        ),
+        (
+            "math.bengal",
+            r#"
+            public func add(a: Int32, b: Int32) -> Int32 {
+                return a + b;
+            }
+        "#,
+        ),
+    ]);
+    assert_eq!(result, 3);
+}
+
+#[test]
+fn multi_file_visibility_internal_denied() {
+    let err = compile_package_should_fail(&[
+        (
+            "main.bengal",
+            r#"
+            module math;
+            import math::helper;
+            func main() -> Int32 { return 0; }
+        "#,
+        ),
+        (
+            "math.bengal",
+            r#"
+            func helper() -> Int32 { return 1; }
+        "#,
+        ),
+    ]);
+    assert!(
+        err.contains("cannot")
+            || err.contains("not accessible")
+            || err.contains("visibility")
+            || err.contains("not found"),
+        "error was: {}",
+        err
+    );
+}
+
+#[test]
+fn multi_file_struct_across_modules() {
+    let result = compile_and_run_package(&[
+        (
+            "main.bengal",
+            r#"
+            module shapes;
+            import shapes::Point;
+            func main() -> Int32 {
+                let p = Point(x: 3, y: 4);
+                return p.x + p.y;
+            }
+        "#,
+        ),
+        (
+            "shapes.bengal",
+            r#"
+            public struct Point {
+                public var x: Int32;
+                public var y: Int32;
+            }
+        "#,
+        ),
+    ]);
+    assert_eq!(result, 7);
+}
+
+#[test]
+fn multi_file_glob_import() {
+    let result = compile_and_run_package(&[
+        (
+            "main.bengal",
+            r#"
+            module math;
+            import math::*;
+            func main() -> Int32 {
+                return add(10, mul(2, 3));
+            }
+        "#,
+        ),
+        (
+            "math.bengal",
+            r#"
+            public func add(a: Int32, b: Int32) -> Int32 { return a + b; }
+            public func mul(a: Int32, b: Int32) -> Int32 { return a * b; }
+        "#,
+        ),
+    ]);
+    assert_eq!(result, 16);
+}
+
+#[test]
+fn single_file_backward_compat() {
+    // No Bengal.toml - existing compile_and_run should still work
+    let result = compile_and_run("func main() -> Int32 { return 42; }");
+    assert_eq!(result, 42);
+}
+
+#[test]
+fn multi_file_package_visibility() {
+    let result = compile_and_run_package(&[
+        (
+            "main.bengal",
+            r#"
+            module util;
+            import util::helper;
+            func main() -> Int32 {
+                return helper();
+            }
+        "#,
+        ),
+        (
+            "util.bengal",
+            r#"
+            package func helper() -> Int32 { return 99; }
+        "#,
+        ),
+    ]);
+    assert_eq!(result, 99);
+}
+
+#[test]
+fn multi_file_method_call_across_modules() {
+    let result = compile_and_run_package(&[
+        (
+            "main.bengal",
+            r#"
+            module shapes;
+            import shapes::Circle;
+            func main() -> Int32 {
+                let c = Circle(radius: 5);
+                return c.area();
+            }
+        "#,
+        ),
+        (
+            "shapes.bengal",
+            r#"
+            public struct Circle {
+                public var radius: Int32;
+                public func area() -> Int32 {
+                    return self.radius * self.radius;
+                }
+            }
+        "#,
+        ),
+    ]);
+    assert_eq!(result, 25);
+}
+
+#[test]
+fn multi_file_three_modules() {
+    let result = compile_and_run_package(&[
+        (
+            "main.bengal",
+            r#"
+            module math;
+            module util;
+            import math::add;
+            import util::double;
+            func main() -> Int32 {
+                return add(double(3), double(4));
+            }
+        "#,
+        ),
+        (
+            "math.bengal",
+            r#"
+            public func add(a: Int32, b: Int32) -> Int32 { return a + b; }
+        "#,
+        ),
+        (
+            "util.bengal",
+            r#"
+            public func double(x: Int32) -> Int32 { return x * 2; }
+        "#,
+        ),
+    ]);
+    assert_eq!(result, 14); // (3*2) + (4*2) = 6 + 8 = 14
+}

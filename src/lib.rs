@@ -9,8 +9,11 @@ pub mod semantic;
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use error::{BengalError, Result};
+
+static BUILD_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub fn compile_source(source: &str) -> Result<Vec<u8>> {
     let tokens = lexer::tokenize(source)?;
@@ -74,7 +77,9 @@ pub fn compile_package_to_executable(entry_path: &Path, output_path: &Path) -> R
 
     // 4. For each module: build name map, lower, optimize, compile
     let mut obj_files = Vec::new();
-    let temp_dir = std::env::temp_dir().join(format!("bengal_build_{}", std::process::id()));
+    let build_id = BUILD_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp_dir =
+        std::env::temp_dir().join(format!("bengal_build_{}_{}", std::process::id(), build_id));
     std::fs::create_dir_all(&temp_dir).map_err(|e| BengalError::PackageError {
         message: format!("failed to create temp dir: {}", e),
     })?;
