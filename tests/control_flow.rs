@@ -202,6 +202,22 @@ fn both_branches_diverge() {
     );
 }
 
+#[test]
+fn exhaustive_return_if_else() {
+    // Both branches return — no trailing return needed
+    assert_eq!(
+        compile_and_run(
+            r#"
+            func choose(x: Int32) -> Int32 {
+                if x > 0 { return 1; } else { return 0; };
+            }
+            func main() -> Int32 { return choose(5); }
+        "#,
+        ),
+        1
+    );
+}
+
 // --- while loops ---
 
 #[test]
