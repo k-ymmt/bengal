@@ -108,6 +108,8 @@ fn resolve_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
     let mut field_index: HashMap<String, usize> = HashMap::new();
     let mut computed: Vec<resolver::ComputedPropInfo> = Vec::new();
     let mut computed_index: HashMap<String, usize> = HashMap::new();
+    let mut methods: Vec<resolver::MethodInfo> = Vec::new();
+    let mut method_index: HashMap<String, usize> = HashMap::new();
     let mut explicit_init: Option<&StructMember> = None;
 
     for member in &struct_def.members {
@@ -157,8 +159,33 @@ fn resolve_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
                 }
                 explicit_init = Some(member);
             }
-            StructMember::Method { .. } => {
-                // Methods will be resolved in a later task
+            StructMember::Method {
+                name: mname,
+                params,
+                return_type,
+                ..
+            } => {
+                if field_index.contains_key(mname)
+                    || computed_index.contains_key(mname)
+                    || method_index.contains_key(mname)
+                {
+                    return Err(sem_err(format!(
+                        "duplicate member `{}` in struct `{}`",
+                        mname, name
+                    )));
+                }
+                let resolved_params: Vec<(String, Type)> = params
+                    .iter()
+                    .map(|p| Ok((p.name.clone(), resolve_type_checked(&p.ty, resolver)?)))
+                    .collect::<Result<Vec<_>>>()?;
+                let resolved_return = resolve_type_checked(return_type, resolver)?;
+                let idx = methods.len();
+                methods.push(resolver::MethodInfo {
+                    name: mname.clone(),
+                    params: resolved_params,
+                    return_type: resolved_return,
+                });
+                method_index.insert(mname.clone(), idx);
             }
         }
     }
@@ -188,6 +215,8 @@ fn resolve_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
             computed,
             computed_index,
             init,
+            methods,
+            method_index,
         },
     );
 

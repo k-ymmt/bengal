@@ -17,12 +17,21 @@ pub struct FuncSig {
 }
 
 #[derive(Debug, Clone)]
+pub struct MethodInfo {
+    pub name: String,
+    pub params: Vec<(String, Type)>,
+    pub return_type: Type,
+}
+
+#[derive(Debug, Clone)]
 pub struct StructInfo {
     pub fields: Vec<(String, Type)>,
     pub field_index: HashMap<String, usize>,
     pub computed: Vec<ComputedPropInfo>,
     pub computed_index: HashMap<String, usize>,
     pub init: InitializerInfo,
+    pub methods: Vec<MethodInfo>,
+    pub method_index: HashMap<String, usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +123,8 @@ impl Resolver {
                     params: vec![],
                     body: None,
                 },
+                methods: vec![],
+                method_index: HashMap::new(),
             },
         );
     }
