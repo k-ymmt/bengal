@@ -56,6 +56,30 @@ impl ModulePath {
         path.push(name.to_string());
         ModulePath(path)
     }
+
+    pub fn parent(&self) -> Option<Self> {
+        if self.0.is_empty() {
+            None
+        } else {
+            let mut path = self.0.clone();
+            path.pop();
+            Some(ModulePath(path))
+        }
+    }
+
+    pub fn is_root(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::fmt::Display for ModulePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.is_empty() {
+            write!(f, "<root>")
+        } else {
+            write!(f, "{}", self.0.join("::"))
+        }
+    }
 }
 
 #[derive(Debug)]

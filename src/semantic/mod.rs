@@ -4,8 +4,9 @@ pub mod types;
 use std::collections::{HashMap, HashSet};
 
 use crate::error::{BengalError, Result, Span};
+use crate::package::{ModuleGraph, ModulePath};
 use crate::parser::ast::*;
-use resolver::{FuncSig, Resolver, StructInfo, VarInfo};
+use resolver::{FuncSig, ProtocolInfo, Resolver, StructInfo, VarInfo, is_accessible};
 use types::{Type, resolve_type};
 
 #[derive(Debug)]
@@ -14,11 +15,595 @@ pub struct SemanticInfo {
     pub struct_init_calls: HashSet<NodeId>,
 }
 
+#[derive(Debug)]
+pub struct PackageSemanticInfo {
+    pub module_infos: HashMap<ModulePath, SemanticInfo>,
+}
+
 fn sem_err(message: impl Into<String>) -> BengalError {
     BengalError::SemanticError {
         message: message.into(),
         span: Span { start: 0, end: 0 },
     }
+}
+
+fn pkg_err(message: impl Into<String>) -> BengalError {
+    BengalError::PackageError {
+        message: message.into(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-module semantic analysis
+// ---------------------------------------------------------------------------
+
+/// Kinds of top-level symbols we track across modules.
+#[derive(Debug, Clone)]
+enum SymbolKind {
+    Func(FuncSig),
+    Struct(StructInfo),
+    Protocol(ProtocolInfo),
+}
+
+/// A single entry in the global (cross-module) symbol table.
+#[derive(Debug, Clone)]
+struct GlobalSymbol {
+    kind: SymbolKind,
+    visibility: Visibility,
+    module: ModulePath,
+}
+
+/// Global symbol table: module path -> (name -> GlobalSymbol)
+type GlobalSymbolTable = HashMap<ModulePath, HashMap<String, GlobalSymbol>>;
+
+/// Analyze an entire package represented by its `ModuleGraph`.
+///
+/// This is the multi-module entry point. It performs three phases:
+///   1. Collect all top-level symbols from every module.
+///   2. Resolve imports for each module and check visibility.
+///   3. Run the existing single-module analysis passes with imported symbols.
+pub fn analyze_package(graph: &ModuleGraph, _package_name: &str) -> Result<PackageSemanticInfo> {
+    // ---------------------------------------------------------------
+    // Phase 1: Collect all top-level symbols from all modules
+    // ---------------------------------------------------------------
+    let global_symbols = collect_global_symbols(graph)?;
+
+    // ---------------------------------------------------------------
+    // Phase 2 + 3: For each module, resolve imports then run analysis
+    // ---------------------------------------------------------------
+    let mut module_infos: HashMap<ModulePath, SemanticInfo> = HashMap::new();
+
+    for (mod_path, mod_info) in &graph.modules {
+        let mut resolver = Resolver::new();
+
+        // Resolve imports and populate the resolver's import maps
+        resolve_imports_for_module(
+            mod_path,
+            &mod_info.ast.import_decls,
+            &global_symbols,
+            graph,
+            &mut resolver,
+        )?;
+
+        // Run the standard single-module analysis (same as `analyze()` but
+        // parameterised on whether to require `main`).
+        let is_root = mod_path.is_root();
+        let sem_info = analyze_single_module(&mod_info.ast, &mut resolver, is_root)?;
+        module_infos.insert(mod_path.clone(), sem_info);
+    }
+
+    Ok(PackageSemanticInfo { module_infos })
+}
+
+/// Phase 1: Walk every module in the graph, register all top-level symbols,
+/// and return the global symbol table.
+fn collect_global_symbols(graph: &ModuleGraph) -> Result<GlobalSymbolTable> {
+    let mut table: GlobalSymbolTable = HashMap::new();
+
+    for (mod_path, mod_info) in &graph.modules {
+        let mut symbols: HashMap<String, GlobalSymbol> = HashMap::new();
+        let ast = &mod_info.ast;
+
+        // We need a temporary resolver to resolve types for function signatures
+        // and struct members. First do a two-pass approach: register all type
+        // names, then resolve member types.
+
+        let mut tmp_resolver = Resolver::new();
+
+        // Register struct names (reserves)
+        for s in &ast.structs {
+            tmp_resolver.reserve_struct(s.name.clone());
+        }
+        // Register protocol placeholders
+        for p in &ast.protocols {
+            tmp_resolver.define_protocol(
+                p.name.clone(),
+                ProtocolInfo {
+                    name: p.name.clone(),
+                    methods: vec![],
+                    properties: vec![],
+                },
+            );
+        }
+        // Register function signatures (need types already registered)
+        for func in &ast.functions {
+            let params: Vec<Type> = func
+                .params
+                .iter()
+                .map(|p| resolve_type_checked(&p.ty, &tmp_resolver))
+                .collect::<Result<Vec<_>>>()?;
+            let return_type = resolve_type_checked(&func.return_type, &tmp_resolver)?;
+            let sig = FuncSig {
+                params,
+                return_type,
+            };
+            tmp_resolver.define_func(func.name.clone(), sig.clone());
+            symbols.insert(
+                func.name.clone(),
+                GlobalSymbol {
+                    kind: SymbolKind::Func(sig),
+                    visibility: func.visibility,
+                    module: mod_path.clone(),
+                },
+            );
+        }
+
+        // Resolve struct member types
+        for s in &ast.structs {
+            resolve_struct_members(s, &mut tmp_resolver)?;
+            let info = tmp_resolver.lookup_struct(&s.name).unwrap().clone();
+            symbols.insert(
+                s.name.clone(),
+                GlobalSymbol {
+                    kind: SymbolKind::Struct(info),
+                    visibility: s.visibility,
+                    module: mod_path.clone(),
+                },
+            );
+        }
+
+        // Resolve protocol member types
+        for proto in &ast.protocols {
+            let mut methods = Vec::new();
+            let mut properties = Vec::new();
+            for member in &proto.members {
+                match member {
+                    ProtocolMember::MethodSig {
+                        name,
+                        params,
+                        return_type,
+                    } => {
+                        let resolved_params: Vec<(String, Type)> = params
+                            .iter()
+                            .map(|p| {
+                                Ok((p.name.clone(), resolve_type_checked(&p.ty, &tmp_resolver)?))
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                        let resolved_return = resolve_type_checked(return_type, &tmp_resolver)?;
+                        methods.push(resolver::ProtocolMethodSig {
+                            name: name.clone(),
+                            params: resolved_params,
+                            return_type: resolved_return,
+                        });
+                    }
+                    ProtocolMember::PropertyReq {
+                        name,
+                        ty,
+                        has_setter,
+                    } => {
+                        let resolved_ty = resolve_type_checked(ty, &tmp_resolver)?;
+                        properties.push(resolver::ProtocolPropertyReq {
+                            name: name.clone(),
+                            ty: resolved_ty,
+                            has_setter: *has_setter,
+                        });
+                    }
+                }
+            }
+            let info = ProtocolInfo {
+                name: proto.name.clone(),
+                methods,
+                properties,
+            };
+            symbols.insert(
+                proto.name.clone(),
+                GlobalSymbol {
+                    kind: SymbolKind::Protocol(info),
+                    visibility: proto.visibility,
+                    module: mod_path.clone(),
+                },
+            );
+        }
+
+        table.insert(mod_path.clone(), symbols);
+    }
+
+    Ok(table)
+}
+
+/// Phase 2: Resolve all import declarations for a given module and populate
+/// the resolver's import maps.
+fn resolve_imports_for_module(
+    current_module: &ModulePath,
+    import_decls: &[ImportDecl],
+    global_symbols: &GlobalSymbolTable,
+    graph: &ModuleGraph,
+    resolver: &mut Resolver,
+) -> Result<()> {
+    for import in import_decls {
+        // Resolve the target module path from the prefix + path segments
+        let target_module =
+            resolve_import_module_path(current_module, &import.prefix, &import.path, graph)?;
+
+        let target_symbols = global_symbols.get(&target_module).ok_or_else(|| {
+            pkg_err(format!(
+                "unresolved import: module '{}' not found",
+                target_module
+            ))
+        })?;
+
+        match &import.tail {
+            ImportTail::Single(name) => {
+                import_single_symbol(
+                    name,
+                    &target_module,
+                    target_symbols,
+                    current_module,
+                    resolver,
+                )?;
+            }
+            ImportTail::Group(names) => {
+                for name in names {
+                    import_single_symbol(
+                        name,
+                        &target_module,
+                        target_symbols,
+                        current_module,
+                        resolver,
+                    )?;
+                }
+            }
+            ImportTail::Glob => {
+                // Import all accessible symbols
+                for (name, sym) in target_symbols {
+                    if is_accessible(sym.visibility, &sym.module, current_module) {
+                        import_symbol_to_resolver(name, sym, resolver);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Import a single named symbol, checking visibility.
+fn import_single_symbol(
+    name: &str,
+    target_module: &ModulePath,
+    target_symbols: &HashMap<String, GlobalSymbol>,
+    current_module: &ModulePath,
+    resolver: &mut Resolver,
+) -> Result<()> {
+    let sym = target_symbols.get(name).ok_or_else(|| {
+        sem_err(format!(
+            "unresolved import: module '{}' has no item '{}'",
+            target_module, name
+        ))
+    })?;
+
+    if !is_accessible(sym.visibility, &sym.module, current_module) {
+        return Err(sem_err(format!(
+            "'{}' cannot be imported: it is not accessible from module '{}'",
+            name, current_module
+        )));
+    }
+
+    import_symbol_to_resolver(name, sym, resolver);
+    Ok(())
+}
+
+/// Actually add a symbol to the resolver's import maps.
+fn import_symbol_to_resolver(name: &str, sym: &GlobalSymbol, resolver: &mut Resolver) {
+    match &sym.kind {
+        SymbolKind::Func(sig) => {
+            resolver.import_func(name.to_string(), sig.clone());
+        }
+        SymbolKind::Struct(info) => {
+            resolver.import_struct(name.to_string(), info.clone());
+        }
+        SymbolKind::Protocol(info) => {
+            resolver.import_protocol(name.to_string(), info.clone());
+        }
+    }
+}
+
+/// Resolve an import path prefix + intermediate segments to a `ModulePath`.
+///
+/// For `import math::sub::foo`, prefix = Named("math"), path = ["sub"], tail = Single("foo")
+/// So we need to build module path from prefix + path segments.
+fn resolve_import_module_path(
+    current_module: &ModulePath,
+    prefix: &PathPrefix,
+    path_segments: &[String],
+    graph: &ModuleGraph,
+) -> Result<ModulePath> {
+    let base = match prefix {
+        PathPrefix::SelfKw => current_module.clone(),
+        PathPrefix::Super => current_module
+            .parent()
+            .ok_or_else(|| sem_err("cannot use 'super' from the package root module"))?,
+        PathPrefix::Named(name) => ModulePath(vec![name.clone()]),
+    };
+
+    // Append intermediate path segments
+    let mut result = base;
+    for seg in path_segments {
+        result = result.child(seg);
+    }
+
+    // Verify the target module exists in the graph
+    if !graph.modules.contains_key(&result) {
+        return Err(pkg_err(format!(
+            "unresolved import: module '{}' not found",
+            result
+        )));
+    }
+
+    Ok(result)
+}
+
+/// Analyze a single module's AST.
+/// This is similar to the existing `analyze()` but:
+///   - Takes an existing `resolver` (possibly pre-populated with imports).
+///   - Only checks for `main()` when `require_main` is true.
+fn analyze_single_module(
+    program: &Program,
+    resolver: &mut Resolver,
+    require_main: bool,
+) -> Result<SemanticInfo> {
+    // Pass 1a: register all struct and function names (for forward reference)
+    for struct_def in &program.structs {
+        if resolver.lookup_func(&struct_def.name).is_some()
+            || resolver.lookup_struct(&struct_def.name).is_some()
+        {
+            return Err(sem_err(format!(
+                "duplicate definition `{}`",
+                struct_def.name
+            )));
+        }
+        resolver.reserve_struct(struct_def.name.clone());
+    }
+    // Pass 1a (continued): register protocol names
+    for proto in &program.protocols {
+        if resolver.lookup_struct(&proto.name).is_some()
+            || resolver.lookup_func(&proto.name).is_some()
+            || resolver.lookup_protocol(&proto.name).is_some()
+        {
+            return Err(sem_err(format!("duplicate definition `{}`", proto.name)));
+        }
+        resolver.define_protocol(
+            proto.name.clone(),
+            ProtocolInfo {
+                name: proto.name.clone(),
+                methods: vec![],
+                properties: vec![],
+            },
+        );
+    }
+
+    for func in &program.functions {
+        if resolver.lookup_struct(&func.name).is_some()
+            || resolver.lookup_func(&func.name).is_some()
+        {
+            return Err(sem_err(format!("duplicate definition `{}`", func.name)));
+        }
+        let params: Vec<Type> = func
+            .params
+            .iter()
+            .map(|p| resolve_type_checked(&p.ty, resolver))
+            .collect::<Result<Vec<_>>>()?;
+        let return_type = resolve_type_checked(&func.return_type, resolver)?;
+        resolver.define_func(
+            func.name.clone(),
+            FuncSig {
+                params,
+                return_type,
+            },
+        );
+    }
+
+    // Pass 1b: resolve struct member types
+    for struct_def in &program.structs {
+        resolve_struct_members(struct_def, resolver)?;
+    }
+
+    // Check for name collisions between mangled method names and top-level functions
+    for struct_def in &program.structs {
+        if let Some(struct_info) = resolver.lookup_struct(&struct_def.name) {
+            let struct_info = struct_info.clone();
+            for method in &struct_info.methods {
+                let mangled = format!("{}_{}", struct_def.name, method.name);
+                if resolver.lookup_func(&mangled).is_some() {
+                    return Err(sem_err(format!(
+                        "function `{}` conflicts with method `{}.{}`",
+                        mangled, struct_def.name, method.name
+                    )));
+                }
+            }
+        }
+    }
+
+    // Pass 1b (continued): resolve protocol member types
+    for proto in &program.protocols {
+        let mut methods = Vec::new();
+        let mut properties = Vec::new();
+        for member in &proto.members {
+            match member {
+                ProtocolMember::MethodSig {
+                    name,
+                    params,
+                    return_type,
+                } => {
+                    let resolved_params: Vec<(String, Type)> = params
+                        .iter()
+                        .map(|p| Ok((p.name.clone(), resolve_type_checked(&p.ty, resolver)?)))
+                        .collect::<Result<Vec<_>>>()?;
+                    let resolved_return = resolve_type_checked(return_type, resolver)?;
+                    methods.push(resolver::ProtocolMethodSig {
+                        name: name.clone(),
+                        params: resolved_params,
+                        return_type: resolved_return,
+                    });
+                }
+                ProtocolMember::PropertyReq {
+                    name,
+                    ty,
+                    has_setter,
+                } => {
+                    let resolved_ty = resolve_type_checked(ty, resolver)?;
+                    properties.push(resolver::ProtocolPropertyReq {
+                        name: name.clone(),
+                        ty: resolved_ty,
+                        has_setter: *has_setter,
+                    });
+                }
+            }
+        }
+        resolver.define_protocol(
+            proto.name.clone(),
+            ProtocolInfo {
+                name: proto.name.clone(),
+                methods,
+                properties,
+            },
+        );
+    }
+
+    // Pass 2: verify main function exists with correct signature (only for root module)
+    if require_main {
+        match resolver.lookup_func("main") {
+            None => return Err(sem_err("no `main` function found")),
+            Some(sig) => {
+                if !sig.params.is_empty() {
+                    return Err(sem_err("`main` function must have no parameters"));
+                }
+                if sig.return_type != Type::I32 {
+                    return Err(sem_err("`main` function must return `Int32`"));
+                }
+            }
+        }
+    }
+
+    // Pass 3: analyze struct member bodies and function bodies
+    for struct_def in &program.structs {
+        analyze_struct_members(struct_def, resolver)?;
+    }
+
+    // Pass 3b: check protocol conformance
+    for struct_def in &program.structs {
+        for proto_name in &struct_def.conformances {
+            let proto_info = resolver
+                .lookup_protocol(proto_name)
+                .ok_or_else(|| sem_err(format!("unknown protocol `{}`", proto_name)))?
+                .clone();
+            let struct_info = resolver
+                .lookup_struct(&struct_def.name)
+                .ok_or_else(|| sem_err(format!("undefined struct `{}`", struct_def.name)))?
+                .clone();
+
+            // Check methods
+            for req_method in &proto_info.methods {
+                match struct_info.method_index.get(&req_method.name) {
+                    Some(&idx) => {
+                        let impl_method = &struct_info.methods[idx];
+                        if impl_method.params.len() != req_method.params.len() {
+                            return Err(sem_err(format!(
+                                "method `{}` expects {} parameter(s) but protocol `{}` requires {}",
+                                req_method.name,
+                                impl_method.params.len(),
+                                proto_name,
+                                req_method.params.len()
+                            )));
+                        }
+                        for ((impl_name, impl_ty), (req_name, req_ty)) in
+                            impl_method.params.iter().zip(req_method.params.iter())
+                        {
+                            if impl_ty != req_ty {
+                                return Err(sem_err(format!(
+                                    "method `{}` has parameter `{}` of type `{}` but protocol `{}` requires `{}`",
+                                    req_method.name, impl_name, impl_ty, proto_name, req_ty
+                                )));
+                            }
+                            if impl_name != req_name {
+                                return Err(sem_err(format!(
+                                    "method `{}` has parameter `{}` but protocol `{}` requires `{}`",
+                                    req_method.name, impl_name, proto_name, req_name
+                                )));
+                            }
+                        }
+                        if impl_method.return_type != req_method.return_type {
+                            return Err(sem_err(format!(
+                                "method `{}` has return type `{}` but protocol `{}` requires `{}`",
+                                req_method.name,
+                                impl_method.return_type,
+                                proto_name,
+                                req_method.return_type
+                            )));
+                        }
+                    }
+                    None => {
+                        return Err(sem_err(format!(
+                            "type `{}` does not implement method `{}` required by protocol `{}`",
+                            struct_def.name, req_method.name, proto_name
+                        )));
+                    }
+                }
+            }
+
+            // Check properties
+            for req_prop in &proto_info.properties {
+                if let Some(&idx) = struct_info.field_index.get(&req_prop.name) {
+                    let (_, field_ty) = &struct_info.fields[idx];
+                    if *field_ty != req_prop.ty {
+                        return Err(sem_err(format!(
+                            "property `{}` has type `{}` but protocol `{}` requires `{}`",
+                            req_prop.name, field_ty, proto_name, req_prop.ty
+                        )));
+                    }
+                    continue;
+                }
+                if let Some(&idx) = struct_info.computed_index.get(&req_prop.name) {
+                    let computed = &struct_info.computed[idx];
+                    if computed.ty != req_prop.ty {
+                        return Err(sem_err(format!(
+                            "property `{}` has type `{}` but protocol `{}` requires `{}`",
+                            req_prop.name, computed.ty, proto_name, req_prop.ty
+                        )));
+                    }
+                    if req_prop.has_setter && !computed.has_setter {
+                        return Err(sem_err(format!(
+                            "property `{}` requires a setter to conform to protocol `{}`",
+                            req_prop.name, proto_name
+                        )));
+                    }
+                    continue;
+                }
+                return Err(sem_err(format!(
+                    "type `{}` does not implement property `{}` required by protocol `{}`",
+                    struct_def.name, req_prop.name, proto_name
+                )));
+            }
+        }
+    }
+
+    for func in &program.functions {
+        analyze_function(func, resolver)?;
+    }
+
+    Ok(SemanticInfo {
+        struct_defs: resolver.take_struct_defs(),
+        struct_init_calls: resolver.take_struct_init_calls(),
+    })
 }
 
 pub fn analyze(program: &Program) -> Result<SemanticInfo> {
@@ -1790,5 +2375,212 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, BengalError::SemanticError { .. }));
+    }
+}
+
+#[cfg(test)]
+mod module_tests {
+    use super::*;
+    use crate::package::build_module_graph;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn analyze_test_package(files: &[(&str, &str)]) -> Result<PackageSemanticInfo> {
+        let dir = TempDir::new().unwrap();
+        for (path, source) in files {
+            let full_path = dir.path().join(path);
+            if let Some(parent) = full_path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(&full_path, source).unwrap();
+        }
+        let entry = dir.path().join(files[0].0);
+        let graph = build_module_graph(&entry)?;
+        analyze_package(&graph, "test_pkg")
+    }
+
+    #[test]
+    fn cross_module_function_import() {
+        let result = analyze_test_package(&[
+            (
+                "main.bengal",
+                "module math; import math::add; func main() -> Int32 { return add(1, 2); }",
+            ),
+            (
+                "math.bengal",
+                "public func add(a: Int32, b: Int32) -> Int32 { return a + b; }",
+            ),
+        ]);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+    }
+
+    #[test]
+    fn visibility_violation_internal() {
+        let result = analyze_test_package(&[
+            (
+                "main.bengal",
+                "module math; import math::helper; func main() -> Int32 { return helper(); }",
+            ),
+            ("math.bengal", "func helper() -> Int32 { return 1; }"),
+        ]);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("cannot"),
+            "expected 'cannot' in error: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn glob_import() {
+        let result = analyze_test_package(&[
+            (
+                "main.bengal",
+                "module math; import math::*; func main() -> Int32 { return add(1, 2); }",
+            ),
+            (
+                "math.bengal",
+                "public func add(a: Int32, b: Int32) -> Int32 { return a + b; }",
+            ),
+        ]);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+    }
+
+    #[test]
+    fn cross_module_struct_import() {
+        let result = analyze_test_package(&[
+            (
+                "main.bengal",
+                "module shapes; import shapes::Point; func main() -> Int32 { let p = Point(x: 3, y: 4); return p.x; }",
+            ),
+            (
+                "shapes.bengal",
+                "public struct Point { public var x: Int32; public var y: Int32; }",
+            ),
+        ]);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+    }
+
+    #[test]
+    fn glob_import_skips_internal() {
+        // Internal symbols should NOT be imported by glob
+        let result = analyze_test_package(&[
+            (
+                "main.bengal",
+                "module math; import math::*; func main() -> Int32 { return secret(); }",
+            ),
+            (
+                "math.bengal",
+                "func secret() -> Int32 { return 42; } public func add(a: Int32, b: Int32) -> Int32 { return a + b; }",
+            ),
+        ]);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("undefined function") || msg.contains("secret"),
+            "expected undefined function error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn group_import() {
+        let result = analyze_test_package(&[
+            (
+                "main.bengal",
+                "module math; import math::{add, sub}; func main() -> Int32 { return add(1, sub(3, 1)); }",
+            ),
+            (
+                "math.bengal",
+                "public func add(a: Int32, b: Int32) -> Int32 { return a + b; } public func sub(a: Int32, b: Int32) -> Int32 { return a - b; }",
+            ),
+        ]);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+    }
+
+    #[test]
+    fn unresolved_import_symbol() {
+        let result = analyze_test_package(&[
+            (
+                "main.bengal",
+                "module math; import math::nonexistent; func main() -> Int32 { return 0; }",
+            ),
+            (
+                "math.bengal",
+                "public func add(a: Int32, b: Int32) -> Int32 { return a + b; }",
+            ),
+        ]);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("nonexistent"),
+            "expected error about 'nonexistent', got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn package_visibility_accessible() {
+        let result = analyze_test_package(&[
+            (
+                "main.bengal",
+                "module math; import math::helper; func main() -> Int32 { return helper(); }",
+            ),
+            (
+                "math.bengal",
+                "package func helper() -> Int32 { return 42; }",
+            ),
+        ]);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+    }
+
+    #[test]
+    fn non_root_module_no_main_required() {
+        // Child modules should not require a main function
+        let result = analyze_test_package(&[
+            (
+                "main.bengal",
+                "module math; import math::add; func main() -> Int32 { return add(1, 2); }",
+            ),
+            (
+                "math.bengal",
+                "public func add(a: Int32, b: Int32) -> Int32 { return a + b; }",
+            ),
+        ]);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+        // Verify the graph has 2 modules
+        let info = result.unwrap();
+        assert_eq!(info.module_infos.len(), 2);
+    }
+
+    #[test]
+    fn super_at_root_is_error() {
+        let result = analyze_test_package(&[(
+            "main.bengal",
+            "import super::foo; func main() -> Int32 { return 0; }",
+        )]);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("super"),
+            "expected error about 'super', got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn unresolved_module_in_import() {
+        let result = analyze_test_package(&[(
+            "main.bengal",
+            "import nonexistent::foo; func main() -> Int32 { return 0; }",
+        )]);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("not found") || msg.contains("nonexistent"),
+            "expected error about unresolved module, got: {}",
+            msg
+        );
     }
 }

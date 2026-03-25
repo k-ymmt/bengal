@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use super::types::Type;
 use crate::error::{BengalError, Result, Span};
-use crate::parser::ast::{Block, NodeId};
+use crate::package::ModulePath;
+use crate::parser::ast::{Block, NodeId, Visibility};
 
 #[derive(Debug, Clone)]
 pub struct VarInfo {
@@ -87,6 +88,10 @@ pub struct Resolver {
     protocol_defs: HashMap<String, ProtocolInfo>,
     pub self_context: Option<SelfContext>,
     pub struct_init_calls: HashSet<NodeId>,
+    // Import maps: symbols brought in from other modules
+    imported_funcs: HashMap<String, FuncSig>,
+    imported_structs: HashMap<String, StructInfo>,
+    imported_protocols: HashMap<String, ProtocolInfo>,
 }
 
 impl Resolver {
@@ -122,7 +127,9 @@ impl Resolver {
     }
 
     pub fn lookup_func(&self, name: &str) -> Option<&FuncSig> {
-        self.functions.get(name)
+        self.functions
+            .get(name)
+            .or_else(|| self.imported_funcs.get(name))
     }
 
     pub fn define_struct(&mut self, name: String, info: StructInfo) {
@@ -130,7 +137,9 @@ impl Resolver {
     }
 
     pub fn lookup_struct(&self, name: &str) -> Option<&StructInfo> {
-        self.struct_defs.get(name)
+        self.struct_defs
+            .get(name)
+            .or_else(|| self.imported_structs.get(name))
     }
 
     pub fn define_protocol(&mut self, name: String, info: ProtocolInfo) {
@@ -138,7 +147,9 @@ impl Resolver {
     }
 
     pub fn lookup_protocol(&self, name: &str) -> Option<&ProtocolInfo> {
-        self.protocol_defs.get(name)
+        self.protocol_defs
+            .get(name)
+            .or_else(|| self.imported_protocols.get(name))
     }
 
     pub fn reserve_struct(&mut self, name: String) {
@@ -201,5 +212,35 @@ impl Resolver {
                 Ok(())
             }
         }
+    }
+
+    // Import methods for cross-module analysis
+
+    pub fn import_func(&mut self, name: String, sig: FuncSig) {
+        self.imported_funcs.insert(name, sig);
+    }
+
+    pub fn import_struct(&mut self, name: String, info: StructInfo) {
+        self.imported_structs.insert(name, info);
+    }
+
+    pub fn import_protocol(&mut self, name: String, info: ProtocolInfo) {
+        self.imported_protocols.insert(name, info);
+    }
+}
+
+/// Check whether a symbol with the given visibility in `symbol_module` is
+/// accessible from `accessor_module`.
+pub fn is_accessible(
+    symbol_visibility: Visibility,
+    _symbol_module: &ModulePath,
+    _accessor_module: &ModulePath,
+) -> bool {
+    match symbol_visibility {
+        Visibility::Public => true,
+        Visibility::Package => true, // same package — always true within a package
+        Visibility::Internal => false, // cross-module access disallowed
+        Visibility::Fileprivate => false,
+        Visibility::Private => false,
     }
 }
