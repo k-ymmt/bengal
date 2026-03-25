@@ -4,7 +4,6 @@ use common::compile_and_run;
 use common::compile_should_fail;
 
 #[test]
-#[ignore] // requires monomorphization (Task 6)
 fn generic_identity_i32() {
     assert_eq!(
         compile_and_run(
@@ -66,5 +65,82 @@ fn generic_type_arg_count_mismatch() {
         err.contains("expected") && err.contains("type argument"),
         "expected type arg count mismatch error, got: {}",
         err
+    );
+}
+
+#[test]
+fn generic_struct_basic() {
+    assert_eq!(
+        compile_and_run(
+            "struct Box<T> { var value: T; }
+         func main() -> Int32 {
+             let b = Box<Int32>(value: 42);
+             return b.value;
+         }",
+        ),
+        42,
+    );
+}
+
+#[test]
+fn generic_struct_with_method() {
+    assert_eq!(
+        compile_and_run(
+            "struct Wrapper<T> { var value: T;
+             func get() -> T { return self.value; }
+         }
+         func main() -> Int32 {
+             let w = Wrapper<Int32>(value: 7);
+             return w.get();
+         }",
+        ),
+        7,
+    );
+}
+
+#[test]
+fn generic_struct_multiple_type_params() {
+    assert_eq!(
+        compile_and_run(
+            "struct Pair<A, B> { var first: A; var second: B; }
+         func main() -> Int32 {
+             let p = Pair<Int32, Bool>(first: 10, second: true);
+             return p.first;
+         }",
+        ),
+        10,
+    );
+}
+
+#[test]
+fn generic_struct_with_constraint() {
+    assert_eq!(
+        compile_and_run(
+            "protocol Summable { func sum() -> Int32; }
+         struct Point: Summable { var x: Int32; var y: Int32; func sum() -> Int32 { return self.x + self.y; } }
+         struct Wrapper<T: Summable> { var value: T;
+             func getSum() -> Int32 { return self.value.sum(); }
+         }
+         func main() -> Int32 {
+             let w = Wrapper<Point>(value: Point(x: 3, y: 4));
+             return w.getSum();
+         }",
+        ),
+        7,
+    );
+}
+
+#[test]
+fn generic_same_func_multiple_types() {
+    assert_eq!(
+        compile_and_run(
+            "func identity<T>(value: T) -> T { return value; }
+         func main() -> Int32 {
+             let a = identity<Int32>(42);
+             let b = identity<Bool>(true);
+             return a;
+         }",
+        ),
+        42,
     );
 }

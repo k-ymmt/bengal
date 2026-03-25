@@ -3,6 +3,7 @@ pub mod codegen;
 pub mod error;
 pub mod lexer;
 pub mod mangle;
+pub mod monomorphize;
 pub mod package;
 pub mod parser;
 pub mod semantic;
@@ -18,6 +19,8 @@ static BUILD_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub fn compile_source(source: &str) -> Result<Vec<u8>> {
     let tokens = lexer::tokenize(source)?;
     let program = parser::parse(tokens)?;
+    semantic::validate_generics(&program)?;
+    let program = monomorphize::monomorphize(&program);
     let sem_info = semantic::analyze(&program)?;
     let mut bir = bir::lower_program(&program, &sem_info)?;
     bir::optimize_module(&mut bir);
@@ -28,6 +31,8 @@ pub fn compile_source(source: &str) -> Result<Vec<u8>> {
 pub fn compile_to_bir(source: &str) -> Result<(bir::instruction::BirModule, String)> {
     let tokens = lexer::tokenize(source)?;
     let program = parser::parse(tokens)?;
+    semantic::validate_generics(&program)?;
+    let program = monomorphize::monomorphize(&program);
     let sem_info = semantic::analyze(&program)?;
     let bir_module = bir::lower_program(&program, &sem_info)?;
     let bir_text = bir::print_module(&bir_module);
@@ -70,7 +75,15 @@ pub fn compile_package_to_executable(entry_path: &Path, output_path: &Path) -> R
     };
 
     // 2. Build module graph
-    let graph = package::build_module_graph(entry_path)?;
+    let mut graph = package::build_module_graph(entry_path)?;
+
+    // 2.5. Validate generics and monomorphize each module's AST
+    for mod_info in graph.modules.values() {
+        semantic::validate_generics(&mod_info.ast)?;
+    }
+    for mod_info in graph.modules.values_mut() {
+        mod_info.ast = monomorphize::monomorphize(&mod_info.ast);
+    }
 
     // 3. Run cross-module semantic analysis
     let pkg_sem_info = semantic::analyze_package(&graph, &package_name)?;

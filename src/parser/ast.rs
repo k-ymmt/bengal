@@ -128,7 +128,7 @@ pub struct TypeParam {
     pub bound: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeAnnotation {
     I32,
     I64,

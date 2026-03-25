@@ -13,6 +13,8 @@ pub static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub fn compile_and_run(source: &str) -> i32 {
     let tokens = tokenize(source).unwrap();
     let program = parse(tokens).unwrap();
+    semantic::validate_generics(&program).unwrap();
+    let program = bengal::monomorphize::monomorphize(&program);
     let sem_info = semantic::analyze(&program).unwrap();
     let mut bir_module = bir::lower_program(&program, &sem_info).unwrap();
     bir::optimize_module(&mut bir_module);
@@ -75,6 +77,7 @@ pub fn compile_should_fail(source: &str) -> String {
     if let Err(e) = semantic::validate_generics(&program) {
         return e.to_string();
     }
+    let program = bengal::monomorphize::monomorphize(&program);
     match semantic::analyze(&program) {
         Err(e) => e.to_string(),
         Ok(_) => panic!("expected semantic error but analysis succeeded"),
