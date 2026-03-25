@@ -1021,6 +1021,10 @@ impl Lowering {
                 }
                 self.lookup_var(self_name)
             }
+            ExprKind::MethodCall { .. } => {
+                // MethodCall lowering will be added in a later task
+                self.record_error("method calls are not yet supported in BIR lowering")
+            }
         }
     }
 

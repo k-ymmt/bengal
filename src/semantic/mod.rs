@@ -157,6 +157,9 @@ fn resolve_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
                 }
                 explicit_init = Some(member);
             }
+            StructMember::Method { .. } => {
+                // Methods will be resolved in a later task
+            }
         }
     }
 
@@ -770,6 +773,10 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             }
             Ok(target_ty)
         }
+        ExprKind::MethodCall { .. } => {
+            // MethodCall analysis will be added in a later task
+            Err(sem_err("method calls are not yet supported"))
+        }
     }
 }
 
@@ -858,6 +865,9 @@ fn analyze_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
                 }
             }
             StructMember::StoredProperty { .. } => {}
+            StructMember::Method { .. } => {
+                // Method body analysis will be added in a later task
+            }
         }
     }
     Ok(())

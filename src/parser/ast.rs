@@ -4,13 +4,35 @@ pub struct NodeId(pub u32);
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub structs: Vec<StructDef>,
+    pub protocols: Vec<ProtocolDef>,
     pub functions: Vec<Function>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructDef {
     pub name: String,
+    pub conformances: Vec<String>,
     pub members: Vec<StructMember>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProtocolDef {
+    pub name: String,
+    pub members: Vec<ProtocolMember>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProtocolMember {
+    MethodSig {
+        name: String,
+        params: Vec<Param>,
+        return_type: TypeAnnotation,
+    },
+    PropertyReq {
+        name: String,
+        ty: TypeAnnotation,
+        has_setter: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,6 +49,12 @@ pub enum StructMember {
     },
     Initializer {
         params: Vec<Param>,
+        body: Block,
+    },
+    Method {
+        name: String,
+        params: Vec<Param>,
+        return_type: TypeAnnotation,
         body: Block,
     },
 }
@@ -154,6 +182,11 @@ pub enum ExprKind {
         field: String,
     },
     SelfRef,
+    MethodCall {
+        object: Box<Expr>,
+        method: String,
+        args: Vec<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -60,7 +60,11 @@ impl Parser {
                 functions.push(self.parse_function()?);
             }
         }
-        Ok(Program { structs, functions })
+        Ok(Program {
+            structs,
+            protocols: vec![],
+            functions,
+        })
     }
 
     fn parse_function(&mut self) -> Result<Function> {
@@ -95,7 +99,11 @@ impl Parser {
             members.push(self.parse_struct_member()?);
         }
         self.expect(Token::RBrace)?;
-        Ok(StructDef { name, members })
+        Ok(StructDef {
+            name,
+            conformances: vec![],
+            members,
+        })
     }
 
     fn parse_struct_member(&mut self) -> Result<StructMember> {
@@ -653,6 +661,7 @@ pub fn parse(tokens: Vec<SpannedToken>) -> Result<Program> {
         }
         Ok(Program {
             structs: vec![],
+            protocols: vec![],
             functions: vec![Function {
                 name: "main".to_string(),
                 params: vec![],
@@ -736,6 +745,15 @@ mod tests {
                 field: field.clone(),
             },
             ExprKind::SelfRef => ExprKind::SelfRef,
+            ExprKind::MethodCall {
+                object,
+                method,
+                args,
+            } => ExprKind::MethodCall {
+                object: Box::new(normalize_expr(object)),
+                method: method.clone(),
+                args: args.iter().map(normalize_expr).collect(),
+            },
         };
         Expr {
             id: NodeId(0),
