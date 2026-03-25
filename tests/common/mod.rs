@@ -72,6 +72,9 @@ pub fn compile_to_native_and_run(source: &str) -> i32 {
 pub fn compile_should_fail(source: &str) -> String {
     let tokens = tokenize(source).unwrap();
     let program = parse(tokens).unwrap();
+    if let Err(e) = semantic::validate_generics(&program) {
+        return e.to_string();
+    }
     match semantic::analyze(&program) {
         Err(e) => e.to_string(),
         Ok(_) => panic!("expected semantic error but analysis succeeded"),
