@@ -31,14 +31,25 @@ tests/
 
 ## Shared Helpers (`tests/common/mod.rs`)
 
+Each test file imports helpers via `mod common;` at the top.
+
 ```rust
-compile_and_run(source: &str) -> i32           // JIT execution via inkwell
-compile_to_native_and_run(source: &str) -> i32 // Compile -> link -> execute
-compile_should_fail(source: &str) -> String    // Returns semantic error string
-compile_and_run_package(files: &[(&str, &str)]) -> i32    // Multi-file package execution
+// --- Single-file helpers ---
+compile_and_run(source: &str) -> i32              // JIT execution via inkwell
+compile_to_native_and_run(source: &str) -> i32    // Compile -> link -> execute
+compile_should_fail(source: &str) -> String       // Semantic-level error (tokenize -> parse -> analyze)
+compile_source_should_fail(source: &str) -> String // Full-pipeline error (bengal::compile_source)
+TEST_COUNTER: AtomicU64                           // Unique ID for native test temp dirs
+
+// --- Multi-file (package) helpers --- (depends on `tempfile` dev-dependency)
+compile_and_run_package(files: &[(&str, &str)]) -> i32       // Package compile -> link -> run
 compile_package_should_fail(files: &[(&str, &str)]) -> String // Package compile error
-TEST_COUNTER: AtomicU64                        // Unique ID for native test temp dirs
 ```
+
+Notes:
+- `compile_should_fail` operates at the semantic analysis level only (tokenize -> parse -> `semantic::analyze`). Use for tests that specifically target semantic errors.
+- `compile_source_should_fail` uses `bengal::compile_source` which covers all phases (parse, semantic, BIR, codegen). Use when the error phase is unimportant or when testing non-semantic errors.
+- Existing error tests using `bengal::compile_source(...).is_err()` are migrated to use `compile_source_should_fail` for consistency.
 
 ## Migration Mapping
 
@@ -66,9 +77,7 @@ TEST_COUNTER: AtomicU64                        // Unique ID for native test temp
 **Moved from compile_test.rs:**
 - `fn_simple` (renamed: `simple`), `fn_call` -> `call`, `fn_call_chain` -> `call_chain`
 - `fn_multiple_funcs` -> `multiple_functions`
-- `fn_block_expr` -> `block_expression`, `fn_block_shadow` -> `block_shadow`
-- `fn_block_var_assign` -> `block_var_assign`
-- `unit_func` -> `unit_return`, `fibonacci`
+- `unit_func` -> `unit_return`, `fibonacci` (originally a regression test, retained here)
 - `err_no_main`, `err_main_with_params`, `err_no_return`
 - `err_no_yield`, `err_yield_in_func`, `err_return_in_block`
 
@@ -86,6 +95,8 @@ TEST_COUNTER: AtomicU64                        // Unique ID for native test temp
 - `fn_with_let` -> `let_binding`, `fn_with_var` -> `var_binding`
 - `fn_let_arithmetic` -> `let_arithmetic`
 - `fn_shadowing` -> `shadowing`, `fn_var_update` -> `var_update`
+- `fn_block_expr` -> `block_expression`, `fn_block_shadow` -> `block_shadow`
+- `fn_block_var_assign` -> `block_var_assign`
 - `infer_i32`, `infer_i32_expr`, `infer_bool`, `infer_var`
 - `err_undefined_var`, `err_immutable_assign`
 
@@ -126,9 +137,9 @@ TEST_COUNTER: AtomicU64                        // Unique ID for native test temp
 
 ### structs.rs
 
-**Moved from compile_test.rs (converted to JIT):**
-- `native_struct_basic` -> `basic` (rewritten to use `compile_and_run`)
-- `native_struct_function_arg_return` -> `function_arg_return`
+**New JIT versions of existing native-only tests:**
+- `basic` — Struct creation and field access (JIT version of `native_struct_basic`)
+- `function_arg_return` — Struct as function arg/return (JIT version of `native_struct_function_arg_return`)
 
 **New tests:**
 - `nested_struct` — Struct containing another struct as a field
@@ -181,7 +192,7 @@ TEST_COUNTER: AtomicU64                        // Unique ID for native test temp
 - `multi_file_visibility_internal_denied`
 - `multi_file_struct_across_modules`
 - `multi_file_glob_import`
-- `single_file_backward_compat`
+- `single_file_backward_compat` (note: uses `compile_and_run`, not the package helpers)
 - `multi_file_package_visibility`
 - `multi_file_method_call_across_modules`
 - `multi_file_three_modules`
@@ -198,15 +209,27 @@ TEST_COUNTER: AtomicU64                        // Unique ID for native test temp
 
 ### native_emit.rs
 
-**Retained as smoke tests (representative subset):**
-- `native_arithmetic` — Basic expression
-- `native_function_call` — Function call
+**Retained from compile_test.rs (smoke tests):**
+- `native_bare_expression` — Bare expression without explicit main
+- `native_arithmetic` — Basic expression `2 + 3 * 4`
+- `native_function_call` — Function call across functions
 - `native_control_flow` — While loop
-- `native_struct` — Struct creation and field access
-- `native_method_call` — Method invocation
-- `native_type_cast` — Cast between numeric types
+- `native_i64_cast` (renamed: `native_type_cast`) — Cast between numeric types
 
-All other native tests are removed as their scenarios are covered by JIT tests in the respective feature files.
+**New tests (filling native coverage gaps):**
+- `native_struct_basic` — Struct creation and field access (kept as native alongside JIT version in structs.rs)
+- `native_method_call` — Method invocation on struct
+
+**Removed (covered by JIT tests in feature files):**
+- `native_simple_return` — covered by `functions::simple`
+- `native_if_else` — covered by `control_flow::if_else_true`
+- `native_break_continue` — covered by `control_flow::while_continue`
+- `native_unit_call` — covered by `functions::unit_return`
+- `native_i64_arithmetic` — covered by `expressions::i64_arithmetic`
+- `native_float` — covered by `expressions::f64_arithmetic`
+- `native_break_with_value` — covered by `control_flow::break_with_value`
+- `native_diverging_if` — covered by `control_flow::diverging_then`
+- `native_struct_function_arg_return` — covered by `structs::function_arg_return`
 
 ## Design Principles
 
