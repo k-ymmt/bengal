@@ -1097,3 +1097,149 @@ fn method_unit_return() {
     );
     assert_eq!(result, 42);
 }
+
+// --- Protocol conformance tests ---
+
+#[test]
+fn protocol_basic_conformance() {
+    let result = compile_and_run(
+        r#"
+        protocol Summable {
+            func sum() -> Int32;
+        }
+        struct Point: Summable {
+            var x: Int32;
+            var y: Int32;
+            func sum() -> Int32 {
+                return self.x + self.y;
+            }
+        }
+        func main() -> Int32 {
+            let p = Point(x: 3, y: 4);
+            return p.sum();
+        }
+    "#,
+    );
+    assert_eq!(result, 7);
+}
+
+#[test]
+fn protocol_multiple_methods() {
+    let result = compile_and_run(
+        r#"
+        protocol Describable {
+            func first() -> Int32;
+            func second() -> Int32;
+        }
+        struct Pair: Describable {
+            var a: Int32;
+            var b: Int32;
+            func first() -> Int32 {
+                return self.a;
+            }
+            func second() -> Int32 {
+                return self.b;
+            }
+        }
+        func main() -> Int32 {
+            let p = Pair(a: 10, b: 20);
+            return p.first() + p.second();
+        }
+    "#,
+    );
+    assert_eq!(result, 30);
+}
+
+#[test]
+fn protocol_property_get() {
+    let result = compile_and_run(
+        r#"
+        protocol HasTotal {
+            var total: Int32 { get };
+        }
+        struct Numbers: HasTotal {
+            var a: Int32;
+            var b: Int32;
+            var total: Int32 {
+                get { return self.a + self.b; }
+            };
+        }
+        func main() -> Int32 {
+            let n = Numbers(a: 5, b: 7);
+            return n.total;
+        }
+    "#,
+    );
+    assert_eq!(result, 12);
+}
+
+#[test]
+fn protocol_stored_property_satisfies_get() {
+    let result = compile_and_run(
+        r#"
+        protocol HasValue {
+            var value: Int32 { get };
+        }
+        struct Box: HasValue {
+            var value: Int32;
+        }
+        func main() -> Int32 {
+            let b = Box(value: 42);
+            return b.value;
+        }
+    "#,
+    );
+    assert_eq!(result, 42);
+}
+
+#[test]
+fn protocol_multiple_conformance() {
+    let result = compile_and_run(
+        r#"
+        protocol Addable {
+            func sum() -> Int32;
+        }
+        protocol Scalable {
+            func scale(factor: Int32) -> Int32;
+        }
+        struct Value: Addable, Scalable {
+            var n: Int32;
+            func sum() -> Int32 {
+                return self.n;
+            }
+            func scale(factor: Int32) -> Int32 {
+                return self.n * factor;
+            }
+        }
+        func main() -> Int32 {
+            let v = Value(n: 5);
+            return v.sum() + v.scale(3);
+        }
+    "#,
+    );
+    assert_eq!(result, 20);
+}
+
+#[test]
+fn protocol_property_get_set() {
+    let result = compile_and_run(
+        r#"
+        protocol Resettable {
+            var current: Int32 { get set };
+        }
+        struct Counter: Resettable {
+            var value: Int32;
+            var current: Int32 {
+                get { return self.value; }
+                set { self.value = newValue; }
+            };
+        }
+        func main() -> Int32 {
+            var c = Counter(value: 10);
+            c.current = 99;
+            return c.current;
+        }
+    "#,
+    );
+    assert_eq!(result, 99);
+}
