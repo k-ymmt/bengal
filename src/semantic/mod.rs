@@ -62,6 +62,22 @@ pub fn analyze(program: &Program) -> Result<SemanticInfo> {
         resolve_struct_members(struct_def, &mut resolver)?;
     }
 
+    // Check for name collisions between mangled method names and top-level functions
+    for struct_def in &program.structs {
+        if let Some(struct_info) = resolver.lookup_struct(&struct_def.name) {
+            let struct_info = struct_info.clone();
+            for method in &struct_info.methods {
+                let mangled = format!("{}_{}", struct_def.name, method.name);
+                if resolver.lookup_func(&mangled).is_some() {
+                    return Err(sem_err(format!(
+                        "function `{}` conflicts with method `{}.{}`",
+                        mangled, struct_def.name, method.name
+                    )));
+                }
+            }
+        }
+    }
+
     // Pass 2: verify main function exists with correct signature
     match resolver.lookup_func("main") {
         None => return Err(sem_err("no `main` function found")),
