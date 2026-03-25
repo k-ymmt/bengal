@@ -183,7 +183,7 @@ let x = 42;
 ```
 var x: Int64 = 0;
 x = 42;              // check 42 against x's type (I64)
-obj.field = 42;      // check 42 against field's type
+obj.field = 42;      // check 42 against field's type (see FieldAssign resolution below)
 arr[0] = 42;         // check 42 against array element type
 ```
 
@@ -391,9 +391,11 @@ Type::TypeParam { bound: None, .. } => {
 }
 ```
 
-#### Field Access and Index Access on Generic Types
+#### Field Access, Field Assignment, and Computed Properties on Generic Types
 
-Similar to method calls, field access and index access need to handle `Type::Generic`:
+Field access, field assignment, and computed property access/assignment all need to handle
+`Type::Generic` receivers in the pre-mono pass. The pattern is the same for all: look up the
+base struct, build a substitution map, and resolve the field/property type through it.
 
 **Field access on Generic receiver:**
 ```
@@ -403,6 +405,40 @@ let v = w.value;  // receiver type is Generic { "Wrapper", [...] }
 1. Look up base struct from `Generic { name, .. }`
 2. Build substitution map from type params to type args
 3. Look up field type and substitute
+
+**Field assignment on Generic receiver:**
+```
+var w = Wrapper(value: 42);
+w.value = 100;  // receiver type is Generic { "Wrapper", [...] }
+```
+1. Look up base struct from `Generic { name, .. }`
+2. Build substitution map from type params to type args
+3. Look up field type (or computed property type with setter check) and substitute
+4. Check assigned value against the substituted field type using unification
+
+The current `FieldAssign` handler only accepts `Type::Struct`. Add a `Type::Generic` branch:
+
+```rust
+// In check_stmt for Stmt::FieldAssign:
+Type::Generic { name, args } => {
+    let struct_info = resolver.lookup_struct(&name)?.clone();
+    let subst = build_substitution(&struct_info.type_params, &args);
+    let field_ty = if let Some(&idx) = struct_info.field_index.get(field) {
+        substitute_type(&struct_info.fields[idx].1, &subst)
+    } else if let Some(&idx) = struct_info.computed_index.get(field) {
+        let prop = &struct_info.computed[idx];
+        if !prop.has_setter {
+            return Err("computed property is read-only");
+        }
+        substitute_type(&prop.ty, &subst)
+    } else {
+        return Err("no such field");
+    };
+    // Unify (not direct equality) the value type against the field type
+    let val_ty = check_expr(value, Expectation::ExpectType(field_ty.clone()), ctx, resolver)?;
+    ctx.unify(val_ty, field_ty)?;
+}
+```
 
 **Index access on Generic/InferVar array:**
 Works as before — the array type `Array { element, size }` is resolved through unification,
@@ -431,13 +467,23 @@ pub fn enter_loop(&mut self, ctx: &mut InferenceContext) -> InferVarId {
 }
 ```
 
-**Processing break:**
+**Processing break with value:**
 ```rust
-// In check_stmt for Stmt::Break(Some(expr)):
+// Stmt::Break(Some(expr)):
 let break_ty = check_expr(expr, Expectation::None, ctx, resolver)?;
 let loop_var = resolver.current_loop_var();
 ctx.unify(break_ty, Type::InferVar(loop_var))?;
 ```
+
+**Processing break without value:**
+```rust
+// Stmt::Break(None):
+let loop_var = resolver.current_loop_var();
+ctx.unify(Type::Unit, Type::InferVar(loop_var))?;
+```
+
+`break;` (no value) unifies the loop result variable with `Unit`, consistent with the
+current behavior where `Break(None)` produces `Type::Unit`.
 
 **Processing nobreak yield:**
 ```rust
@@ -446,6 +492,24 @@ let nobreak_ty = check_block(nobreak_block, Expectation::None, ctx, resolver)?;
 let loop_var = resolver.current_loop_var();
 ctx.unify(nobreak_ty, Type::InferVar(loop_var))?;
 ```
+
+**After loop body analysis — Unit fallback for loops without break:**
+```rust
+// After analyzing loop body and nobreak:
+let loop_var = resolver.exit_loop();
+let resolved = ctx.resolve(loop_var);
+if matches!(resolved, Type::InferVar(_)) {
+    // No break statement was encountered — loop result is Unit
+    ctx.unify(Type::InferVar(loop_var), Type::Unit)?;
+}
+```
+
+This handles all Unit-typed loop cases:
+- `while true { break; }` → `break;` unifies loop var with `Unit` → result is `Unit`
+- `while cond { }` → no break, loop var unconstrained → fallback to `Unit`
+- `while cond { /* no break */ } nobreak { yield 0; }` → loop var unified with `Unit`
+  from nobreak, but this only happens if nobreak yields Unit; otherwise the nobreak
+  type determines the loop type
 
 **With expected type from context:**
 ```rust
@@ -459,7 +523,8 @@ if let Expectation::ExpectType(expected) = expected {
 analyze_loop_body(...);
 ```
 
-This allows:
+Examples:
+
 ```
 let x: Int64 = while cond { break 42; } nobreak { yield 0; };
 ```
@@ -467,7 +532,6 @@ let x: Int64 = while cond { break 42; } nobreak { yield 0; };
 2. `break 42`: `IntegerLiteral(v1)` unified with `v0` → `v1 = I64`
 3. `nobreak yield 0`: `IntegerLiteral(v2)` unified with `v0` → `v2 = I64`
 
-And:
 ```
 let x = while cond { break 42; } nobreak { yield 0; };
 ```
@@ -475,6 +539,20 @@ let x = while cond { break 42; } nobreak { yield 0; };
 2. `break 42`: `unify(IntegerLiteral(v1), InferVar(v0))` → `v0 = IntegerLiteral(v1)`
 3. `nobreak yield 0`: `unify(IntegerLiteral(v2), IntegerLiteral(v1))` → linked
 4. Fallback → `I32`
+
+```
+while true { break; }
+```
+1. `loop_var = InferVar(v0)`, no expected type
+2. `break;`: `unify(Unit, InferVar(v0))` → `v0 = Unit`
+3. Result: `Unit`
+
+```
+while cond { }
+```
+1. `loop_var = InferVar(v0)`, no expected type
+2. No break encountered → after body analysis, `v0` still unconstrained → unify with `Unit`
+3. Result: `Unit`
 
 #### Nested Generics
 
@@ -527,11 +605,21 @@ func call_sum<T: Summable>(item: T) -> Int32 {
 - Partial type argument specification (not 0, not all) → still an error
 - Type arguments on non-generic functions/structs → still an error
 
-#### Protocol Constraint Validation for Inferred Type Args
+#### Protocol Constraint Validation — Three Stages
 
-The current `validate_generics` checks protocol constraints when explicit type arguments are
-present. For inferred type arguments, constraint validation moves to after `apply_defaults`
-in the analysis pass:
+Protocol constraint validation occurs at three distinct points in the pipeline:
+
+**Stage 1: validate_generics (pre-inference) — explicit type args only**
+
+The existing `validate_generics` continues to check constraints for call sites where type
+arguments are explicitly written in the AST. Call sites with omitted type args are skipped
+(they will be handled by stages 2 and 3).
+
+**Stage 2: validate_inferred_constraints (post-inference, pre-mono) — concrete inferred args**
+
+After `apply_defaults`, check constraints for inferred type args that resolved to concrete
+types. Skip any type arg that resolved to `TypeParam` — these cannot be validated until
+concrete types are substituted in.
 
 ```rust
 fn validate_inferred_constraints(
@@ -540,30 +628,57 @@ fn validate_inferred_constraints(
 ) -> Result<()> {
     for (node_id, type_args) in &inferred.map {
         // Look up the type params with bounds for this call site
-        // Check each inferred type arg satisfies its protocol bound
-        // SKIP TypeParam args — their constraints are checked post-mono
-        // when concrete types are substituted in
+        for (type_param, type_arg) in params.iter().zip(type_args.iter()) {
+            if is_type_param_annotation(type_arg) {
+                continue;  // defer to Stage 3
+            }
+            // Check type_arg satisfies type_param.bound
+        }
     }
     Ok(())
 }
 ```
 
-**TypeParam args are skipped** in this validation. When inference within a generic body resolves
-a type argument to `TypeParam("T")`, the constraint cannot be validated until monomorphization
-substitutes a concrete type. The post-mono `analyze_post_mono` pass handles this case because
-after monomorphization, all `TypeParam`s are replaced with concrete types and the existing
-constraint checking works as-is.
+**Stage 3: monomorphize constraint check — TypeParam args made concrete**
+
+When monomorphization generates a specialization (e.g., `forward<Int32>`), it substitutes
+type parameters with concrete types in the side table entries. At this point, constraints
+that were deferred because the inferred arg was `TypeParam` can now be checked.
+
+```rust
+// In monomorphize::generate_specializations, after substituting type args:
+fn check_specialization_constraints(
+    type_params: &[TypeParam],
+    concrete_args: &[TypeAnnotation],
+    struct_map: &HashMap<String, &StructDef>,
+) -> Result<()> {
+    for (param, arg) in type_params.iter().zip(concrete_args.iter()) {
+        if let Some(bound) = &param.bound {
+            // Check that the concrete arg's struct conforms to the protocol bound
+            // Reuse the existing validate_constraints logic
+        }
+    }
+    Ok(())
+}
+```
+
+This three-stage approach ensures no constraint check is missed:
+- Explicit type args → checked in Stage 1 (existing behavior)
+- Inferred concrete args → checked in Stage 2 (new)
+- Inferred TypeParam args (made concrete by mono) → checked in Stage 3 (new)
 
 Example:
 ```
 struct Wrapper<T: Summable> { var value: T; }
 func forward<U: Summable>(v: U) -> Wrapper<U> {
-    return Wrapper(value: v);  // inferred type arg for Wrapper is TypeParam("U")
+    return Wrapper(value: v);  // inferred: Wrapper<TypeParam("U")>
 }
+forward(42);  // inferred: forward<Int32>
 ```
-- Pre-mono: inference resolves Wrapper's type arg to `TypeParam("U")` → skip constraint check
-- Monomorphize: `forward<Int32>` → body becomes `Wrapper<Int32>(value: v)` with concrete arg
-- Post-mono: `validate_generics` checks `Int32: Summable` → success (or failure if not conforming)
+- Stage 1: `forward(42)` has no explicit type args → skip
+- Stage 2: `forward` inferred `<Int32>` → check `Int32: (no bound on forward's type param... wait, U: Summable)` → check `Int32: Summable` ✓.
+  `Wrapper(value: v)` inferred `<TypeParam("U")>` → TypeParam arg → skip
+- Stage 3: Monomorphize `forward<Int32>` → substitutes `U=Int32` in body → `Wrapper(value: v)` side table entry `Named("U")` becomes `Int32` after substitution → check `Int32: Summable` ✓
 
 ### 5. Pipeline Integration
 
@@ -573,7 +688,7 @@ func forward<U: Summable>(v: U) -> Wrapper<U> {
 src/semantic/types.rs      — add InferVar/IntegerLiteral/FloatLiteral to Type enum
 src/semantic/mod.rs        — replace analyze_expr with check_expr, introduce InferenceContext
 src/semantic/resolver.rs   — change loop_break_types to loop_result_vars (InferVarId-based)
-src/monomorphize.rs        — accept InferredTypeArgs as fallback lookup
+src/monomorphize.rs        — accept InferredTypeArgs as fallback lookup; add constraint checking
 ```
 
 #### New Module
@@ -630,7 +745,7 @@ This keeps "what the user wrote" separate from "what was inferred."
 
 ```
 Current:  validate_generics → monomorphize → analyze → BIR → LLVM
-New:      validate_generics(relaxed) → analyze(with inference) → monomorphize(with side table) → analyze_post_mono → BIR → LLVM
+New:      validate_generics(relaxed) → analyze(with inference) → monomorphize(with side table + constraint check) → analyze_post_mono → BIR → LLVM
 ```
 
 Key change: `monomorphize` moves AFTER `analyze` because type inference must resolve
@@ -697,21 +812,59 @@ pub fn compile_source(source: &str) -> Result<Vec<u8>> {
 }
 ```
 
+#### Package Compilation Path (compile_package_to_executable)
+
+The current package compilation uses **unified analysis**: all modules are analyzed together
+with cross-module symbol visibility. Monomorphization currently runs per-module before
+unified analysis.
+
+The new pipeline must account for the fact that a module may call a generic defined in
+another module. The caller owns the inferred type arguments; the defining module owns the
+generic definition. Both are needed for specialization.
+
+**New package pipeline:**
+
+```rust
+// 1. Parse all modules, build module graph
+// 2. validate_generics (relaxed) for each module
+for mod_info in graph.modules.values() {
+    semantic::validate_generics(&mod_info.ast)?;
+}
+// 3. Unified inference analysis across all modules
+//    (same as current analyze_package but with inference)
+//    Produces a single InferredTypeArgs covering all modules
+let inferred = semantic::analyze_package_with_inference(&graph, &package_name)?;
+// 4. Monomorphize each module with access to:
+//    - ALL module definitions (for cross-module generic specialization)
+//    - The unified InferredTypeArgs
+for mod_info in graph.modules.values_mut() {
+    mod_info.ast = monomorphize::monomorphize_with_defs(
+        &mod_info.ast, &inferred, &all_definitions);
+}
+// 5. Unified post-mono analysis
+let pkg_sem_info = semantic::analyze_package(&graph, &package_name)?;
+// 6. Per-module BIR → LLVM → link
+```
+
+**Key difference from the single-file path:** inference and monomorphization operate on the
+full set of definitions across all modules, not per-module independently. This is consistent
+with the current "unified analysis" architecture.
+
+Cross-module generic specialization ownership: the specialization is emitted into the
+**caller's** module (the module that contains the call site with the inferred type args).
+The monomorphizer clones the generic definition from the defining module and generates the
+specialized version in the caller's module. This matches how explicit cross-module generic
+calls are handled in the current codebase.
+
+**Note:** The current module system uses unified analysis (approach A per project memory).
+A future migration to interface-based separate compilation (approach B) would require
+revisiting cross-module generic instantiation strategy, but that is out of scope for this spec.
+
 #### Other Compilation Paths
 
-The same pipeline change applies to all compilation entry points:
-
-- `compile_source` — single-file compilation (shown above)
-- `compile_to_bir` — compile to BIR for testing; same pipeline change
-- `compile_package_to_executable` — multi-module compilation; each module gets
-  `analyze` (with inference) before `monomorphize`, and `analyze_package` is updated
-  to use the new pipeline order
+- `compile_to_bir` — compile to BIR for testing; same single-file pipeline change
 - Inline tests (e.g., `test_compile_to_module_reexport`) that call `analyze` directly
   must be updated to the new pipeline order
-
-The multi-module path in `analyze_package` follows the same pattern: global symbol
-collection → per-module inference analysis → per-module monomorphization →
-per-module post-mono analysis.
 
 ### 6. Error Messages and Edge Cases
 
@@ -750,6 +903,14 @@ func bad<T>(item: T) -> Int32 { return item.sum(); }
 → method call on unconstrained type parameter 'T'
 ```
 
+**Constraint violation during monomorphization:**
+```
+struct Wrapper<T: Summable> { var value: T; }
+func forward<U>(v: U) -> Wrapper<U> { return Wrapper(value: v); }
+forward(true);  // Bool does not conform to Summable
+→ type 'Bool' does not conform to protocol 'Summable' (required by 'Wrapper')
+```
+
 #### Edge Cases
 
 **Partial type argument specification is forbidden:**
@@ -775,8 +936,8 @@ let arr = [];               // error: cannot infer type of empty array literal
 struct Wrapper<T: Summable> { var value: T; }
 let w = Wrapper(value: true);  // error: 'Bool' does not conform to 'Summable'
 ```
-After `apply_defaults`, `validate_inferred_constraints` checks that inferred type args
-satisfy their protocol bounds (skipping TypeParam args, which are validated post-mono).
+Checked in Stage 2 (validate_inferred_constraints) for concrete inferred args,
+or Stage 3 (monomorphize) for TypeParam args made concrete.
 
 ### 7. Test Strategy
 
@@ -784,7 +945,7 @@ satisfy their protocol bounds (skipping TypeParam args, which are validated post
 - Variable annotation: `let x: Int64 = 42`
 - Function argument: `takes_i64(42)`
 - Assignment: `var x: Int64 = 0; x = 42;`
-- Field assignment: `obj.field = 42;` (where field is Int64)
+- Field assignment on generic struct: `var w = Wrapper(value: 1); w.value = 2;`
 - Index assignment: `arr[0] = 42;` (where arr is [Int64; N])
 - Binary operand: `let x: Int64 = 100; let y = x + 42;`
 - Default fallback: `let a = 42;` → Int32, `let b = 3.14;` → Float64
@@ -807,6 +968,14 @@ satisfy their protocol bounds (skipping TypeParam args, which are validated post
 - Method on inferred generic struct: `let w = Wrapper(value: 42); w.get();`
 - Method with expected type: `let v: Int64 = Wrapper(value: 42).get();`
 - Method call in generic body with protocol bound: `item.sum()` where `T: Summable`
+- Field assignment on generic struct: `var w = Wrapper(value: 42); w.value = 100;`
+
+#### Loop Type Inference
+- Break with literal: `while true { break 42; }` → Int32
+- Break without value: `while true { break; }` → Unit
+- Loop without break: `while cond { }` → Unit
+- Multiple breaks unified: `while cond { if x { break 1; } break 2; }` → Int32
+- Break + nobreak with expected type: `let x: Int64 = while cond { break 42; } nobreak { yield 0; };`
 
 #### Array Literal Inference
 - Element type from annotation: `let arr: [Int64; 3] = [1, 2, 3];`
@@ -820,7 +989,8 @@ satisfy their protocol bounds (skipping TypeParam args, which are validated post
 - Unresolvable type variable: `let x = default_value();`
 - Partial type args: `make_pair<Int32>(42, true);`
 - Literal out of range: `let x: Int32 = 9999999999;`
-- Constraint violation: `Wrapper(value: true)` when `T: Summable`
+- Constraint violation (concrete): `Wrapper(value: true)` when `T: Summable`
+- Constraint violation (via mono): `forward(true)` where forward wraps into Wrapper<T: Summable>
 - Type mismatch: `let x: Bool = 42;`
 - Integer/float mismatch: `choose(42, 3.14)` where T must be one type
 - Method call on unconstrained type param: `item.foo()` where T has no bound
