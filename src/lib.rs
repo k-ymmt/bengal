@@ -2,6 +2,8 @@ pub mod bir;
 pub mod codegen;
 pub mod error;
 pub mod lexer;
+pub mod mangle;
+pub mod package;
 pub mod parser;
 pub mod semantic;
 
