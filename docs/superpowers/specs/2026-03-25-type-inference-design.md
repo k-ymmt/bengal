@@ -154,13 +154,13 @@ fn check_expr(
 | `a + b` | unify operands, return result type | unify result with expected |
 | `!a` | check `a` as `Bool`, return `Bool` | unify `Bool` with expected |
 | `foo(args)` | see generic inference section | unify return type with expected |
-| `obj.method(args)` | same as `foo(args)` using method sig | unify return type with expected |
+| `obj.method(args)` | see method call resolution section | unify return type with expected |
 | `Foo(fields)` | see generic inference section | unify struct type with expected |
 | `if`/`block` | infer from branches | propagate expected into branches |
-| `while` | infer from break/nobreak | propagate expected into break/nobreak |
+| `while` | see loop type inference section | propagate expected into break/nobreak |
 | `expr as T` | infer `expr`, return `T` | return `T` (cast target is explicit) |
-| `obj.field` | return field type from struct info | unify with expected |
-| `obj[index]` | return element type from array | unify with expected |
+| `obj.field` | see field access resolution section | unify with expected |
+| `obj[index]` | see index access resolution section | unify with expected |
 | `[a, b, c]` | infer from first element, check rest | propagate expected element type |
 
 #### Expected Type Propagation in Statements
@@ -201,12 +201,13 @@ let x: Int64 = { yield 42; };
 1. Block is checked with expected `I64`
 2. `yield 42` propagates expected `I64` into `42`
 
-**break with value (check mode from loop's expected type):**
+**break with value (check mode from loop's InferVar):**
 ```
 let x: Int64 = while cond { break 42; } nobreak { yield 0; };
 ```
 1. Loop expression is checked with expected `I64`
-2. `break 42` and `yield 0` both propagate expected `I64`
+2. Loop result InferVar `v0` is unified with expected `I64`
+3. `break 42` and `nobreak yield 0` both unify against `v0`
 
 ### 3. Numeric Literals and Binary Operations
 
@@ -317,22 +318,163 @@ let b: Box<Int64> = Box(value: 42);
 **Key:** unify result type with expected type BEFORE checking arguments, so expected type
 information flows into argument checking.
 
-#### Method Calls
+#### Method Call Resolution on Generic and TypeParam Receivers
 
-Method calls follow the same inference pattern as free function calls:
+The current method call analysis only handles `Type::Struct`. The pre-mono pass introduces
+`Type::Generic` and `Type::TypeParam` receivers that also need method resolution.
+
+**Type::Generic receiver** (affects all code with generic struct instances):
 
 ```
-let b = Box(value: 42);
-let v = b.get_value();     // return type inferred from method signature
+struct Wrapper<T> {
+    var value: T;
+    func get() -> T { return self.value; }
+}
+let w = Wrapper(value: 42);
+w.get();  // receiver type is Generic { "Wrapper", [IntegerLiteral(v0)] }
 ```
 
-1. Resolve `b`'s type to determine which struct's method to call
-2. Look up method signature (with type parameters substituted from the receiver's generic args)
-3. Check arguments against parameter types
-4. Return type unified with expected type (if any)
+Resolution:
+1. Receiver has type `Generic { name, args }`
+2. Look up base struct `name` in `struct_defs`
+3. Build substitution map from struct's `type_params` to `args`
+4. Look up method in struct info
+5. Substitute method signature (param types and return type) through the map
+6. Check arguments against substituted param types
+7. Return substituted return type
 
-For generic structs, the struct's type arguments are already resolved (from the receiver),
-so method calls do not introduce additional type parameter inference beyond numeric literals.
+```rust
+Type::Generic { name, args } => {
+    let struct_info = resolver.lookup_struct(&name)?.clone();
+    let subst: HashMap<String, Type> = struct_info.type_params.iter()
+        .zip(args.iter())
+        .map(|(tp, arg)| (tp.name.clone(), arg.clone()))
+        .collect();
+    let method_info = struct_info.lookup_method(method)?;
+    let return_type = substitute_type(&method_info.return_type, &subst);
+    // ... check args with substituted param types ...
+    Ok(return_type)
+}
+```
+
+**Type::TypeParam receiver with protocol bound** (affects generic function bodies):
+
+```
+func call_sum<T: Summable>(item: T) -> Int32 {
+    return item.sum();  // receiver type is TypeParam { name: "T", bound: Some("Summable") }
+}
+```
+
+Resolution:
+1. Receiver has type `TypeParam { name, bound: Some(proto) }`
+2. Look up protocol `proto` in `protocol_defs`
+3. Find method in protocol's method signatures
+4. Use protocol method signature as-is (return type may be a concrete type or Self)
+5. If return type is `Self`, substitute with `TypeParam { name, bound }`
+
+```rust
+Type::TypeParam { name, bound: Some(proto) } => {
+    let proto_info = resolver.lookup_protocol(&proto)?.clone();
+    let method_sig = proto_info.lookup_method(method)?;
+    // If return type references Self, substitute with the TypeParam
+    let return_type = substitute_self(&method_sig.return_type,
+        &Type::TypeParam { name: name.clone(), bound: Some(proto.clone()) });
+    // ... check args ...
+    Ok(return_type)
+}
+```
+
+**Type::TypeParam without bound:**
+```
+Type::TypeParam { bound: None, .. } => {
+    Err("method call on unconstrained type parameter")
+}
+```
+
+#### Field Access and Index Access on Generic Types
+
+Similar to method calls, field access and index access need to handle `Type::Generic`:
+
+**Field access on Generic receiver:**
+```
+let w = Wrapper(value: 42);
+let v = w.value;  // receiver type is Generic { "Wrapper", [...] }
+```
+1. Look up base struct from `Generic { name, .. }`
+2. Build substitution map from type params to type args
+3. Look up field type and substitute
+
+**Index access on Generic/InferVar array:**
+Works as before — the array type `Array { element, size }` is resolved through unification,
+and element type may be an `InferVar` that resolves later.
+
+#### Loop Type Inference
+
+The current resolver tracks break types via `loop_break_types: Vec<Option<Type>>` with direct
+equality checking (`*existing != ty`). This is incompatible with inference because
+`IntegerLiteral(v0) != IntegerLiteral(v1)` even when they should unify.
+
+**Change:** Replace `loop_break_types` with `InferVar`-based tracking.
+
+```rust
+// In resolver.rs
+loop_result_vars: Vec<Option<InferVarId>>,  // was: loop_break_types: Vec<Option<Type>>
+```
+
+**enter_loop:**
+```rust
+pub fn enter_loop(&mut self, ctx: &mut InferenceContext) -> InferVarId {
+    let result_var = ctx.fresh_var();
+    self.loop_result_vars.push(Some(result_var));
+    self.loop_depth += 1;
+    result_var
+}
+```
+
+**Processing break:**
+```rust
+// In check_stmt for Stmt::Break(Some(expr)):
+let break_ty = check_expr(expr, Expectation::None, ctx, resolver)?;
+let loop_var = resolver.current_loop_var();
+ctx.unify(break_ty, Type::InferVar(loop_var))?;
+```
+
+**Processing nobreak yield:**
+```rust
+// nobreak block's yield also unifies against the loop var
+let nobreak_ty = check_block(nobreak_block, Expectation::None, ctx, resolver)?;
+let loop_var = resolver.current_loop_var();
+ctx.unify(nobreak_ty, Type::InferVar(loop_var))?;
+```
+
+**With expected type from context:**
+```rust
+// When while expression has expected type:
+let loop_var = resolver.enter_loop(ctx);
+// Unify expected type with loop result var FIRST
+if let Expectation::ExpectType(expected) = expected {
+    ctx.unify(Type::InferVar(loop_var), expected)?;
+}
+// Then analyze body — break/nobreak will unify against loop_var
+analyze_loop_body(...);
+```
+
+This allows:
+```
+let x: Int64 = while cond { break 42; } nobreak { yield 0; };
+```
+1. `loop_var = InferVar(v0)`, unify with expected `I64` → `v0 = I64`
+2. `break 42`: `IntegerLiteral(v1)` unified with `v0` → `v1 = I64`
+3. `nobreak yield 0`: `IntegerLiteral(v2)` unified with `v0` → `v2 = I64`
+
+And:
+```
+let x = while cond { break 42; } nobreak { yield 0; };
+```
+1. `loop_var = InferVar(v0)`, no expected type
+2. `break 42`: `unify(IntegerLiteral(v1), InferVar(v0))` → `v0 = IntegerLiteral(v1)`
+3. `nobreak yield 0`: `unify(IntegerLiteral(v2), IntegerLiteral(v1))` → linked
+4. Fallback → `I32`
 
 #### Nested Generics
 
@@ -370,6 +512,15 @@ When `v0` resolves to `TypeParam("T")`, `type_to_annotation` converts it to
 `TypeAnnotation::Named("T")`. The monomorphizer's `substitute_type` already handles `Named`
 names that match substitution keys, so this works correctly during monomorphization.
 
+Method calls on bounded type parameters within generic bodies are resolved via protocol
+lookup (see "Method Call Resolution" above):
+
+```
+func call_sum<T: Summable>(item: T) -> Int32 {
+    return item.sum();  // resolved via Summable protocol
+}
+```
+
 #### validate_generics Changes
 
 - Omitted type arguments at generic call sites → **no longer an error** (inference will handle it)
@@ -390,13 +541,29 @@ fn validate_inferred_constraints(
     for (node_id, type_args) in &inferred.map {
         // Look up the type params with bounds for this call site
         // Check each inferred type arg satisfies its protocol bound
+        // SKIP TypeParam args — their constraints are checked post-mono
+        // when concrete types are substituted in
     }
     Ok(())
 }
 ```
 
-This runs after all type variables are resolved to concrete types, ensuring accurate
-constraint checking.
+**TypeParam args are skipped** in this validation. When inference within a generic body resolves
+a type argument to `TypeParam("T")`, the constraint cannot be validated until monomorphization
+substitutes a concrete type. The post-mono `analyze_post_mono` pass handles this case because
+after monomorphization, all `TypeParam`s are replaced with concrete types and the existing
+constraint checking works as-is.
+
+Example:
+```
+struct Wrapper<T: Summable> { var value: T; }
+func forward<U: Summable>(v: U) -> Wrapper<U> {
+    return Wrapper(value: v);  // inferred type arg for Wrapper is TypeParam("U")
+}
+```
+- Pre-mono: inference resolves Wrapper's type arg to `TypeParam("U")` → skip constraint check
+- Monomorphize: `forward<Int32>` → body becomes `Wrapper<Int32>(value: v)` with concrete arg
+- Post-mono: `validate_generics` checks `Int32: Summable` → success (or failure if not conforming)
 
 ### 5. Pipeline Integration
 
@@ -405,7 +572,7 @@ constraint checking.
 ```
 src/semantic/types.rs      — add InferVar/IntegerLiteral/FloatLiteral to Type enum
 src/semantic/mod.rs        — replace analyze_expr with check_expr, introduce InferenceContext
-src/semantic/resolver.rs   — no changes
+src/semantic/resolver.rs   — change loop_break_types to loop_result_vars (InferVarId-based)
 src/monomorphize.rs        — accept InferredTypeArgs as fallback lookup
 ```
 
@@ -491,7 +658,7 @@ pub fn analyze(program: &Program) -> Result<InferredTypeArgs> {
         ctx.record_inferred_type_args(&mut inferred);
         ctx.reset(); // reset per function
     }
-    // Phase 4: validate protocol constraints for inferred type args
+    // Phase 4: validate protocol constraints for inferred type args (skip TypeParam args)
     validate_inferred_constraints(&inferred, &resolver)?;
     Ok(inferred)
 }
@@ -577,6 +744,12 @@ let x = choose(42, 3.14);
 → type mismatch: cannot unify integer literal with float literal
 ```
 
+**Method call on unconstrained type parameter:**
+```
+func bad<T>(item: T) -> Int32 { return item.sum(); }
+→ method call on unconstrained type parameter 'T'
+```
+
 #### Edge Cases
 
 **Partial type argument specification is forbidden:**
@@ -603,7 +776,7 @@ struct Wrapper<T: Summable> { var value: T; }
 let w = Wrapper(value: true);  // error: 'Bool' does not conform to 'Summable'
 ```
 After `apply_defaults`, `validate_inferred_constraints` checks that inferred type args
-satisfy their protocol bounds.
+satisfy their protocol bounds (skipping TypeParam args, which are validated post-mono).
 
 ### 7. Test Strategy
 
@@ -618,6 +791,7 @@ satisfy their protocol bounds.
 - Return statement: `func foo() -> Int64 { return 42; }`
 - Yield in block: `let x: Int64 = { yield 42; };`
 - Break with value: `let x: Int64 = while cond { break 42; } nobreak { yield 0; };`
+- Multiple breaks with literals: `while cond { if x { break 1; } break 2; }`
 
 #### Generic Function Inference
 - From arguments: `identity(42)`
@@ -628,6 +802,11 @@ satisfy their protocol bounds.
 - From fields: `Box(value: 42)`
 - From expected type: `let b: Box<Int64> = Box(value: 42)`
 - Nested: `Box(value: Pair(first: 1, second: true))`
+
+#### Method Calls on Generic Structs
+- Method on inferred generic struct: `let w = Wrapper(value: 42); w.get();`
+- Method with expected type: `let v: Int64 = Wrapper(value: 42).get();`
+- Method call in generic body with protocol bound: `item.sum()` where `T: Summable`
 
 #### Array Literal Inference
 - Element type from annotation: `let arr: [Int64; 3] = [1, 2, 3];`
@@ -644,6 +823,7 @@ satisfy their protocol bounds.
 - Constraint violation: `Wrapper(value: true)` when `T: Summable`
 - Type mismatch: `let x: Bool = 42;`
 - Integer/float mismatch: `choose(42, 3.14)` where T must be one type
+- Method call on unconstrained type param: `item.foo()` where T has no bound
 
 #### Regression
 - All existing tests continue to pass unchanged
