@@ -788,7 +788,7 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
         ExprKind::SelfRef => match &resolver.self_context {
             Some(ctx) => Ok(Type::Struct(ctx.struct_name.clone())),
             None => Err(sem_err(
-                "`self` can only be used inside struct initializers or computed properties",
+                "`self` can only be used inside struct initializers, computed properties, or methods",
             )),
         },
         ExprKind::Cast { expr, target_type } => {
@@ -894,8 +894,51 @@ fn analyze_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
                 }
             }
             StructMember::StoredProperty { .. } => {}
-            StructMember::Method { .. } => {
-                // Method body analysis will be added in a later task
+            StructMember::Method {
+                name: mname,
+                params,
+                return_type,
+                body,
+            } => {
+                let resolved_return = resolve_type_checked(return_type, resolver)?;
+                let prev_self = resolver.self_context.clone();
+                resolver.self_context = Some(SelfContext {
+                    struct_name: struct_def.name.clone(),
+                    mutable: false,
+                });
+                let prev_return = resolver.current_return_type.clone();
+                resolver.current_return_type = Some(resolved_return);
+
+                resolver.push_scope();
+                for param in params {
+                    resolver.define_var(
+                        param.name.clone(),
+                        VarInfo {
+                            ty: resolve_type_checked(&param.ty, resolver)?,
+                            mutable: false,
+                        },
+                    );
+                }
+
+                let stmts = &body.stmts;
+                if stmts.is_empty() || !matches!(stmts.last(), Some(Stmt::Return(_))) {
+                    return Err(sem_err(format!(
+                        "method `{}` must end with a `return` statement",
+                        mname
+                    )));
+                }
+                for stmt in stmts {
+                    if matches!(stmt, Stmt::Yield(_)) {
+                        return Err(sem_err(
+                            "`yield` cannot be used in method body (use `return` instead)",
+                        ));
+                    }
+                    analyze_stmt(stmt, resolver)?;
+                }
+
+                resolver.pop_scope();
+                resolver.current_return_type = prev_return;
+                resolver.self_context = prev_self;
             }
         }
     }
