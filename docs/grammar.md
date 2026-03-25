@@ -1,9 +1,9 @@
-# Bengal Language Grammar — Phase 7
+# Bengal Language Grammar — Phase 8
 
 ## Overview
 
 Bengal is an expression-oriented language that compiles to native code via LLVM.
-Features include loop control (`break`/`continue`), multiple numeric types (`Int64`, `Float32`, `Float64`), local type inference, `as` casts, `while` expressions with `break` values and `nobreak` blocks, constant folding optimization, structs with stored/computed properties, initializers, and methods, protocols for shared interfaces, and a module system for multi-file compilation with hierarchical namespaces and visibility control.
+Features include loop control (`break`/`continue`), multiple numeric types (`Int64`, `Float32`, `Float64`), local type inference, `as` casts, `while` expressions with `break` values and `nobreak` blocks, constant folding optimization, structs with stored/computed properties, initializers, and methods, protocols for shared interfaces, a module system for multi-file compilation with hierarchical namespaces and visibility control, and generics with monomorphization and optional protocol constraints.
 
 Key design principles:
 
@@ -14,6 +14,7 @@ Key design principles:
 - **Value-type structs**: Structs are stack-allocated value types with stored properties, computed properties, custom initializers, and methods.
 - **Protocols**: Shared interfaces that structs can conform to, enabling compile-time checked structural contracts.
 - **Module system**: Multi-file compilation with hierarchical modules, five-level visibility control, and import paths using `::` as the separator.
+- **Generics**: Parametric polymorphism on functions and structs with optional protocol constraints, compiled via monomorphization.
 
 ## Lexical Grammar
 
@@ -90,13 +91,22 @@ import_tail = "*"
 (* Visibility modifiers *)
 visibility = "public" | "package" | "internal" | "fileprivate" | "private" ;
 
-function   = "func" , identifier , param_list , [ "->" , type ] , block ;
+(* Generics *)
+type_params = "<" , type_param , { "," , type_param } , ">" ;
+type_param  = identifier , [ ":" , identifier ] ;
+type_args   = "<" , type , { "," , type } , ">" ;
+(* Disambiguation: `<` immediately following an identifier (no space) is parsed
+   as a type argument opener. `<` preceded by whitespace is parsed as the
+   less-than infix operator. For example, `identity<Int32>(x)` is a generic
+   call, while `identity < Int32` is a comparison. *)
+
+function   = "func" , identifier , [ type_params ] , param_list , [ "->" , type ] , block ;
            (* return type defaults to () if omitted *)
 
 param_list = "(" , [ param , { "," , param } ] , ")" ;
 param      = identifier , ":" , type ;
 type       = "Int32" | "Int64" | "Float32" | "Float64" | "Bool" | "Void" | "(" , ")"
-           | identifier ;   (* named struct type *)
+           | identifier , [ type_args ] ;   (* named struct/generic type *)
 
 block      = "{" , { statement } , "}" ;
 
@@ -149,7 +159,7 @@ if_expr    = "if" , expression , block , [ "else" , block ] ;
 while_expr = "while" , expression , block , [ "nobreak" , block ] ;
 
 (* Struct definitions *)
-struct_def = "struct" , identifier , [ ":" , identifier_list ] , "{" , { struct_member } , "}" ;
+struct_def = "struct" , identifier , [ type_params ] , [ ":" , identifier_list ] , "{" , { struct_member } , "}" ;
 
 identifier_list = identifier , { "," , identifier } ;
 
@@ -328,6 +338,27 @@ The type of a `while` expression is determined by its `break` statements:
 - The compiler verifies that the struct provides all required methods and properties.
 - Method signatures must match exactly (name, parameter types, return type).
 - Conformance is checked at compile time (static dispatch, no vtable).
+
+### Generics
+
+#### Type parameters
+- Functions and structs may declare type parameters: `func identity<T>(value: T) -> T { ... }`, `struct Box<T> { var value: T; }`.
+- Type parameters may have optional protocol constraints: `<T: Summable>`.
+- Type parameters are scoped to the declaring function or struct.
+
+#### Type arguments
+- Generic functions and structs require explicit type arguments at the call site: `identity<Int32>(42)`, `Box<Int32>(value: 1)`.
+- The number of type arguments must match the number of type parameters.
+- Calling a non-generic function or struct with type arguments is a compile error.
+- Calling a generic function or struct without type arguments is a compile error.
+
+#### Constraints
+- A constraint `T: Protocol` requires that the concrete type argument conforms to the named protocol.
+- Constraint violations are reported at the call site.
+
+#### Monomorphization
+- Generics are compiled via monomorphization: each unique set of type arguments generates a specialized copy of the function or struct.
+- Specialized names use the pattern `name_TypeArg1_TypeArg2` (e.g., `identity_Int32`, `Pair_Int32_Bool`).
 
 ### Module System
 
@@ -531,6 +562,41 @@ public import self::renderer::Renderer;
 import super::math::Vector;
 ```
 
+### Generic function and struct
+
+```bengal
+protocol Summable {
+    func sum() -> Int32;
+}
+
+struct Point: Summable {
+    var x: Int32;
+    var y: Int32;
+
+    func sum() -> Int32 {
+        return self.x + self.y;
+    }
+}
+
+func identity<T>(value: T) -> T {
+    return value;
+}
+
+struct Wrapper<T: Summable> {
+    var value: T;
+
+    func getSum() -> Int32 {
+        return self.value.sum();
+    }
+}
+
+func main() -> Int32 {
+    let x = identity<Int32>(42);
+    let w = Wrapper<Point>(value: Point(x: 3, y: 4));
+    return w.getSum();
+}
+```
+
 ## Features Not Yet Supported
 
 - **Unary minus**: `-x` negation
@@ -543,3 +609,5 @@ import super::math::Vector;
 - **Extension conformance**: `extension Point: Drawable { ... }` for retroactive conformance
 - **Default implementations in protocols**
 - **Protocol inheritance**: `protocol A: B { ... }`
+- **Multiple generic constraints**: `<T: A & B>` — constraining a type parameter with multiple protocols
+- **Generic type inference**: omitting type arguments when they can be inferred from function arguments
