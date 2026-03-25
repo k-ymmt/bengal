@@ -1021,9 +1021,35 @@ impl Lowering {
                 }
                 self.lookup_var(self_name)
             }
-            ExprKind::MethodCall { .. } => {
-                // MethodCall lowering will be added in a later task
-                self.record_error("method calls are not yet supported in BIR lowering")
+            ExprKind::MethodCall {
+                object,
+                method,
+                args,
+            } => {
+                let obj_val = self.lower_expr(object);
+                let struct_name = match self.value_types.get(&obj_val) {
+                    Some(BirType::Struct(n)) => n.clone(),
+                    _ => return self.record_error("method call on non-struct value"),
+                };
+                let mangled = format!("{}_{}", struct_name, method);
+                let ret_ty = self
+                    .func_sigs
+                    .get(&mangled)
+                    .cloned()
+                    .unwrap_or(BirType::Unit);
+                let mut call_args = vec![obj_val];
+                for arg in args {
+                    call_args.push(self.lower_expr(arg));
+                }
+                let result = self.fresh_value();
+                self.emit(Instruction::Call {
+                    result,
+                    func_name: mangled,
+                    args: call_args,
+                    ty: ret_ty.clone(),
+                });
+                self.value_types.insert(result, ret_ty);
+                result
             }
         }
     }
@@ -1688,11 +1714,53 @@ pub fn lower_program(
         lowering.func_sigs.insert(func.name.clone(), bir_ty);
     }
 
-    let functions = program
+    // Register mangled method signatures
+    for (struct_name, info) in &sem_info.struct_defs {
+        for method in &info.methods {
+            let mangled = format!("{}_{}", struct_name, method.name);
+            let bir_ret = semantic_type_to_bir(&method.return_type);
+            lowering.func_sigs.insert(mangled, bir_ret);
+        }
+    }
+
+    let mut functions: Vec<BirFunction> = program
         .functions
         .iter()
         .map(|f| lowering.lower_function(f))
         .collect();
+
+    // Lower methods as flattened functions
+    for struct_def in &program.structs {
+        for member in &struct_def.members {
+            if let StructMember::Method {
+                name: mname,
+                params,
+                return_type,
+                body,
+            } = member
+            {
+                let mangled_name = format!("{}_{}", struct_def.name, mname);
+                // Build synthetic function with `self` as first param
+                let mut all_params = vec![Param {
+                    name: "self".to_string(),
+                    ty: TypeAnnotation::Named(struct_def.name.clone()),
+                }];
+                all_params.extend(params.clone());
+                let func = Function {
+                    name: mangled_name,
+                    params: all_params,
+                    return_type: return_type.clone(),
+                    body: body.clone(),
+                };
+
+                // Set up self context for lowering
+                lowering.self_var_name = Some("self".to_string());
+                let bir_func = lowering.lower_function(&func);
+                lowering.self_var_name = None;
+                functions.push(bir_func);
+            }
+        }
+    }
 
     if let Some(err) = lowering.lowering_error {
         return Err(err);
