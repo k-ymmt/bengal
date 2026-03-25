@@ -157,6 +157,30 @@ fn error_type_args_on_non_generic() {
 }
 
 #[test]
+fn spec_full_example() {
+    assert_eq!(
+        compile_and_run(
+            "protocol Summable { func sum() -> Int32; }
+         struct Point: Summable { var x: Int32; var y: Int32; func sum() -> Int32 { return self.x + self.y; } }
+         func identity<T>(value: T) -> T { return value; }
+         struct Pair<A, B> { var first: A; var second: B; }
+         struct Wrapper<T: Summable> { var value: T;
+             func getSum() -> Int32 { return self.value.sum(); }
+             func getValue() -> T { return self.value; }
+         }
+         func main() -> Int32 {
+             let x = identity<Int32>(42);
+             let p = Pair<Int32, Bool>(first: 10, second: true);
+             let w = Wrapper<Point>(value: Point(x: 3, y: 4));
+             let s = w.getSum();
+             return s;
+         }",
+        ),
+        7
+    );
+}
+
+#[test]
 fn generic_same_func_multiple_types() {
     assert_eq!(
         compile_and_run(
