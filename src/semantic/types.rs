@@ -11,6 +11,8 @@ pub enum Type {
     Bool,
     Unit,
     Struct(String),
+    TypeParam { name: String, bound: Option<String> },
+    Generic { name: String, args: Vec<Type> },
 }
 
 impl fmt::Display for Type {
@@ -23,6 +25,17 @@ impl fmt::Display for Type {
             Type::Bool => write!(f, "Bool"),
             Type::Unit => write!(f, "()"),
             Type::Struct(name) => write!(f, "{}", name),
+            Type::TypeParam { name, .. } => write!(f, "{}", name),
+            Type::Generic { name, args } => {
+                write!(f, "{}<", name)?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", arg)?;
+                }
+                write!(f, ">")
+            }
         }
     }
 }
@@ -48,8 +61,9 @@ pub fn resolve_type(annotation: &TypeAnnotation) -> Type {
         TypeAnnotation::Bool => Type::Bool,
         TypeAnnotation::Unit => Type::Unit,
         TypeAnnotation::Named(name) => Type::Struct(name.clone()),
-        TypeAnnotation::Generic { name, .. } => {
-            panic!("Generic type `{}` not yet supported in resolve_type", name)
-        }
+        TypeAnnotation::Generic { name, args } => Type::Generic {
+            name: name.clone(),
+            args: args.iter().map(resolve_type).collect(),
+        },
     }
 }

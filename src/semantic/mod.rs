@@ -146,6 +146,7 @@ fn collect_global_symbols(graph: &ModuleGraph) -> Result<GlobalSymbolTable> {
                 .collect::<Result<Vec<_>>>()?;
             let return_type = resolve_type_checked(&func.return_type, &tmp_resolver)?;
             let sig = FuncSig {
+                type_params: func.type_params.clone(),
                 params,
                 return_type,
             };
@@ -424,6 +425,7 @@ fn analyze_single_module(
         resolver.define_func(
             func.name.clone(),
             FuncSig {
+                type_params: func.type_params.clone(),
                 params,
                 return_type,
             },
@@ -672,6 +674,7 @@ pub fn analyze(program: &Program) -> Result<SemanticInfo> {
         resolver.define_func(
             func.name.clone(),
             FuncSig {
+                type_params: func.type_params.clone(),
                 params,
                 return_type,
             },
@@ -1003,6 +1006,7 @@ fn resolve_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
     resolver.define_struct(
         name.clone(),
         resolver::StructInfo {
+            type_params: struct_def.type_params.clone(),
             fields,
             field_index,
             computed,

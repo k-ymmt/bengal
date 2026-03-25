@@ -1714,6 +1714,12 @@ pub fn semantic_type_to_bir(ty: &crate::semantic::types::Type) -> BirType {
         crate::semantic::types::Type::Bool => BirType::Bool,
         crate::semantic::types::Type::Unit => BirType::Unit,
         crate::semantic::types::Type::Struct(name) => BirType::Struct(name.clone()),
+        crate::semantic::types::Type::TypeParam { name, .. } => {
+            panic!("unresolved type parameter `{}` in BIR lowering", name)
+        }
+        crate::semantic::types::Type::Generic { name, .. } => {
+            panic!("unresolved generic type `{}` in BIR lowering", name)
+        }
     }
 }
 

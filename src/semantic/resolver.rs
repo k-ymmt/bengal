@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use super::types::Type;
 use crate::error::{BengalError, Result, Span};
 use crate::package::ModulePath;
-use crate::parser::ast::{Block, NodeId, Visibility};
+use crate::parser::ast::{Block, NodeId, TypeParam, Visibility};
 
 #[derive(Debug, Clone)]
 pub struct VarInfo {
@@ -13,6 +13,7 @@ pub struct VarInfo {
 
 #[derive(Debug, Clone)]
 pub struct FuncSig {
+    pub type_params: Vec<TypeParam>,
     pub params: Vec<Type>,
     pub return_type: Type,
 }
@@ -26,6 +27,7 @@ pub struct MethodInfo {
 
 #[derive(Debug, Clone)]
 pub struct StructInfo {
+    pub type_params: Vec<TypeParam>,
     pub fields: Vec<(String, Type)>,
     pub field_index: HashMap<String, usize>,
     pub computed: Vec<ComputedPropInfo>,
@@ -156,6 +158,7 @@ impl Resolver {
         self.struct_defs.insert(
             name,
             StructInfo {
+                type_params: vec![],
                 fields: vec![],
                 field_index: HashMap::new(),
                 computed: vec![],
