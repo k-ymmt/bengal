@@ -245,12 +245,39 @@ impl Parser {
         }
     }
 
+    fn parse_type_params(&mut self) -> Result<Vec<TypeParam>> {
+        let mut params = Vec::new();
+        self.expect(Token::Lt)?;
+        loop {
+            let name = self.expect_ident()?;
+            let bound = if self.peek().node == Token::Colon {
+                self.advance();
+                Some(self.expect_ident()?)
+            } else {
+                None
+            };
+            params.push(TypeParam { name, bound });
+            if self.peek().node == Token::Comma {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(Token::Gt)?;
+        Ok(params)
+    }
+
     fn parse_function(&mut self) -> Result<Function> {
         self.expect(Token::Func)?;
         let name_tok = self.expect(Token::Ident(String::new()))?;
         let name = match &name_tok.node {
             Token::Ident(s) => s.clone(),
             _ => unreachable!(),
+        };
+        let type_params = if self.peek().node == Token::Lt {
+            self.parse_type_params()?
+        } else {
+            vec![]
         };
         let params = self.parse_param_list()?;
         let return_type = if self.peek().node == Token::Arrow {
@@ -263,7 +290,7 @@ impl Parser {
         Ok(Function {
             visibility: Visibility::Internal,
             name,
-            type_params: vec![],
+            type_params,
             params,
             return_type,
             body,
@@ -273,6 +300,11 @@ impl Parser {
     fn parse_struct_def(&mut self) -> Result<StructDef> {
         self.expect(Token::Struct)?;
         let name = self.expect_ident()?;
+        let type_params = if self.peek().node == Token::Lt {
+            self.parse_type_params()?
+        } else {
+            vec![]
+        };
         let conformances = if self.peek().node == Token::Colon {
             self.advance(); // consume `:`
             let mut list = vec![self.expect_ident()?];
@@ -293,7 +325,7 @@ impl Parser {
         Ok(StructDef {
             visibility: Visibility::Internal,
             name,
-            type_params: vec![],
+            type_params,
             conformances,
             members,
         })
@@ -2027,5 +2059,35 @@ mod module_tests {
         assert_eq!(func.type_params.len(), 1);
         assert_eq!(func.type_params[0].name, "T");
         assert_eq!(func.type_params[0].bound, None);
+    }
+
+    #[test]
+    fn parse_generic_function_with_bound() {
+        let tokens =
+            tokenize("func constrain<T: Summable>(item: T) -> Int32 { return 0; }").unwrap();
+        let program = parse(tokens).unwrap();
+        let func = &program.functions[0];
+        assert_eq!(func.type_params.len(), 1);
+        assert_eq!(func.type_params[0].name, "T");
+        assert_eq!(func.type_params[0].bound, Some("Summable".to_string()));
+    }
+
+    #[test]
+    fn parse_generic_function_multi_params() {
+        let tokens = tokenize("func pair<A, B>(a: A, b: B) -> A { return a; }").unwrap();
+        let program = parse(tokens).unwrap();
+        let func = &program.functions[0];
+        assert_eq!(func.type_params.len(), 2);
+        assert_eq!(func.type_params[0].name, "A");
+        assert_eq!(func.type_params[1].name, "B");
+    }
+
+    #[test]
+    fn parse_generic_struct_def() {
+        let tokens =
+            tokenize("struct Box<T> { var value: T; } func main() -> Int32 { return 0; }").unwrap();
+        let program = parse(tokens).unwrap();
+        assert_eq!(program.structs[0].type_params.len(), 1);
+        assert_eq!(program.structs[0].type_params[0].name, "T");
     }
 }
