@@ -1243,3 +1243,97 @@ fn protocol_property_get_set() {
     );
     assert_eq!(result, 99);
 }
+
+// --- Protocol error case tests ---
+
+fn compile_should_fail(source: &str) -> String {
+    let tokens = tokenize(source).unwrap();
+    let program = parse(tokens).unwrap();
+    match semantic::analyze(&program) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("expected semantic error but analysis succeeded"),
+    }
+}
+
+#[test]
+fn protocol_error_missing_method() {
+    let err = compile_should_fail(
+        r#"
+        protocol Summable {
+            func sum() -> Int32;
+        }
+        struct Empty: Summable {
+            var x: Int32;
+        }
+        func main() -> Int32 { return 0; }
+    "#,
+    );
+    assert!(err.contains("does not implement method"), "got: {}", err);
+}
+
+#[test]
+fn protocol_error_return_type_mismatch() {
+    let err = compile_should_fail(
+        r#"
+        protocol Summable {
+            func sum() -> Int32;
+        }
+        struct Bad: Summable {
+            var x: Int32;
+            func sum() -> Bool {
+                return true;
+            }
+        }
+        func main() -> Int32 { return 0; }
+    "#,
+    );
+    assert!(err.contains("return type"), "got: {}", err);
+}
+
+#[test]
+fn protocol_error_unknown_protocol() {
+    let err = compile_should_fail(
+        r#"
+        struct Bad: NonExistent {
+            var x: Int32;
+        }
+        func main() -> Int32 { return 0; }
+    "#,
+    );
+    assert!(err.contains("unknown protocol"), "got: {}", err);
+}
+
+#[test]
+fn protocol_error_missing_property() {
+    let err = compile_should_fail(
+        r#"
+        protocol HasTotal {
+            var total: Int32 { get };
+        }
+        struct Bad: HasTotal {
+            var x: Int32;
+        }
+        func main() -> Int32 { return 0; }
+    "#,
+    );
+    assert!(err.contains("does not implement property"), "got: {}", err);
+}
+
+#[test]
+fn protocol_error_missing_setter() {
+    let err = compile_should_fail(
+        r#"
+        protocol Writable {
+            var value: Int32 { get set };
+        }
+        struct ReadOnly: Writable {
+            var x: Int32;
+            var value: Int32 {
+                get { return self.x; }
+            };
+        }
+        func main() -> Int32 { return 0; }
+    "#,
+    );
+    assert!(err.contains("requires a setter"), "got: {}", err);
+}
