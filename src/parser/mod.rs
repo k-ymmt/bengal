@@ -48,6 +48,15 @@ impl Parser {
         }
     }
 
+    fn no_space_before_current(&self) -> bool {
+        if self.pos == 0 {
+            return false;
+        }
+        let prev = &self.tokens[self.pos - 1];
+        let curr = &self.tokens[self.pos];
+        prev.span.end == curr.span.start
+    }
+
     // --- Visibility helpers ---
 
     fn is_visibility_token(token: &Token) -> bool {
@@ -540,15 +549,27 @@ impl Parser {
             return Ok(TypeAnnotation::Unit);
         }
         let tok = self.expect(Token::Ident(String::new()))?;
-        match &tok.node {
-            Token::Ident(s) if s == "Int32" => Ok(TypeAnnotation::I32),
-            Token::Ident(s) if s == "Int64" => Ok(TypeAnnotation::I64),
-            Token::Ident(s) if s == "Float32" => Ok(TypeAnnotation::F32),
-            Token::Ident(s) if s == "Float64" => Ok(TypeAnnotation::F64),
-            Token::Ident(s) if s == "Bool" => Ok(TypeAnnotation::Bool),
-            Token::Ident(s) if s == "Void" => Ok(TypeAnnotation::Unit),
-            Token::Ident(s) => Ok(TypeAnnotation::Named(s.clone())),
+        let base = match &tok.node {
+            Token::Ident(s) if s == "Int32" => return Ok(TypeAnnotation::I32),
+            Token::Ident(s) if s == "Int64" => return Ok(TypeAnnotation::I64),
+            Token::Ident(s) if s == "Float32" => return Ok(TypeAnnotation::F32),
+            Token::Ident(s) if s == "Float64" => return Ok(TypeAnnotation::F64),
+            Token::Ident(s) if s == "Bool" => return Ok(TypeAnnotation::Bool),
+            Token::Ident(s) if s == "Void" => return Ok(TypeAnnotation::Unit),
+            Token::Ident(s) => s.clone(),
             _ => unreachable!(),
+        };
+        if self.peek().node == Token::Lt && self.no_space_before_current() {
+            self.advance(); // consume `<`
+            let mut args = vec![self.parse_type()?];
+            while self.peek().node == Token::Comma {
+                self.advance();
+                args.push(self.parse_type()?);
+            }
+            self.expect(Token::Gt)?;
+            Ok(TypeAnnotation::Generic { name: base, args })
+        } else {
+            Ok(TypeAnnotation::Named(base))
         }
     }
 
@@ -841,6 +862,20 @@ impl Parser {
                         });
                     }
                 }
+                Token::Lt if self.no_space_before_current() => {
+                    let name = match &expr.kind {
+                        ExprKind::Ident(name) => name.clone(),
+                        _ => break,
+                    };
+                    let type_args = self.parse_type_arg_list()?;
+                    if self.peek().node != Token::LParen {
+                        return Err(BengalError::ParseError {
+                            message: "expected `(` after type arguments".to_string(),
+                            span: self.peek().span,
+                        });
+                    }
+                    expr = self.parse_postfix_call_with_type_args(name, type_args)?;
+                }
                 Token::LParen => {
                     expr = self.parse_postfix_call(expr)?;
                 }
@@ -955,6 +990,73 @@ impl Parser {
             Ok(self.expr(ExprKind::Call {
                 name,
                 type_args: vec![],
+                args,
+            }))
+        }
+    }
+
+    fn parse_type_arg_list(&mut self) -> Result<Vec<TypeAnnotation>> {
+        self.expect(Token::Lt)?;
+        let mut args = vec![self.parse_type()?];
+        while self.peek().node == Token::Comma {
+            self.advance();
+            args.push(self.parse_type()?);
+        }
+        self.expect(Token::Gt)?;
+        Ok(args)
+    }
+
+    fn parse_postfix_call_with_type_args(
+        &mut self,
+        name: String,
+        type_args: Vec<TypeAnnotation>,
+    ) -> Result<Expr> {
+        self.expect(Token::LParen)?;
+
+        // Empty args → Call
+        if self.peek().node == Token::RParen {
+            self.advance();
+            return Ok(self.expr(ExprKind::Call {
+                name,
+                type_args,
+                args: vec![],
+            }));
+        }
+
+        // Lookahead: IDENT followed by `:` → named args → StructInit
+        let is_named = matches!(self.peek().node, Token::Ident(_))
+            && self.tokens.get(self.pos + 1).map(|t| &t.node) == Some(&Token::Colon);
+
+        if is_named {
+            let mut args = Vec::new();
+            let label = self.expect_ident()?;
+            self.expect(Token::Colon)?;
+            let value = self.parse_expr()?;
+            args.push((label, value));
+            while self.peek().node == Token::Comma {
+                self.advance();
+                let label = self.expect_ident()?;
+                self.expect(Token::Colon)?;
+                let value = self.parse_expr()?;
+                args.push((label, value));
+            }
+            self.expect(Token::RParen)?;
+            Ok(self.expr(ExprKind::StructInit {
+                name,
+                type_args,
+                args,
+            }))
+        } else {
+            let mut args = Vec::new();
+            args.push(self.parse_expr()?);
+            while self.peek().node == Token::Comma {
+                self.advance();
+                args.push(self.parse_expr()?);
+            }
+            self.expect(Token::RParen)?;
+            Ok(self.expr(ExprKind::Call {
+                name,
+                type_args,
                 args,
             }))
         }
@@ -2089,5 +2191,41 @@ mod module_tests {
         let program = parse(tokens).unwrap();
         assert_eq!(program.structs[0].type_params.len(), 1);
         assert_eq!(program.structs[0].type_params[0].name, "T");
+    }
+
+    #[test]
+    fn parse_generic_type_annotation() {
+        let tokens = tokenize(
+            "func main() -> Int32 { let x: Box<Int32> = Box<Int32>(value: 1); return 0; }",
+        )
+        .unwrap();
+        let program = parse(tokens).unwrap();
+        assert_eq!(program.functions.len(), 1);
+    }
+
+    #[test]
+    fn parse_generic_call_with_type_args() {
+        let tokens = tokenize(
+            "func id<T>(v: T) -> T { return v; } func main() -> Int32 { return id<Int32>(3); }",
+        )
+        .unwrap();
+        let program = parse(tokens).unwrap();
+        assert_eq!(program.functions.len(), 2);
+        // Verify the call in main's return actually has type_args
+        let main_fn = &program.functions[1];
+        let ret_stmt = &main_fn.body.stmts[0];
+        match ret_stmt {
+            Stmt::Return(Some(expr)) => match &expr.kind {
+                ExprKind::Call {
+                    name, type_args, ..
+                } => {
+                    assert_eq!(name, "id");
+                    assert_eq!(type_args.len(), 1);
+                    assert_eq!(type_args[0], TypeAnnotation::I32);
+                }
+                other => panic!("expected Call, got {:?}", other),
+            },
+            other => panic!("expected Return, got {:?}", other),
+        }
     }
 }
