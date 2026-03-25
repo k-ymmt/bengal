@@ -1,9 +1,9 @@
-# Bengal Language Grammar — Phase 5
+# Bengal Language Grammar — Phase 6
 
 ## Overview
 
 Bengal is an expression-oriented language that compiles to native code via LLVM.
-Features include loop control (`break`/`continue`), multiple numeric types (`Int64`, `Float32`, `Float64`), local type inference, `as` casts, `while` expressions with `break` values and `nobreak` blocks, constant folding optimization, and structs with stored/computed properties and initializers.
+Features include loop control (`break`/`continue`), multiple numeric types (`Int64`, `Float32`, `Float64`), local type inference, `as` casts, `while` expressions with `break` values and `nobreak` blocks, constant folding optimization, structs with stored/computed properties, initializers, and methods, and protocols for shared interfaces.
 
 Key design principles:
 
@@ -11,7 +11,8 @@ Key design principles:
 - **Optional type annotations**: Type annotations on `let`/`var` can be omitted when the type can be inferred from the initializer.
 - **Immutable by default**: `let` bindings are immutable, `var` bindings are mutable.
 - **Expression-oriented**: `if`/`else` and `while` are expressions that produce values.
-- **Value-type structs**: Structs are stack-allocated value types with stored properties, computed properties, and custom initializers.
+- **Value-type structs**: Structs are stack-allocated value types with stored properties, computed properties, custom initializers, and methods.
+- **Protocols**: Shared interfaces that structs can conform to, enabling compile-time checked structural contracts.
 
 ## Lexical Grammar
 
@@ -30,7 +31,8 @@ letter_or_underscore = "a".."z" | "A".."Z" | "_" ;
 keyword = "func" | "let" | "var" | "return" | "yield"
         | "true" | "false" | "if" | "else" | "while"
         | "break" | "continue" | "as" | "nobreak"
-        | "struct" | "init" | "self" | "get" | "set" ;
+        | "struct" | "init" | "self" | "get" | "set"
+        | "protocol" ;
 
 (* Arithmetic operators *)
 additive_op       = "+" | "-" ;
@@ -67,7 +69,7 @@ whitespace = " " | "\t" | "\n" | "\r" ;
 
 ```ebnf
 program    = { top_level } ;
-top_level  = function | struct_def ;
+top_level  = function | struct_def | protocol_def ;
 
 function   = "func" , identifier , param_list , [ "->" , type ] , block ;
            (* return type defaults to () if omitted *)
@@ -113,10 +115,13 @@ factor           = integer_literal
                  | while_expr
                  ;
 
-(* Postfix operators: field access binds tighter than all binary operators *)
-postfix    = factor , { "." , identifier } ;
-           (* field access chains: a.b.c → (a.b).c — left-associative *)
+(* Postfix operators: field/method access binds tighter than all binary operators *)
+postfix    = factor , { "." , identifier , [ "(" , [ arg_list ] , ")" ] } ;
+           (* field access: a.b.c → (a.b).c — left-associative *)
+           (* method call: obj.method(args) — identifier followed by parenthesized arguments *)
            (* postfix replaces factor in the precedence chain: unary uses postfix *)
+
+arg_list   = expression , { "," , expression } ;
 
 labeled_args = labeled_arg , { "," , labeled_arg } ;
 labeled_arg  = identifier , ":" , expression ;
@@ -125,9 +130,11 @@ if_expr    = "if" , expression , block , [ "else" , block ] ;
 while_expr = "while" , expression , block , [ "nobreak" , block ] ;
 
 (* Struct definitions *)
-struct_def = "struct" , identifier , "{" , { struct_member } , "}" ;
+struct_def = "struct" , identifier , [ ":" , identifier_list ] , "{" , { struct_member } , "}" ;
 
-struct_member = stored_property | computed_property | initializer ;
+identifier_list = identifier , { "," , identifier } ;
+
+struct_member = stored_property | computed_property | initializer | method ;
 
 stored_property   = "var" , identifier , ":" , type , ";" ;
 
@@ -137,6 +144,17 @@ getter            = "get" , block ;
 setter            = "set" , block ;
 
 initializer       = "init" , param_list , block ;
+
+method            = "func" , identifier , param_list , [ "->" , type ] , block ;
+
+(* Protocol definitions *)
+protocol_def = "protocol" , identifier , "{" , { protocol_member } , "}" ;
+
+protocol_member = method_sig | property_req ;
+
+method_sig    = "func" , identifier , param_list , [ "->" , type ] , ";" ;
+
+property_req  = "var" , identifier , ":" , type , "{" , "get" , [ "set" ] , "}" , ";" ;
 ```
 
 ## Operator Precedence and Associativity
@@ -151,7 +169,7 @@ initializer       = "init" , param_list , block ;
 | 6 | `*` `/` | Left |
 | 7 | `as` (postfix cast) | Left |
 | 8 | `!` (prefix) | Right |
-| 9 (highest) | `.` (field access) | Left |
+| 9 (highest) | `.` (field access / method call) | Left |
 
 ## Type System
 
@@ -262,10 +280,34 @@ The type of a `while` expression is determined by its `break` statements:
 - Nested field assignment (e.g., `o.inner.x = 10;`) is supported.
 - Nested field assignment on `self` during init (e.g., `self.inner.x = 10;`) is rejected because `self` is not fully materialized during initialization.
 
+#### Methods
+- Declared with `func name(params) -> ReturnType { ... }` inside a struct body.
+- Methods receive an implicit `self` parameter referring to the struct instance.
+- `self` is immutable inside method bodies (like getter context).
+- Method calls use dot syntax: `obj.method(args)`.
+- Methods are mangled to `StructName_methodName` to avoid name collisions with top-level functions.
+- A struct may have any number of methods.
+
 #### `self`
-- Can only be used inside an initializer, getter, or setter body.
-- `self` is mutable in initializer and setter contexts, immutable in getter context.
+- Can only be used inside an initializer, getter, setter, or method body.
+- `self` is mutable in initializer and setter contexts, immutable in getter and method contexts.
 - During init body, `self` is not materialized as a struct value; fields are accessed as individual variables. Bare `self` usage (e.g., `let s = self;`) and computed property access on `self` are not allowed in init bodies.
+
+### Protocols
+
+#### Definition
+- Protocols are declared at the top level with `protocol Name { ... }`.
+- A protocol body contains method signatures and property requirements.
+- Method signatures have no body: `func name(params) -> ReturnType;`.
+- Property requirements specify getter/setter availability: `var name: Type { get set };`.
+- Protocol names must be unique across all top-level definitions.
+
+#### Conformance
+- A struct declares conformance with a colon after its name: `struct Point: Summable { ... }`.
+- A struct may conform to multiple protocols: `struct Point: Summable, Printable { ... }`.
+- The compiler verifies that the struct provides all required methods and properties.
+- Method signatures must match exactly (name, parameter types, return type).
+- Conformance is checked at compile time (static dispatch, no vtable).
 
 ### Operators
 - Arithmetic (`+`, `-`, `*`, `/`): both operands must be the same numeric type. Result is that type.
@@ -285,6 +327,75 @@ The type of a `while` expression is determined by its `break` statements:
 
 - **Constant folding**: Compile-time evaluation of arithmetic and comparison on literal operands (e.g., `2 + 3` → `5`).
 
+## Examples
+
+### Struct with methods
+
+```bengal
+struct Counter {
+    var value: Int32;
+
+    func get() -> Int32 {
+        return self.value;
+    }
+
+    func addedTo(other: Int32) -> Int32 {
+        return self.value + other;
+    }
+}
+
+func main() -> Int32 {
+    let c = Counter(value: 10);
+    return c.addedTo(c.get());
+}
+```
+
+### Protocol definition and conformance
+
+```bengal
+protocol Summable {
+    func sum() -> Int32;
+}
+
+struct Point: Summable {
+    var x: Int32;
+    var y: Int32;
+
+    func sum() -> Int32 {
+        return self.x + self.y;
+    }
+}
+
+func main() -> Int32 {
+    let p = Point(x: 3, y: 4);
+    return p.sum();
+}
+```
+
+### Multiple protocol conformance
+
+```bengal
+protocol HasArea {
+    func area() -> Int32;
+}
+
+protocol HasPerimeter {
+    func perimeter() -> Int32;
+}
+
+struct Square: HasArea, HasPerimeter {
+    var side: Int32;
+
+    func area() -> Int32 {
+        return self.side * self.side;
+    }
+
+    func perimeter() -> Int32 {
+        return self.side * 4;
+    }
+}
+```
+
 ## Features Not Yet Supported
 
 - **Unary minus**: `-x` negation
@@ -292,5 +403,7 @@ The type of a `while` expression is determined by its `break` statements:
 - **Arrays**: array data type
 - **Closures/first-class functions**
 - **Integer literal suffixes**: `42i64` (use `42 as Int64` instead)
-- **Methods**: functions defined on struct types
-- **Protocols/traits**: shared interfaces across struct types
+- **Existential types**: using a protocol as a variable/argument type (`var x: Summable = ...`)
+- **Extension conformance**: `extension Point: Drawable { ... }` for retroactive conformance
+- **Default implementations in protocols**
+- **Protocol inheritance**: `protocol A: B { ... }`
