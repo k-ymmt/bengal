@@ -24,7 +24,7 @@ entry = "src/main.bengal"
 - `name`: Package identifier used in module paths and name mangling.
 - `entry`: Path to the root module file (relative to `Bengal.toml`).
 
-When no `Bengal.toml` exists, the compiler operates in single-file mode for backward compatibility.
+The compiler locates `Bengal.toml` by searching upward from the input file's directory. When no `Bengal.toml` is found, the compiler operates in single-file mode for backward compatibility.
 
 ### Module Tree
 
@@ -73,7 +73,7 @@ Five levels of access control, inspired by Swift.
 
 ### Applicable Targets
 
-- Top-level declarations: `func`, `struct`, `protocol`, `module`
+- Top-level declarations: `func`, `struct`, `protocol`, `module` (visibility on `module` controls whether other modules can import from it; e.g., `private module foo;` makes `foo` only accessible within the declaring module's file)
 - Struct members: stored properties, computed properties, methods, `init`
 
 ## Import Syntax and Path Resolution
@@ -114,9 +114,10 @@ public import self::internal::Vector;    // re-export
     Recursively follow `module` declarations from entry
     Detect cycles (must be a DAG)
          |
-[3] Parallel Lex + Parse (per module)
+[3] Lex + Parse (per module)
     Tokenize and parse each file independently
     Result: HashMap<ModulePath, ModuleAST>
+    (Parallelization is an optional future optimization)
          |
 [4] Unified Semantic Analysis
     Pass 1a: Register all top-level names with module paths
@@ -137,15 +138,28 @@ public import self::internal::Vector;    // re-export
 
 ## Name Mangling
 
-- Functions: `_bg_<package>_<module_path>_<name>` (e.g., `_bg_my_app_math_add`)
-- Struct methods: `_bg_<package>_<module_path>_<StructName>_<method>`
-- `main` is not mangled (linker entry point)
+Uses length-prefixed segments to avoid ambiguity when identifiers contain underscores.
+
+**Format:** `_BG` followed by length-prefixed segments: `<len><segment>` for each of package, module path components, type name (if method), and function name.
+
+**Examples:**
+
+- `my_app::math::add` → `_BG6my_app4math3add`
+- `my_app::math::Vector::length` → `_BG6my_app4math6Vector6length`
+- `my_app::foo_bar::add` → `_BG6my_app7foo_bar3add` (no ambiguity with `foo::bar_add`)
+
+**Special cases:**
+
+- The entry module's `main` function is not mangled (serves as the linker entry point).
+- Non-entry modules may define a function named `main`; it will be mangled normally and is callable as a regular function.
 
 ## Grammar Changes
 
 ### New Keywords
 
-`module`, `import`, `public`, `package`, `internal`, `fileprivate`, `private`, `self`, `super`
+`module`, `import`, `public`, `package`, `internal`, `fileprivate`, `private`, `super`
+
+Note: `self` is already a keyword (`Token::SelfKw`) used for struct self-reference (`self.field`). In the module system, `self` also serves as a path prefix (`self::sub::helper`). The parser disambiguates by lookahead: `self` followed by `::` is a module path prefix; otherwise it is a struct self-reference expression.
 
 ### Grammar Rules (EBNF)
 
