@@ -48,6 +48,12 @@ struct Point {
 }
 ```
 
+### Top-level grammar update
+
+```ebnf
+top_level = function | struct_def | protocol_def ;
+```
+
 ### Protocol definition
 
 ```ebnf
@@ -101,7 +107,7 @@ struct Point: Summable {
 ### Struct methods
 
 - **Pass 1a**: Register struct names (unchanged)
-- **Pass 1b**: Register method signatures in `StructInfo` as `MethodInfo { name, params: Vec<(String, Type)>, return_type: Type }`
+- **Pass 1b**: Register method signatures in `StructInfo` as `MethodInfo { name, params: Vec<(String, Type)>, return_type: Type }`. `params` excludes `self` — `self` is added implicitly during BIR flattening.
 - **Pass 3**: Analyze method bodies with `self_context` set. `self` is immutable.
 
 **Method call resolution:**
@@ -158,7 +164,7 @@ No representation. Protocol is purely a semantic-level construct:
 
 ### Name mangling
 
-`{StructName}_{methodName}` — simple and collision-resistant. Struct names conventionally start with uppercase, so conflicts with user-defined functions are unlikely. Can be revised later if needed.
+`{StructName}_{methodName}` — simple and collision-resistant. Struct names conventionally start with uppercase, so conflicts with user-defined functions are unlikely. Semantic analysis rejects top-level functions whose names match a mangled method name. Can be revised later if needed.
 
 ---
 
