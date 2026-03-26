@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{BengalError, Result};
 use crate::parser::ast::Program;
@@ -43,7 +43,7 @@ pub fn load_package(root: &Path) -> Result<PackageConfig> {
     parse_package_config(&content)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModulePath(pub Vec<String>);
 
 impl ModulePath {

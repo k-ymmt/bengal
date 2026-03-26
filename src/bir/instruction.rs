@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Value(pub u32);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BirType {
     Unit,
     I32,
@@ -32,7 +34,7 @@ impl BirType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BirBinOp {
     Add,
     Sub,
@@ -40,7 +42,7 @@ pub enum BirBinOp {
     Div,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BirCompareOp {
     Eq,
     Ne,
@@ -50,7 +52,7 @@ pub enum BirCompareOp {
     Ge,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Instruction {
     /// %result = literal <value> : <type>
     Literal {
@@ -140,7 +142,7 @@ pub enum Instruction {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Terminator {
     /// return %value
     Return(Value),
@@ -171,7 +173,7 @@ pub enum Terminator {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BasicBlock {
     pub label: u32,
     pub params: Vec<(Value, BirType)>,
@@ -179,7 +181,7 @@ pub struct BasicBlock {
     pub terminator: Terminator,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CfgRegion {
     /// Single basic block — emit instructions + terminator
     Block(u32),
@@ -212,7 +214,7 @@ pub enum CfgRegion {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BirFunction {
     pub name: String,
     pub type_params: Vec<String>,
@@ -222,11 +224,38 @@ pub struct BirFunction {
     pub body: Vec<CfgRegion>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BirModule {
     pub struct_layouts: HashMap<String, Vec<(String, BirType)>>,
     /// Type parameter names for each generic struct (e.g., "Box" -> ["T"]).
     pub struct_type_params: HashMap<String, Vec<String>>,
     pub functions: Vec<BirFunction>,
+    #[serde(with = "conformance_map_serde")]
     pub conformance_map: HashMap<(String, BirType), String>,
+}
+
+mod conformance_map_serde {
+    use super::*;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(
+        map: &HashMap<(String, BirType), String>,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let entries: Vec<_> = map.iter().map(|(k, v)| (k, v)).collect();
+        entries.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> std::result::Result<HashMap<(String, BirType), String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let entries: Vec<((String, BirType), String)> = Vec::deserialize(deserializer)?;
+        Ok(entries.into_iter().collect())
+    }
 }
