@@ -24,6 +24,7 @@ struct LoopContext {
 struct SemInfoRef {
     struct_defs: HashMap<String, resolver::StructInfo>,
     struct_init_calls: HashSet<NodeId>,
+    protocols: HashMap<String, resolver::ProtocolInfo>,
 }
 
 struct ReceiverInfo {
@@ -64,6 +65,8 @@ struct Lowering {
     // When inlining a getter, redirect `return expr` to this continuation block
     // instead of emitting Terminator::Return.  The block has one param for the value.
     getter_return_bb: Option<(u32, Value, BirType)>,
+    // Current function's type params (for protocol constraint lookup)
+    current_type_params: Vec<TypeParam>,
 }
 
 impl Lowering {
@@ -89,6 +92,7 @@ impl Lowering {
             name_map: None,
             last_expr_diverged: false,
             getter_return_bb: None,
+            current_type_params: Vec::new(),
         }
     }
 
@@ -556,6 +560,7 @@ impl Lowering {
         self.pending_regions.clear();
         self.mutable_vars.clear();
         self.value_types.clear();
+        self.current_type_params = func.type_params.clone();
 
         let bb0 = self.fresh_block();
         self.start_block(bb0, vec![]);
@@ -1149,12 +1154,48 @@ impl Lowering {
                 let obj_val = self.lower_expr(object);
                 let struct_name = match self.value_types.get(&obj_val) {
                     Some(BirType::Struct { name: n, .. }) => n.clone(),
-                    Some(BirType::TypeParam(_type_param_name)) => {
+                    Some(BirType::TypeParam(type_param_name)) => {
                         // Protocol method call on constrained type parameter.
-                        // Completed in Phase 5 when SemanticInfo has protocol data.
-                        todo!(
-                            "TypeParam method call lowering requires protocol info in SemanticInfo"
-                        )
+                        // Look up the type param's protocol constraint, then emit
+                        // a Call to "{Protocol}_{method}" with type_args.
+                        let type_param_name = type_param_name.clone();
+                        let bound = self
+                            .current_type_params
+                            .iter()
+                            .find(|tp| tp.name == type_param_name)
+                            .and_then(|tp| tp.bound.clone());
+                        let proto_name = match bound {
+                            Some(b) => b,
+                            None => {
+                                return self.record_error(format!(
+                                    "type parameter `{}` has no protocol constraint for method `{}`",
+                                    type_param_name, method
+                                ));
+                            }
+                        };
+                        // Look up the protocol's method signature for the return type
+                        let ret_ty = self
+                            .sem_info
+                            .as_ref()
+                            .and_then(|si| si.protocols.get(&proto_name))
+                            .and_then(|pi| pi.methods.iter().find(|m| m.name == *method))
+                            .map(|m| semantic_type_to_bir(&m.return_type))
+                            .unwrap_or(BirType::Unit);
+                        let func_name = format!("{}_{}", proto_name, method);
+                        let mut call_args = vec![obj_val];
+                        for arg in args {
+                            call_args.push(self.lower_expr(arg));
+                        }
+                        let result = self.fresh_value();
+                        self.emit(Instruction::Call {
+                            result,
+                            func_name,
+                            args: call_args,
+                            type_args: vec![BirType::TypeParam(type_param_name)],
+                            ty: ret_ty.clone(),
+                        });
+                        self.value_types.insert(result, ret_ty);
+                        return result;
                     }
                     _ => return self.record_error("method call on non-struct value"),
                 };
@@ -1919,6 +1960,7 @@ pub fn lower_program(
     let sem_info_ref = SemInfoRef {
         struct_defs: sem_info.struct_defs.clone(),
         struct_init_calls: sem_info.struct_init_calls.clone(),
+        protocols: sem_info.protocols.clone(),
     };
     let mut lowering = Lowering::new(HashMap::new(), sem_info_ref);
 
@@ -1983,10 +2025,27 @@ pub fn lower_program(
         return Err(err);
     }
 
+    // Build conformance_map: (protocol_method, concrete_type) -> impl_name
+    let mut conformance_map: HashMap<(String, BirType), String> = HashMap::new();
+    for struct_def in &program.structs {
+        for proto_name in &struct_def.conformances {
+            if let Some(proto_info) = sem_info.protocols.get(proto_name) {
+                for method in &proto_info.methods {
+                    let key = (
+                        format!("{}_{}", proto_name, method.name),
+                        BirType::struct_simple(struct_def.name.clone()),
+                    );
+                    let impl_name = format!("{}_{}", struct_def.name, method.name);
+                    conformance_map.insert(key, impl_name);
+                }
+            }
+        }
+    }
+
     Ok(BirModule {
         struct_layouts,
         functions,
-        conformance_map: HashMap::new(),
+        conformance_map,
     })
 }
 
@@ -2034,6 +2093,7 @@ pub fn lower_module(
     let sem_info_ref = SemInfoRef {
         struct_defs: sem_info.struct_defs.clone(),
         struct_init_calls: sem_info.struct_init_calls.clone(),
+        protocols: sem_info.protocols.clone(),
     };
     let mut lowering = Lowering::new(HashMap::new(), sem_info_ref);
     lowering.name_map = Some(name_map.clone());
@@ -2108,10 +2168,27 @@ pub fn lower_module(
         return Err(err);
     }
 
+    // Build conformance_map: (protocol_method, concrete_type) -> impl_name
+    let mut conformance_map: HashMap<(String, BirType), String> = HashMap::new();
+    for struct_def in &program.structs {
+        for proto_name in &struct_def.conformances {
+            if let Some(proto_info) = sem_info.protocols.get(proto_name) {
+                for method in &proto_info.methods {
+                    let key = (
+                        format!("{}_{}", proto_name, method.name),
+                        BirType::struct_simple(struct_def.name.clone()),
+                    );
+                    let impl_name = format!("{}_{}", struct_def.name, method.name);
+                    conformance_map.insert(key, impl_name);
+                }
+            }
+        }
+    }
+
     Ok(BirModule {
         struct_layouts,
         functions,
-        conformance_map: HashMap::new(),
+        conformance_map,
     })
 }
 
