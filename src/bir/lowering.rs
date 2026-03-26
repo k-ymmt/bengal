@@ -595,7 +595,7 @@ impl Lowering {
 
         BirFunction {
             name: self.resolve_name(&func.name),
-            type_params: vec![],
+            type_params: func.type_params.iter().map(|tp| tp.name.clone()).collect(),
             params,
             return_type: self.convert_type_with_structs(&func.return_type),
             blocks,
