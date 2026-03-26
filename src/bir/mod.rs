@@ -1,5 +1,6 @@
 pub mod instruction;
 pub mod lowering;
+pub mod mono;
 pub mod optimize;
 pub mod printer;
 
