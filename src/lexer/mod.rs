@@ -233,6 +233,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn float_literal() {
         assert_eq!(token_nodes("3.14"), vec![Token::Float(3.14), Token::Eof]);
         assert_eq!(token_nodes("42.0"), vec![Token::Float(42.0), Token::Eof]);
@@ -312,6 +313,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn dot_does_not_conflict_with_float() {
         // 3.14 は Float、f.x は Ident.Ident
         assert_eq!(token_nodes("3.14"), vec![Token::Float(3.14), Token::Eof]);

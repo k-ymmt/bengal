@@ -1375,7 +1375,7 @@ mod tests {
             } => ExprKind::If {
                 condition: Box::new(normalize_expr(condition)),
                 then_block: normalize_block(then_block),
-                else_block: else_block.as_ref().map(|b| normalize_block(b)),
+                else_block: else_block.as_ref().map(normalize_block),
             },
             ExprKind::While {
                 condition,
@@ -1384,7 +1384,7 @@ mod tests {
             } => ExprKind::While {
                 condition: Box::new(normalize_expr(condition)),
                 body: normalize_block(body),
-                nobreak: nobreak.as_ref().map(|b| normalize_block(b)),
+                nobreak: nobreak.as_ref().map(normalize_block),
             },
             ExprKind::Cast { expr, target_type } => ExprKind::Cast {
                 expr: Box::new(normalize_expr(expr)),
@@ -1916,6 +1916,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn parse_float_literal() {
         let expr = parse_expr_str("3.14");
         assert_eq!(expr, e(ExprKind::Float(3.14)));
