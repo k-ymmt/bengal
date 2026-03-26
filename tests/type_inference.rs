@@ -410,14 +410,17 @@ fn field_assign_on_generic_struct() {
 // Error cases
 
 #[test]
-#[should_panic(expected = "unresolved type variable")]
 fn error_unresolvable_type() {
     // When T cannot be inferred at all (no args, no expected type), the compiler
-    // currently panics during type_to_annotation. This test documents that
-    // behavior; a future improvement should surface a clean diagnostic instead.
-    compile_should_fail(
+    // surfaces a clean diagnostic.
+    let result = compile_should_fail(
         "func default_value<T>() -> T { return 0; }
          func main() -> Int32 { let x = default_value(); return 0; }",
+    );
+    assert!(
+        result.contains("cannot infer") || result.contains("type"),
+        "Expected type inference error, got: {}",
+        result
     );
 }
 

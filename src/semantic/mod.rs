@@ -1063,6 +1063,8 @@ pub fn analyze_pre_mono(program: &Program) -> Result<infer::InferredTypeArgs> {
     // parameters that would cause spurious errors; they will be checked in
     // analyze_post_mono after monomorphization.
 
+    let mut all_errors: Vec<BengalError> = Vec::new();
+
     for func in &program.functions {
         // Skip generic functions — they will be monomorphized first
         if !func.type_params.is_empty() {
@@ -1072,15 +1074,30 @@ pub fn analyze_pre_mono(program: &Program) -> Result<infer::InferredTypeArgs> {
         // Body analysis is best-effort: if a function references symbols that
         // are not yet available (e.g. cross-module imports), we skip it and let
         // analyze_post_mono handle the full type checking later.
-        if analyze_function(func, &mut resolver, Some(&mut ctx)).is_ok() {
-            let _ = ctx.apply_defaults();
-            ctx.record_inferred_type_args(&mut inferred);
+        match analyze_function(func, &mut resolver, Some(&mut ctx)) {
+            Ok(()) => {
+                let default_errors = ctx.apply_defaults();
+                if default_errors.is_empty() {
+                    ctx.record_inferred_type_args(&mut inferred);
+                } else {
+                    all_errors.extend(default_errors);
+                }
+            }
+            Err(_) => {
+                // Skip: symbol may not yet be available (e.g. cross-module import).
+                // analyze_post_mono will catch genuine errors after monomorphization.
+            }
         }
         ctx.reset();
     }
 
-    // --- Stage 2: validate protocol constraints on inferred type args ---
-    validate_inferred_constraints(&inferred, program)?;
+    if let Err(e) = validate_inferred_constraints(&inferred, program) {
+        all_errors.push(e);
+    }
+
+    if !all_errors.is_empty() {
+        return Err(all_errors.remove(0));
+    }
 
     Ok(inferred)
 }
@@ -2275,8 +2292,18 @@ fn analyze_expr(
             } else if !sig.type_params.is_empty() {
                 if let Some(ref mut c) = ctx {
                     // Inference mode: create InferVars for each type param
-                    let var_ids: Vec<InferVarId> =
-                        sig.type_params.iter().map(|_| c.fresh_var()).collect();
+                    let var_ids: Vec<InferVarId> = sig
+                        .type_params
+                        .iter()
+                        .map(|tp| {
+                            c.fresh_var_with_provenance(infer::VarProvenance {
+                                type_param_name: tp.name.clone(),
+                                def_name: name.clone(),
+                                arg_name: None,
+                                span: expr.span,
+                            })
+                        })
+                        .collect();
                     c.register_call_site(
                         expr.id,
                         var_ids.clone(),
@@ -2295,10 +2322,24 @@ fn analyze_expr(
                 HashMap::new()
             };
 
-            for (arg, (_param_name, expected_ty)) in args.iter().zip(sig.params.iter()) {
+            for (arg, (param_name, expected_ty)) in args.iter().zip(sig.params.iter()) {
                 let arg_ty = analyze_expr(arg, resolver, ctx.as_deref_mut())?;
                 let effective_ty = substitute_type(expected_ty, &subst);
                 if let Some(ref mut c) = ctx {
+                    if let Type::InferVar(id) = &effective_ty {
+                        c.update_arg_name(*id, param_name.clone());
+                    }
+                    if let Type::IntegerLiteral(id) | Type::FloatLiteral(id) = &arg_ty {
+                        c.set_provenance(
+                            *id,
+                            infer::VarProvenance {
+                                type_param_name: String::new(),
+                                def_name: name.clone(),
+                                arg_name: Some(param_name.clone()),
+                                span: arg.span,
+                            },
+                        );
+                    }
                     // In inference mode, unify arg type with expected parameter type
                     c.unify(arg_ty.clone(), effective_ty)?;
                 } else if !types_compatible(&arg_ty, &effective_ty) {
@@ -2446,7 +2487,14 @@ fn analyze_expr(
                     let var_ids: Vec<InferVarId> = struct_info
                         .type_params
                         .iter()
-                        .map(|_| c.fresh_var())
+                        .map(|tp| {
+                            c.fresh_var_with_provenance(infer::VarProvenance {
+                                type_param_name: tp.name.clone(),
+                                def_name: name.clone(),
+                                arg_name: None,
+                                span: expr.span,
+                            })
+                        })
                         .collect();
                     c.register_call_site(
                         expr.id,
@@ -2477,6 +2525,20 @@ fn analyze_expr(
                 let arg_ty = analyze_expr(arg_expr, resolver, ctx.as_deref_mut())?;
                 let effective_ty = substitute_type(param_ty, &subst);
                 if let Some(ref mut c) = ctx {
+                    if let Type::InferVar(id) = &effective_ty {
+                        c.update_arg_name(*id, param_name.clone());
+                    }
+                    if let Type::IntegerLiteral(id) | Type::FloatLiteral(id) = &arg_ty {
+                        c.set_provenance(
+                            *id,
+                            infer::VarProvenance {
+                                type_param_name: String::new(),
+                                def_name: name.clone(),
+                                arg_name: Some(param_name.clone()),
+                                span: arg_expr.span,
+                            },
+                        );
+                    }
                     c.unify(arg_ty.clone(), effective_ty)?;
                 } else if !types_compatible(&arg_ty, &effective_ty) {
                     return Err(sem_err(format!(
