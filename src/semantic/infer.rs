@@ -164,14 +164,27 @@ impl InferenceContext {
         }
     }
 
-    /// Copy provenance from `from` to `to` if `to` currently has none.
+    /// Copy provenance from `from` to `to`:
+    /// - If `to` has no provenance, copies fully.
+    /// - If `to` already has provenance but an empty `type_param_name`, copies the
+    ///   `type_param_name` and `def_name` from `from` so errors can name the parameter.
     pub fn propagate_provenance(&mut self, from: InferVarId, to: InferVarId) {
         let from_root = self.find(from);
         let to_root = self.find(to);
-        if self.var_provenance[to_root as usize].is_none()
-            && let Some(prov) = self.var_provenance[from_root as usize].clone()
-        {
-            self.var_provenance[to_root as usize] = Some(prov);
+        if from_root == to_root {
+            return;
+        }
+        let from_prov = self.var_provenance[from_root as usize].clone();
+        let Some(from_prov) = from_prov else { return };
+        match self.var_provenance[to_root as usize].as_mut() {
+            None => {
+                self.var_provenance[to_root as usize] = Some(from_prov);
+            }
+            Some(to_prov) if to_prov.type_param_name.is_empty() => {
+                to_prov.type_param_name = from_prov.type_param_name;
+                to_prov.def_name = from_prov.def_name;
+            }
+            _ => {}
         }
     }
 
@@ -385,8 +398,46 @@ impl InferenceContext {
 
             // InferVar binds to anything
             (Type::InferVar(a), other) | (other, Type::InferVar(a)) => {
+                match &other {
+                    Type::IntegerLiteral(lit_id) => {
+                        self.propagate_provenance(a, *lit_id);
+                    }
+                    Type::FloatLiteral(lit_id) => {
+                        self.propagate_provenance(a, *lit_id);
+                    }
+                    _ => {}
+                }
                 self.set_resolved(a, other);
                 Ok(())
+            }
+
+            // IntegerLiteral vs FloatLiteral — conflicting literal types
+            (Type::IntegerLiteral(id1), Type::FloatLiteral(id2))
+            | (Type::FloatLiteral(id2), Type::IntegerLiteral(id1)) => {
+                let root1 = self.find(id1);
+                let root2 = self.find(id2);
+                let prov1 = self.var_provenance.get(root1 as usize).cloned().flatten();
+                let prov2 = self.var_provenance.get(root2 as usize).cloned().flatten();
+                if let (Some(p1), Some(p2)) = (&prov1, &prov2) {
+                    let tp_prov = if !p1.type_param_name.is_empty() {
+                        p1
+                    } else {
+                        p2
+                    };
+                    Err(BengalError::SemanticError {
+                        message: format!(
+                            "type parameter '{}' in function '{}' has conflicting constraints: \
+                             integer literal (from argument '{}') vs float literal (from argument '{}')",
+                            tp_prov.type_param_name,
+                            tp_prov.def_name,
+                            p1.arg_name.as_deref().unwrap_or("?"),
+                            p2.arg_name.as_deref().unwrap_or("?"),
+                        ),
+                        span: tp_prov.span,
+                    })
+                } else {
+                    Err(unify_err("cannot unify integer literal with float literal"))
+                }
             }
 
             // IntegerLiteral with integer concrete types
@@ -400,6 +451,7 @@ impl InferenceContext {
 
             // IntegerLiteral with IntegerLiteral
             (Type::IntegerLiteral(a), Type::IntegerLiteral(b)) => {
+                self.propagate_provenance(a, b);
                 self.link(a, b);
                 Ok(())
             }
@@ -415,6 +467,7 @@ impl InferenceContext {
 
             // FloatLiteral with FloatLiteral
             (Type::FloatLiteral(a), Type::FloatLiteral(b)) => {
+                self.propagate_provenance(a, b);
                 self.link(a, b);
                 Ok(())
             }
@@ -992,5 +1045,52 @@ mod tests {
         ctx.fresh_integer();
         let errors = ctx.apply_defaults();
         assert!(errors.is_empty());
+    }
+
+    // --- Task 5: provenance propagation in unify() ---
+
+    #[test]
+    fn unify_integer_float_literal_error_with_provenance() {
+        let mut ctx = InferenceContext::new();
+        let t_var = ctx.fresh_var_with_provenance(VarProvenance {
+            type_param_name: "T".into(),
+            def_name: "choose".into(),
+            arg_name: None,
+            span: Span { start: 0, end: 10 },
+        });
+        let int_var = ctx.fresh_integer();
+        ctx.set_provenance(
+            int_var,
+            VarProvenance {
+                type_param_name: String::new(),
+                def_name: "choose".into(),
+                arg_name: Some("a".into()),
+                span: Span { start: 0, end: 10 },
+            },
+        );
+        let float_var = ctx.fresh_float();
+        ctx.set_provenance(
+            float_var,
+            VarProvenance {
+                type_param_name: String::new(),
+                def_name: "choose".into(),
+                arg_name: Some("b".into()),
+                span: Span { start: 0, end: 10 },
+            },
+        );
+        assert!(
+            ctx.unify(Type::IntegerLiteral(int_var), Type::InferVar(t_var))
+                .is_ok()
+        );
+        let result = ctx.unify(Type::FloatLiteral(float_var), Type::InferVar(t_var));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("conflicting constraints"), "got: {}", msg);
+        assert!(
+            msg.contains("'T'"),
+            "expected type param name, got: {}",
+            msg
+        );
+        assert!(msg.contains("'choose'"), "expected func name, got: {}", msg);
     }
 }
