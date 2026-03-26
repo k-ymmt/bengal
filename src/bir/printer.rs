@@ -8,10 +8,11 @@ fn format_type(ty: &BirType) -> String {
         BirType::F32 => "Float32".to_string(),
         BirType::F64 => "Float64".to_string(),
         BirType::Bool => "Bool".to_string(),
-        BirType::Struct(name) => name.clone(),
+        BirType::Struct { name, .. } => name.clone(),
         BirType::Array { element, size } => {
             format!("[{}; {}]", format_type(element), size)
         }
+        BirType::TypeParam(name) => name.clone(),
     }
 }
 
@@ -398,7 +399,10 @@ bb0:
 
     #[test]
     fn format_type_struct() {
-        assert_eq!(format_type(&BirType::Struct("Foo".to_string())), "Foo");
+        assert_eq!(
+            format_type(&BirType::struct_simple("Foo".to_string())),
+            "Foo"
+        );
     }
 
     #[test]
@@ -435,13 +439,13 @@ bb0:
                             result: Value(2),
                             struct_name: "Point".to_string(),
                             fields: vec![("x".to_string(), Value(0)), ("y".to_string(), Value(1))],
-                            ty: BirType::Struct("Point".to_string()),
+                            ty: BirType::struct_simple("Point".to_string()),
                         },
                         Instruction::FieldGet {
                             result: Value(3),
                             object: Value(2),
                             field: "x".to_string(),
-                            object_ty: BirType::Struct("Point".to_string()),
+                            object_ty: BirType::struct_simple("Point".to_string()),
                             ty: BirType::I32,
                         },
                         Instruction::FieldSet {
@@ -449,7 +453,7 @@ bb0:
                             object: Value(2),
                             field: "x".to_string(),
                             value: Value(3),
-                            ty: BirType::Struct("Point".to_string()),
+                            ty: BirType::struct_simple("Point".to_string()),
                         },
                     ],
                     terminator: Terminator::ReturnVoid,

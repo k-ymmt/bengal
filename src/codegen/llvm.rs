@@ -35,11 +35,12 @@ fn bir_type_to_llvm_type<'ctx>(
         BirType::F64 => Some(context.f64_type().into()),
         BirType::Bool => Some(context.bool_type().into()),
         BirType::Unit => None,
-        BirType::Struct(name) => Some(struct_types.get(name)?.as_basic_type_enum()),
+        BirType::Struct { name, .. } => Some(struct_types.get(name)?.as_basic_type_enum()),
         BirType::Array { element, size } => {
             let elem_ty = bir_type_to_llvm_type(context, element, struct_types)?;
             Some(elem_ty.array_type(*size as u32).into())
         }
+        BirType::TypeParam(name) => panic!("unresolved TypeParam '{name}' in codegen"),
     }
 }
 
@@ -180,8 +181,11 @@ fn emit_instruction<'ctx>(
                     .const_int(*value as u64, false)
                     .into(),
                 BirType::Unit => return Ok(()),
-                BirType::Struct(_) => return Err(codegen_err("cannot create struct literal")),
+                BirType::Struct { .. } => return Err(codegen_err("cannot create struct literal")),
                 BirType::Array { .. } => return Err(codegen_err("cannot create array literal")),
+                BirType::TypeParam(name) => {
+                    panic!("unresolved TypeParam '{name}' in codegen")
+                }
             };
             ctx.builder
                 .build_store(ctx.alloca_map[result], llvm_val)
@@ -451,7 +455,7 @@ fn emit_instruction<'ctx>(
             ..
         } => {
             let struct_name = match object_ty {
-                BirType::Struct(name) => name,
+                BirType::Struct { name, .. } => name,
                 _ => return Err(codegen_err("FieldGet on non-struct type")),
             };
             let layout = bir_module
@@ -480,7 +484,7 @@ fn emit_instruction<'ctx>(
             ty,
         } => {
             let struct_name = match ty {
-                BirType::Struct(name) => name,
+                BirType::Struct { name, .. } => name,
                 _ => return Err(codegen_err("FieldSet on non-struct type")),
             };
             let layout = bir_module

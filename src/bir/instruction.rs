@@ -3,7 +3,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Value(pub u32);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BirType {
     Unit,
     I32,
@@ -11,8 +11,25 @@ pub enum BirType {
     F32,
     F64,
     Bool,
-    Struct(String),
-    Array { element: Box<BirType>, size: u64 },
+    Struct {
+        name: String,
+        type_args: Vec<BirType>,
+    },
+    Array {
+        element: Box<BirType>,
+        size: u64,
+    },
+    TypeParam(String),
+}
+
+impl BirType {
+    /// Create a non-generic struct type (convenience for migration).
+    pub fn struct_simple(name: String) -> Self {
+        BirType::Struct {
+            name,
+            type_args: vec![],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

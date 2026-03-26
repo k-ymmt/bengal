@@ -94,7 +94,7 @@ impl Lowering {
 
     fn convert_type_with_structs(&self, ty: &TypeAnnotation) -> BirType {
         match ty {
-            TypeAnnotation::Named(name) => BirType::Struct(name.clone()),
+            TypeAnnotation::Named(name) => BirType::struct_simple(name.clone()),
             other => convert_type(other),
         }
     }
@@ -212,7 +212,7 @@ impl Lowering {
     // ========== Struct helpers ==========
 
     fn emit_struct_init(&mut self, struct_name: &str, field_values: &[(String, Value)]) -> Value {
-        let bir_ty = BirType::Struct(struct_name.to_string());
+        let bir_ty = BirType::struct_simple(struct_name.to_string());
         let result = self.fresh_value();
         self.emit(Instruction::StructInit {
             result,
@@ -229,7 +229,7 @@ impl Lowering {
             ExprKind::Ident(name) => {
                 let val = self.lookup_var(name);
                 let struct_name = match self.value_types.get(&val)? {
-                    BirType::Struct(n) => n.clone(),
+                    BirType::Struct { name: n, .. } => n.clone(),
                     _ => return None,
                 };
                 Some(ReceiverInfo {
@@ -242,7 +242,7 @@ impl Lowering {
                 let self_name = self.self_var_name.as_ref()?.clone();
                 let val = self.lookup_var(&self_name);
                 let struct_name = match self.value_types.get(&val)? {
-                    BirType::Struct(n) => n.clone(),
+                    BirType::Struct { name: n, .. } => n.clone(),
                     _ => return None,
                 };
                 Some(ReceiverInfo {
@@ -254,7 +254,7 @@ impl Lowering {
             _ => {
                 let val = self.lower_expr(object);
                 let struct_name = match self.value_types.get(&val)? {
-                    BirType::Struct(n) => n.clone(),
+                    BirType::Struct { name: n, .. } => n.clone(),
                     _ => return None,
                 };
                 let tmp_name = format!("__tmp_{}", self.next_value);
@@ -273,7 +273,7 @@ impl Lowering {
             ExprKind::Ident(name) => {
                 let val = self.try_lookup_var(name)?;
                 match self.value_types.get(&val)? {
-                    BirType::Struct(name) => Some(name.clone()),
+                    BirType::Struct { name: n, .. } => Some(n.clone()),
                     _ => None,
                 }
             }
@@ -281,7 +281,7 @@ impl Lowering {
                 let self_name = self.self_var_name.as_ref()?;
                 let val = self.try_lookup_var(self_name)?;
                 match self.value_types.get(&val)? {
-                    BirType::Struct(name) => Some(name.clone()),
+                    BirType::Struct { name: n, .. } => Some(n.clone()),
                     _ => None,
                 }
             }
@@ -292,7 +292,7 @@ impl Lowering {
                     Some(name.clone())
                 } else {
                     match self.func_sigs.get(name)? {
-                        BirType::Struct(sn) => Some(sn.clone()),
+                        BirType::Struct { name: sn, .. } => Some(sn.clone()),
                         _ => None,
                     }
                 }
@@ -496,7 +496,7 @@ impl Lowering {
                 let parent_val = self.lower_expr(parent);
                 let parent_ty = self.value_types.get(&parent_val).cloned().unwrap();
                 let parent_struct_name = match &parent_ty {
-                    BirType::Struct(name) => name.clone(),
+                    BirType::Struct { name, .. } => name.clone(),
                     _ => unreachable!(),
                 };
                 // 2. Get the inner struct field
@@ -1115,7 +1115,7 @@ impl Lowering {
                             result,
                             object: recv.value,
                             field: field.clone(),
-                            object_ty: BirType::Struct(recv.struct_name),
+                            object_ty: BirType::struct_simple(recv.struct_name),
                             ty: field_ty.clone(),
                         });
                         self.value_types.insert(result, field_ty);
@@ -1140,7 +1140,7 @@ impl Lowering {
             } => {
                 let obj_val = self.lower_expr(object);
                 let struct_name = match self.value_types.get(&obj_val) {
-                    Some(BirType::Struct(n)) => n.clone(),
+                    Some(BirType::Struct { name: n, .. }) => n.clone(),
                     _ => return self.record_error("method call on non-struct value"),
                 };
                 let local_mangled = format!("{}_{}", struct_name, method);
@@ -1793,7 +1793,7 @@ pub fn semantic_type_to_bir(ty: &crate::semantic::types::Type) -> BirType {
         crate::semantic::types::Type::F64 => BirType::F64,
         crate::semantic::types::Type::Bool => BirType::Bool,
         crate::semantic::types::Type::Unit => BirType::Unit,
-        crate::semantic::types::Type::Struct(name) => BirType::Struct(name.clone()),
+        crate::semantic::types::Type::Struct(name) => BirType::struct_simple(name.clone()),
         crate::semantic::types::Type::TypeParam { name, .. } => {
             panic!("unresolved type parameter `{}` in BIR lowering", name)
         }
@@ -1832,7 +1832,7 @@ fn check_acyclic_structs(layouts: &HashMap<String, Vec<(String, BirType)>>) -> R
         }
         if let Some(fields) = layouts.get(name) {
             for (_, ty) in fields {
-                if let BirType::Struct(dep) = ty {
+                if let BirType::Struct { name: dep, .. } = ty {
                     visit(dep, layouts, visiting, visited)?;
                 }
             }
