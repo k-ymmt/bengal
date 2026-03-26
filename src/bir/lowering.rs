@@ -1804,6 +1804,11 @@ pub fn semantic_type_to_bir(ty: &crate::semantic::types::Type) -> BirType {
             element: Box::new(semantic_type_to_bir(element)),
             size: *size,
         },
+        crate::semantic::types::Type::InferVar(_)
+        | crate::semantic::types::Type::IntegerLiteral(_)
+        | crate::semantic::types::Type::FloatLiteral(_) => {
+            unreachable!("inference type in post-mono pass")
+        }
     }
 }
 

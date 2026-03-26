@@ -14,6 +14,9 @@ pub enum Type {
     TypeParam { name: String, bound: Option<String> },
     Generic { name: String, args: Vec<Type> },
     Array { element: Box<Type>, size: u64 },
+    InferVar(u32),
+    IntegerLiteral(u32),
+    FloatLiteral(u32),
 }
 
 impl fmt::Display for Type {
@@ -38,19 +41,30 @@ impl fmt::Display for Type {
                 write!(f, ">")
             }
             Type::Array { element, size } => write!(f, "[{}; {}]", element, size),
+            Type::InferVar(id) => write!(f, "?{}", id),
+            Type::IntegerLiteral(_) => write!(f, "integer literal"),
+            Type::FloatLiteral(_) => write!(f, "float literal"),
         }
     }
 }
 
 impl Type {
     pub fn is_numeric(&self) -> bool {
-        matches!(self, Type::I32 | Type::I64 | Type::F32 | Type::F64)
+        matches!(
+            self,
+            Type::I32
+                | Type::I64
+                | Type::F32
+                | Type::F64
+                | Type::IntegerLiteral(_)
+                | Type::FloatLiteral(_)
+        )
     }
     pub fn is_integer(&self) -> bool {
-        matches!(self, Type::I32 | Type::I64)
+        matches!(self, Type::I32 | Type::I64 | Type::IntegerLiteral(_))
     }
     pub fn is_float(&self) -> bool {
-        matches!(self, Type::F32 | Type::F64)
+        matches!(self, Type::F32 | Type::F64 | Type::FloatLiteral(_))
     }
 }
 

@@ -1,3 +1,4 @@
+pub mod infer;
 pub mod resolver;
 pub mod types;
 
