@@ -525,7 +525,7 @@ fn analyze_single_module(
     let mut infer_ctx = InferenceContext::new();
     for struct_def in &program.structs {
         analyze_struct_members(struct_def, resolver, &mut infer_ctx)?;
-        let _ = infer_ctx.apply_defaults();
+        let _ = infer_ctx.apply_defaults(); // best-effort; errors ignored here
         infer_ctx.reset();
     }
 
@@ -630,7 +630,10 @@ fn analyze_single_module(
         let mut ctx = InferenceContext::new();
         for func in &program.functions {
             analyze_function(func, resolver, Some(&mut ctx))?;
-            ctx.apply_defaults()?;
+            let errs = ctx.apply_defaults();
+            if let Some(e) = errs.into_iter().next() {
+                return Err(e);
+            }
             ctx.reset();
         }
     }
@@ -1315,7 +1318,10 @@ pub fn analyze_post_mono(program: &Program) -> Result<SemanticInfo> {
         let mut struct_ctx = InferenceContext::new();
         for struct_def in &program.structs {
             analyze_struct_members(struct_def, &mut resolver, &mut struct_ctx)?;
-            struct_ctx.apply_defaults()?;
+            let errs = struct_ctx.apply_defaults();
+            if let Some(e) = errs.into_iter().next() {
+                return Err(e);
+            }
             struct_ctx.reset();
         }
     }
@@ -1424,7 +1430,10 @@ pub fn analyze_post_mono(program: &Program) -> Result<SemanticInfo> {
         let mut ctx = InferenceContext::new();
         for func in &program.functions {
             analyze_function(func, &mut resolver, Some(&mut ctx))?;
-            ctx.apply_defaults()?;
+            let errs = ctx.apply_defaults();
+            if let Some(e) = errs.into_iter().next() {
+                return Err(e);
+            }
             ctx.reset();
         }
     }

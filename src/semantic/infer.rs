@@ -264,8 +264,10 @@ impl InferenceContext {
     /// After analyzing a function body, resolve remaining type variables to defaults:
     /// - `IntegerLiteral` -> `I32`
     /// - `FloatLiteral` -> `F64`
-    /// - `InferVar` still unbound -> error
-    pub fn apply_defaults(&mut self) -> Result<(), BengalError> {
+    /// - `InferVar` still unbound -> error (collected, not early-returned)
+    pub fn apply_defaults(&mut self) -> Vec<BengalError> {
+        let mut errors: Vec<BengalError> = Vec::new();
+
         for id in 0..self.var_states.len() {
             let id = id as InferVarId;
             let resolved = self.deep_resolve(Type::InferVar(id));
@@ -280,9 +282,21 @@ impl InferenceContext {
                             self.set_resolved(id, Type::F64);
                         }
                         VarKind::General => {
-                            return Err(unify_err(
-                                "cannot infer type; add explicit type annotation",
-                            ));
+                            let root = self.find(id);
+                            let err =
+                                if let Some(prov) = self.var_provenance[root as usize].as_ref() {
+                                    BengalError::SemanticError {
+                                        message: format!(
+                                            "cannot infer type parameter '{}' for function '{}'; \
+                                         add explicit type annotation",
+                                            prov.type_param_name, prov.def_name
+                                        ),
+                                        span: prov.span,
+                                    }
+                                } else {
+                                    unify_err("cannot infer type; add explicit type annotation")
+                                };
+                            errors.push(err);
                         }
                     }
                 }
@@ -303,7 +317,7 @@ impl InferenceContext {
             match resolved {
                 Type::I32 => {
                     if value < i32::MIN as i64 || value > i32::MAX as i64 {
-                        return Err(unify_err(format!(
+                        errors.push(unify_err(format!(
                             "integer literal `{}` is out of range for `Int32`",
                             value
                         )));
@@ -316,7 +330,7 @@ impl InferenceContext {
             }
         }
 
-        Ok(())
+        errors
     }
 
     /// Record that a call site needs inferred type args.
@@ -737,7 +751,7 @@ mod tests {
         let mut ctx = InferenceContext::new();
         let a = ctx.fresh_integer();
         // a is unbound, should default to I32
-        assert!(ctx.apply_defaults().is_ok());
+        assert!(ctx.apply_defaults().is_empty());
         assert_eq!(ctx.resolve(a), Type::I32);
     }
 
@@ -745,7 +759,7 @@ mod tests {
     fn apply_defaults_float_literal_to_f64() {
         let mut ctx = InferenceContext::new();
         let a = ctx.fresh_float();
-        assert!(ctx.apply_defaults().is_ok());
+        assert!(ctx.apply_defaults().is_empty());
         assert_eq!(ctx.resolve(a), Type::F64);
     }
 
@@ -754,7 +768,7 @@ mod tests {
         let mut ctx = InferenceContext::new();
         let a = ctx.fresh_integer();
         ctx.set_resolved(a, Type::I64);
-        assert!(ctx.apply_defaults().is_ok());
+        assert!(ctx.apply_defaults().is_empty());
         assert_eq!(ctx.resolve(a), Type::I64); // stays I64, not defaulted to I32
     }
 
@@ -762,7 +776,7 @@ mod tests {
     fn apply_defaults_unresolved_infer_var_error() {
         let mut ctx = InferenceContext::new();
         let _a = ctx.fresh_var();
-        assert!(ctx.apply_defaults().is_err());
+        assert!(!ctx.apply_defaults().is_empty());
     }
 
     #[test]
@@ -929,5 +943,54 @@ mod tests {
         ctx.reset();
         let id = ctx.fresh_var();
         assert!(ctx.get_provenance(id).is_none());
+    }
+
+    // --- Task 4: apply_defaults error collection tests ---
+
+    #[test]
+    fn apply_defaults_unresolved_with_provenance() {
+        let mut ctx = InferenceContext::new();
+        let _id = ctx.fresh_var_with_provenance(VarProvenance {
+            type_param_name: "T".into(),
+            def_name: "foo".into(),
+            arg_name: None,
+            span: Span { start: 10, end: 20 },
+        });
+        let errors = ctx.apply_defaults();
+        assert_eq!(errors.len(), 1);
+        let msg = errors[0].to_string();
+        assert!(
+            msg.contains("'T'"),
+            "expected type param name, got: {}",
+            msg
+        );
+        assert!(msg.contains("'foo'"), "expected func name, got: {}", msg);
+    }
+
+    #[test]
+    fn apply_defaults_multiple_errors_collected() {
+        let mut ctx = InferenceContext::new();
+        ctx.fresh_var_with_provenance(VarProvenance {
+            type_param_name: "A".into(),
+            def_name: "f".into(),
+            arg_name: None,
+            span: Span { start: 0, end: 5 },
+        });
+        ctx.fresh_var_with_provenance(VarProvenance {
+            type_param_name: "B".into(),
+            def_name: "f".into(),
+            arg_name: None,
+            span: Span { start: 0, end: 5 },
+        });
+        let errors = ctx.apply_defaults();
+        assert_eq!(errors.len(), 2);
+    }
+
+    #[test]
+    fn apply_defaults_integer_literal_returns_empty_errors() {
+        let mut ctx = InferenceContext::new();
+        ctx.fresh_integer();
+        let errors = ctx.apply_defaults();
+        assert!(errors.is_empty());
     }
 }
