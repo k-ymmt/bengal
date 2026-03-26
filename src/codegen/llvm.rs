@@ -14,6 +14,7 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue};
 
 use crate::bir::instruction::*;
+use crate::bir::mono::{Instance, MonoCollectResult, resolve_bir_type};
 use crate::error::{BengalError, Result};
 
 fn codegen_err(msg: impl Into<String>) -> BengalError {
@@ -1062,6 +1063,260 @@ pub fn link_objects(obj_files: &[std::path::PathBuf], output: &std::path::Path) 
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Type substitution helpers for monomorphization
+// ---------------------------------------------------------------------------
+
+/// Resolve all BirTypes in an instruction through the substitution map.
+fn resolve_instruction(inst: &Instruction, subst: &HashMap<String, BirType>) -> Instruction {
+    match inst {
+        Instruction::Literal { result, value, ty } => Instruction::Literal {
+            result: *result,
+            value: *value,
+            ty: resolve_bir_type(ty, subst),
+        },
+        Instruction::BinaryOp {
+            result,
+            op,
+            lhs,
+            rhs,
+            ty,
+        } => Instruction::BinaryOp {
+            result: *result,
+            op: *op,
+            lhs: *lhs,
+            rhs: *rhs,
+            ty: resolve_bir_type(ty, subst),
+        },
+        Instruction::Call {
+            result,
+            func_name,
+            args,
+            type_args,
+            ty,
+        } => {
+            let resolved_type_args: Vec<BirType> = type_args
+                .iter()
+                .map(|t| resolve_bir_type(t, subst))
+                .collect();
+            // If the call has type_args, mangle the function name.
+            let resolved_func_name = if resolved_type_args.is_empty() {
+                func_name.clone()
+            } else {
+                let inst = Instance {
+                    func_name: func_name.clone(),
+                    type_args: resolved_type_args.clone(),
+                };
+                inst.mangled_name()
+            };
+            Instruction::Call {
+                result: *result,
+                func_name: resolved_func_name,
+                args: args.clone(),
+                type_args: resolved_type_args,
+                ty: resolve_bir_type(ty, subst),
+            }
+        }
+        Instruction::Compare {
+            result,
+            op,
+            lhs,
+            rhs,
+            ty,
+        } => Instruction::Compare {
+            result: *result,
+            op: *op,
+            lhs: *lhs,
+            rhs: *rhs,
+            ty: resolve_bir_type(ty, subst),
+        },
+        Instruction::Not { result, operand } => Instruction::Not {
+            result: *result,
+            operand: *operand,
+        },
+        Instruction::Cast {
+            result,
+            operand,
+            from_ty,
+            to_ty,
+        } => Instruction::Cast {
+            result: *result,
+            operand: *operand,
+            from_ty: resolve_bir_type(from_ty, subst),
+            to_ty: resolve_bir_type(to_ty, subst),
+        },
+        Instruction::StructInit {
+            result,
+            struct_name,
+            fields,
+            type_args,
+            ty,
+        } => {
+            let resolved_type_args: Vec<BirType> = type_args
+                .iter()
+                .map(|t| resolve_bir_type(t, subst))
+                .collect();
+            Instruction::StructInit {
+                result: *result,
+                struct_name: struct_name.clone(),
+                fields: fields.clone(),
+                type_args: resolved_type_args,
+                ty: resolve_bir_type(ty, subst),
+            }
+        }
+        Instruction::FieldGet {
+            result,
+            object,
+            field,
+            object_ty,
+            ty,
+        } => Instruction::FieldGet {
+            result: *result,
+            object: *object,
+            field: field.clone(),
+            object_ty: resolve_bir_type(object_ty, subst),
+            ty: resolve_bir_type(ty, subst),
+        },
+        Instruction::FieldSet {
+            result,
+            object,
+            field,
+            value,
+            ty,
+        } => Instruction::FieldSet {
+            result: *result,
+            object: *object,
+            field: field.clone(),
+            value: *value,
+            ty: resolve_bir_type(ty, subst),
+        },
+        Instruction::ArrayInit {
+            result,
+            ty,
+            elements,
+        } => Instruction::ArrayInit {
+            result: *result,
+            ty: resolve_bir_type(ty, subst),
+            elements: elements.clone(),
+        },
+        Instruction::ArrayGet {
+            result,
+            ty,
+            array,
+            index,
+            array_size,
+        } => Instruction::ArrayGet {
+            result: *result,
+            ty: resolve_bir_type(ty, subst),
+            array: *array,
+            index: *index,
+            array_size: *array_size,
+        },
+        Instruction::ArraySet {
+            result,
+            ty,
+            array,
+            index,
+            value,
+            array_size,
+        } => Instruction::ArraySet {
+            result: *result,
+            ty: resolve_bir_type(ty, subst),
+            array: *array,
+            index: *index,
+            value: *value,
+            array_size: *array_size,
+        },
+    }
+}
+
+/// Resolve all BirTypes in a terminator through the substitution map.
+fn resolve_terminator(term: &Terminator, subst: &HashMap<String, BirType>) -> Terminator {
+    match term {
+        Terminator::Return(val) => Terminator::Return(*val),
+        Terminator::ReturnVoid => Terminator::ReturnVoid,
+        Terminator::Br { target, args } => Terminator::Br {
+            target: *target,
+            args: args
+                .iter()
+                .map(|(v, ty)| (*v, resolve_bir_type(ty, subst)))
+                .collect(),
+        },
+        Terminator::CondBr {
+            cond,
+            then_bb,
+            else_bb,
+        } => Terminator::CondBr {
+            cond: *cond,
+            then_bb: *then_bb,
+            else_bb: *else_bb,
+        },
+        Terminator::BrBreak {
+            header_bb,
+            exit_bb,
+            args,
+            value,
+        } => Terminator::BrBreak {
+            header_bb: *header_bb,
+            exit_bb: *exit_bb,
+            args: args
+                .iter()
+                .map(|(v, ty)| (*v, resolve_bir_type(ty, subst)))
+                .collect(),
+            value: value
+                .as_ref()
+                .map(|(v, ty)| (*v, resolve_bir_type(ty, subst))),
+        },
+        Terminator::BrContinue { header_bb, args } => Terminator::BrContinue {
+            header_bb: *header_bb,
+            args: args
+                .iter()
+                .map(|(v, ty)| (*v, resolve_bir_type(ty, subst)))
+                .collect(),
+        },
+    }
+}
+
+/// Resolve all BirTypes in a basic block through the substitution map.
+fn resolve_basic_block(block: &BasicBlock, subst: &HashMap<String, BirType>) -> BasicBlock {
+    BasicBlock {
+        label: block.label,
+        params: block
+            .params
+            .iter()
+            .map(|(v, ty)| (*v, resolve_bir_type(ty, subst)))
+            .collect(),
+        instructions: block
+            .instructions
+            .iter()
+            .map(|inst| resolve_instruction(inst, subst))
+            .collect(),
+        terminator: resolve_terminator(&block.terminator, subst),
+    }
+}
+
+/// Create a fully resolved (monomorphized) BirFunction from a generic function
+/// and a concrete Instance.
+fn resolve_function(generic_func: &BirFunction, instance: &Instance) -> BirFunction {
+    let subst = instance.substitution_map(&generic_func.type_params);
+    BirFunction {
+        name: instance.mangled_name(),
+        type_params: vec![],
+        params: generic_func
+            .params
+            .iter()
+            .map(|(v, ty)| (*v, resolve_bir_type(ty, &subst)))
+            .collect(),
+        return_type: resolve_bir_type(&generic_func.return_type, &subst),
+        blocks: generic_func
+            .blocks
+            .iter()
+            .map(|b| resolve_basic_block(b, &subst))
+            .collect(),
+        body: vec![],
+    }
+}
+
 /// Compile BIR module with monomorphization support.
 ///
 /// Takes a `BirModule` and `MonoCollectResult`, builds LLVM struct types for
@@ -1069,10 +1324,131 @@ pub fn link_objects(obj_files: &[std::path::PathBuf], output: &std::path::Path) 
 /// and compiles them with on-the-fly type substitution.
 pub fn compile_with_mono(
     bir_module: &BirModule,
-    mono_result: &crate::bir::mono::MonoCollectResult,
+    mono_result: &MonoCollectResult,
 ) -> Result<Vec<u8>> {
-    let _ = mono_result;
-    compile(bir_module)
+    let context = Context::create();
+    let module = context.create_module("bengal");
+    let builder = context.create_builder();
+
+    Target::initialize_native(&InitializationConfig {
+        asm_printer: true,
+        ..Default::default()
+    })
+    .map_err(|e| codegen_err(e.to_string()))?;
+
+    let triple = TargetMachine::get_default_triple();
+    let target = Target::from_triple(&triple).map_err(|e| codegen_err(e.to_string()))?;
+    let target_machine = target
+        .create_target_machine(
+            &triple,
+            "generic",
+            "",
+            OptimizationLevel::Default,
+            RelocMode::Default,
+            CodeModel::Default,
+        )
+        .ok_or_else(|| codegen_err("failed to create target machine"))?;
+
+    module.set_data_layout(&target_machine.get_target_data().get_data_layout());
+    module.set_triple(&triple);
+
+    let struct_types = build_struct_types(&context, bir_module);
+
+    // Build function lookup map for resolving generic instances.
+    let func_map_bir: HashMap<&str, &BirFunction> = bir_module
+        .functions
+        .iter()
+        .map(|f| (f.name.as_str(), f))
+        .collect();
+
+    // Resolve all generic function instances into concrete BirFunctions.
+    let resolved_instances: Vec<BirFunction> = mono_result
+        .func_instances
+        .iter()
+        .filter_map(|instance| {
+            let generic_func = func_map_bir.get(instance.func_name.as_str())?;
+            Some(resolve_function(generic_func, instance))
+        })
+        .collect();
+
+    // Collect non-generic functions (skip generic function templates).
+    let non_generic_funcs: Vec<&BirFunction> = bir_module
+        .functions
+        .iter()
+        .filter(|f| f.type_params.is_empty())
+        .collect();
+
+    // Pass 1: Declare all functions (non-generic + resolved instances).
+    let mut func_map: HashMap<String, FunctionValue> = HashMap::new();
+
+    let all_funcs_to_declare: Vec<&BirFunction> = non_generic_funcs
+        .iter()
+        .copied()
+        .chain(resolved_instances.iter())
+        .collect();
+
+    for func in &all_funcs_to_declare {
+        let param_types: Vec<BasicMetadataTypeEnum> = func
+            .params
+            .iter()
+            .filter(|(_, ty)| !matches!(ty, BirType::Unit))
+            .map(|(_, ty)| {
+                bir_type_to_llvm_type(&context, ty, &struct_types).ok_or_else(|| {
+                    codegen_err(format!("non-Unit param must have LLVM type: {:?}", ty))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(|t| t.into())
+            .collect();
+
+        let fn_type = if func.return_type == BirType::Unit {
+            context.void_type().fn_type(&param_types, false)
+        } else {
+            let ret_ty = bir_type_to_llvm_type(&context, &func.return_type, &struct_types)
+                .ok_or_else(|| codegen_err("unsupported return type"))?;
+            ret_ty.fn_type(&param_types, false)
+        };
+
+        let llvm_func = module.add_function(&func.name, fn_type, None);
+        func_map.insert(func.name.clone(), llvm_func);
+    }
+
+    // Pass 2: Compile non-generic functions.
+    for func in &non_generic_funcs {
+        let llvm_func = func_map[&func.name];
+        compile_function(
+            &context,
+            &module,
+            &builder,
+            func,
+            llvm_func,
+            &func_map,
+            &struct_types,
+            bir_module,
+        )?;
+    }
+
+    // Pass 3: Compile resolved generic instances.
+    for func in &resolved_instances {
+        let llvm_func = func_map[&func.name];
+        compile_function(
+            &context,
+            &module,
+            &builder,
+            func,
+            llvm_func,
+            &func_map,
+            &struct_types,
+            bir_module,
+        )?;
+    }
+
+    let buf = target_machine
+        .write_to_memory_buffer(&module, FileType::Object)
+        .map_err(|e| codegen_err(e.to_string()))?;
+
+    Ok(buf.as_slice().to_vec())
 }
 
 /// Compile BIR module to native object code bytes.
