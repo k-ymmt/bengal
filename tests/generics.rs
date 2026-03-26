@@ -30,15 +30,17 @@ fn generic_constraint_violation() {
 }
 
 #[test]
-fn generic_missing_type_args() {
-    let err = compile_should_fail(
+fn generic_omit_type_args_allowed() {
+    // Should NOT fail with "requires explicit type arguments"
+    // Will fail at analyze stage (no inference yet), but validate_generics should pass
+    let result = compile_should_fail(
         "func identity<T>(value: T) -> T { return value; }
          func main() -> Int32 { return identity(42); }",
     );
     assert!(
-        err.contains("requires explicit type arguments"),
-        "expected missing type args error, got: {}",
-        err
+        !result.contains("requires explicit type arguments"),
+        "Should not require explicit type args, got: {}",
+        result
     );
 }
 

@@ -743,12 +743,6 @@ fn validate_generics_expr(
             // Check function generics
             if let Some(func_def) = func_map.get(name) {
                 let num_type_params = func_def.type_params.len();
-                if num_type_params > 0 && type_args.is_empty() {
-                    return Err(sem_err(format!(
-                        "function `{}` requires explicit type arguments",
-                        name
-                    )));
-                }
                 if !type_args.is_empty() && num_type_params == 0 {
                     return Err(sem_err(format!(
                         "function `{}` does not take type arguments",
@@ -786,12 +780,6 @@ fn validate_generics_expr(
             // Check struct generics
             if let Some(struct_def) = struct_map.get(name) {
                 let num_type_params = struct_def.type_params.len();
-                if num_type_params > 0 && type_args.is_empty() {
-                    return Err(sem_err(format!(
-                        "struct `{}` requires explicit type arguments",
-                        name
-                    )));
-                }
                 if !type_args.is_empty() && num_type_params == 0 {
                     return Err(sem_err(format!(
                         "struct `{}` does not take type arguments",
