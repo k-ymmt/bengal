@@ -338,6 +338,7 @@ impl<'a> Monomorphizer<'a> {
         let rename_map = RenameMap {
             func_rename,
             struct_rename,
+            inferred: self.inferred,
         };
 
         // Keep non-generic functions, rewrite their bodies
@@ -746,11 +747,13 @@ fn specialize_member(
 // Rewriting call sites in the output program
 // ---------------------------------------------------------------------------
 
-struct RenameMap {
+struct RenameMap<'a> {
     /// (original_name, type_args) -> mangled_name for functions
     func_rename: HashMap<(String, Vec<TypeAnnotation>), String>,
     /// (original_name, type_args) -> mangled_name for structs
     struct_rename: HashMap<(String, Vec<TypeAnnotation>), String>,
+    /// Inferred type arguments from pre-mono analysis (for call sites with omitted type args)
+    inferred: &'a InferredTypeArgs,
 }
 
 fn rewrite_function(func: &Function, rename_map: &RenameMap) -> Function {
@@ -831,16 +834,40 @@ fn rewrite_block(block: &Block, rename_map: &RenameMap) -> Block {
     }
 }
 
+fn rewrite_type_annotation(ta: &TypeAnnotation, rename_map: &RenameMap) -> TypeAnnotation {
+    match ta {
+        TypeAnnotation::Generic { name, args } => {
+            let key = (name.clone(), args.clone());
+            if let Some(mangled) = rename_map.struct_rename.get(&key) {
+                TypeAnnotation::Named(mangled.clone())
+            } else {
+                TypeAnnotation::Generic {
+                    name: name.clone(),
+                    args: args
+                        .iter()
+                        .map(|a| rewrite_type_annotation(a, rename_map))
+                        .collect(),
+                }
+            }
+        }
+        TypeAnnotation::Array { element, size } => TypeAnnotation::Array {
+            element: Box::new(rewrite_type_annotation(element, rename_map)),
+            size: *size,
+        },
+        _ => ta.clone(),
+    }
+}
+
 fn rewrite_stmt(stmt: &Stmt, rename_map: &RenameMap) -> Stmt {
     match stmt {
         Stmt::Let { name, ty, value } => Stmt::Let {
             name: name.clone(),
-            ty: ty.clone(),
+            ty: ty.as_ref().map(|t| rewrite_type_annotation(t, rename_map)),
             value: rewrite_expr(value, rename_map),
         },
         Stmt::Var { name, ty, value } => Stmt::Var {
             name: name.clone(),
-            ty: ty.clone(),
+            ty: ty.as_ref().map(|t| rewrite_type_annotation(t, rename_map)),
             value: rewrite_expr(value, rename_map),
         },
         Stmt::Assign { name, value } => Stmt::Assign {
@@ -884,9 +911,18 @@ fn rewrite_expr(expr: &Expr, rename_map: &RenameMap) -> Expr {
         } => {
             let new_args: Vec<Expr> = args.iter().map(|a| rewrite_expr(a, rename_map)).collect();
 
-            if !type_args.is_empty() {
+            // Determine effective type args: explicit, or inferred from side table
+            let effective_type_args = if !type_args.is_empty() {
+                type_args.clone()
+            } else if let Some(site) = rename_map.inferred.map.get(&expr.id) {
+                site.type_args.clone()
+            } else {
+                vec![]
+            };
+
+            if !effective_type_args.is_empty() {
                 // Check function rename
-                let key = (name.clone(), type_args.clone());
+                let key = (name.clone(), effective_type_args.clone());
                 if let Some(mangled) = rename_map.func_rename.get(&key) {
                     return Expr {
                         id: expr.id,
@@ -926,8 +962,17 @@ fn rewrite_expr(expr: &Expr, rename_map: &RenameMap) -> Expr {
                 .map(|(n, e)| (n.clone(), rewrite_expr(e, rename_map)))
                 .collect();
 
-            if !type_args.is_empty() {
-                let key = (name.clone(), type_args.clone());
+            // Determine effective type args: explicit, or inferred from side table
+            let effective_type_args = if !type_args.is_empty() {
+                type_args.clone()
+            } else if let Some(site) = rename_map.inferred.map.get(&expr.id) {
+                site.type_args.clone()
+            } else {
+                vec![]
+            };
+
+            if !effective_type_args.is_empty() {
+                let key = (name.clone(), effective_type_args.clone());
                 if let Some(mangled) = rename_map.struct_rename.get(&key) {
                     return Expr {
                         id: expr.id,

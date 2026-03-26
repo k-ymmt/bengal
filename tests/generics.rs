@@ -31,16 +31,13 @@ fn generic_constraint_violation() {
 
 #[test]
 fn generic_omit_type_args_allowed() {
-    // Should NOT fail with "requires explicit type arguments"
-    // Will fail at analyze stage (no inference yet), but validate_generics should pass
-    let result = compile_should_fail(
-        "func identity<T>(value: T) -> T { return value; }
-         func main() -> Int32 { return identity(42); }",
-    );
-    assert!(
-        !result.contains("requires explicit type arguments"),
-        "Should not require explicit type args, got: {}",
-        result
+    // Type argument inference should resolve T = Int32 from the argument
+    assert_eq!(
+        compile_and_run(
+            "func identity<T>(value: T) -> T { return value; }
+             func main() -> Int32 { return identity(42); }",
+        ),
+        42
     );
 }
 

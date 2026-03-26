@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use crate::error::{BengalError, Result, Span};
 use crate::package::{ModuleGraph, ModulePath};
 use crate::parser::ast::*;
-use infer::InferenceContext;
+use infer::{InferVarId, InferenceContext};
 use resolver::{FuncSig, ProtocolInfo, Resolver, StructInfo, VarInfo, is_accessible};
 use types::{Type, resolve_type};
 
@@ -2161,13 +2161,33 @@ fn analyze_expr(
                 )));
             }
 
-            // Build type param substitution map if type args are provided
+            // Build type param substitution map
             let subst: HashMap<String, Type> = if !type_args.is_empty() {
+                // Explicit type args provided
                 sig.type_params
                     .iter()
                     .zip(type_args.iter())
                     .map(|(tp, ta)| Ok((tp.name.clone(), resolve_type_checked(ta, resolver)?)))
                     .collect::<Result<HashMap<_, _>>>()?
+            } else if !sig.type_params.is_empty() {
+                if let Some(ref mut c) = ctx {
+                    // Inference mode: create InferVars for each type param
+                    let var_ids: Vec<InferVarId> =
+                        sig.type_params.iter().map(|_| c.fresh_var()).collect();
+                    c.register_call_site(
+                        expr.id,
+                        var_ids.clone(),
+                        sig.type_params.clone(),
+                        name.clone(),
+                    );
+                    sig.type_params
+                        .iter()
+                        .zip(var_ids.iter())
+                        .map(|(tp, &id)| (tp.name.clone(), Type::InferVar(id)))
+                        .collect()
+                } else {
+                    HashMap::new()
+                }
             } else {
                 HashMap::new()
             };
@@ -2177,10 +2197,7 @@ fn analyze_expr(
                 let effective_ty = substitute_type(expected_ty, &subst);
                 if let Some(ref mut c) = ctx {
                     // In inference mode, unify arg type with expected parameter type
-                    // (skip TypeParam since those are generic)
-                    if !matches!(effective_ty, Type::TypeParam { .. }) {
-                        c.unify(arg_ty.clone(), effective_ty)?;
-                    }
+                    c.unify(arg_ty.clone(), effective_ty)?;
                 } else if !types_compatible(&arg_ty, &effective_ty) {
                     return Err(sem_err(format!(
                         "argument type mismatch: expected `{}`, found `{}`",
@@ -2292,7 +2309,11 @@ fn analyze_expr(
                 Ok(Type::F64)
             }
         }
-        ExprKind::StructInit { name, args, .. } => {
+        ExprKind::StructInit {
+            name,
+            type_args,
+            args,
+        } => {
             let struct_info = resolver
                 .lookup_struct(name)
                 .ok_or_else(|| sem_err(format!("undefined struct `{}`", name)))?
@@ -2306,6 +2327,43 @@ fn analyze_expr(
                     args.len()
                 )));
             }
+
+            // Build type param substitution map
+            let subst: HashMap<String, Type> = if !type_args.is_empty() {
+                // Explicit type args provided
+                struct_info
+                    .type_params
+                    .iter()
+                    .zip(type_args.iter())
+                    .map(|(tp, ta)| Ok((tp.name.clone(), resolve_type_checked(ta, resolver)?)))
+                    .collect::<Result<HashMap<_, _>>>()?
+            } else if !struct_info.type_params.is_empty() {
+                if let Some(ref mut c) = ctx {
+                    // Inference mode: create InferVars for each type param
+                    let var_ids: Vec<InferVarId> = struct_info
+                        .type_params
+                        .iter()
+                        .map(|_| c.fresh_var())
+                        .collect();
+                    c.register_call_site(
+                        expr.id,
+                        var_ids.clone(),
+                        struct_info.type_params.clone(),
+                        name.clone(),
+                    );
+                    struct_info
+                        .type_params
+                        .iter()
+                        .zip(var_ids.iter())
+                        .map(|(tp, &id)| (tp.name.clone(), Type::InferVar(id)))
+                        .collect()
+                } else {
+                    HashMap::new()
+                }
+            } else {
+                HashMap::new()
+            };
+
             for ((label, arg_expr), (param_name, param_ty)) in args.iter().zip(init.params.iter()) {
                 if label != param_name {
                     return Err(sem_err(format!(
@@ -2314,18 +2372,41 @@ fn analyze_expr(
                     )));
                 }
                 let arg_ty = analyze_expr(arg_expr, resolver, ctx.as_deref_mut())?;
+                let effective_ty = substitute_type(param_ty, &subst);
                 if let Some(ref mut c) = ctx {
-                    if !matches!(param_ty, Type::TypeParam { .. }) {
-                        c.unify(arg_ty.clone(), param_ty.clone())?;
-                    }
-                } else if !types_compatible(&arg_ty, param_ty) {
+                    c.unify(arg_ty.clone(), effective_ty)?;
+                } else if !types_compatible(&arg_ty, &effective_ty) {
                     return Err(sem_err(format!(
                         "argument type mismatch: expected `{}`, found `{}`",
-                        param_ty, arg_ty
+                        effective_ty, arg_ty
                     )));
                 }
             }
-            Ok(Type::Struct(name.clone()))
+
+            // Build the result type
+            if subst.is_empty() && struct_info.type_params.is_empty() {
+                Ok(Type::Struct(name.clone()))
+            } else if !subst.is_empty() {
+                let args: Vec<Type> = struct_info
+                    .type_params
+                    .iter()
+                    .map(|tp| {
+                        subst
+                            .get(&tp.name)
+                            .cloned()
+                            .unwrap_or_else(|| Type::TypeParam {
+                                name: tp.name.clone(),
+                                bound: tp.bound.clone(),
+                            })
+                    })
+                    .collect();
+                Ok(Type::Generic {
+                    name: name.clone(),
+                    args,
+                })
+            } else {
+                Ok(Type::Struct(name.clone()))
+            }
         }
         ExprKind::FieldAccess { object, field } => {
             let obj_ty = analyze_expr(object, resolver, ctx.as_deref_mut())?;

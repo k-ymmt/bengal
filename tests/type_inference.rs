@@ -128,3 +128,83 @@ fn err_incompatible_literal_types() {
         err
     );
 }
+
+// --- Task 9: Generic type argument inference ---
+
+#[test]
+fn infer_generic_identity() {
+    assert_eq!(
+        compile_and_run(
+            "func identity<T>(value: T) -> T { return value; }
+             func main() -> Int32 { return identity(42); }"
+        ),
+        42
+    );
+}
+
+#[test]
+fn infer_generic_struct_init() {
+    assert_eq!(
+        compile_and_run(
+            "struct Box<T> { var value: T; }
+             func main() -> Int32 {
+                let b = Box(value: 42);
+                return b.value;
+             }"
+        ),
+        42
+    );
+}
+
+#[test]
+fn infer_generic_from_expected_type() {
+    assert_eq!(
+        compile_and_run(
+            "struct Box<T> { var value: T; }
+             func main() -> Int32 {
+                let b: Box<Int64> = Box(value: 42);
+                return 0;
+             }"
+        ),
+        0
+    );
+}
+
+#[test]
+fn infer_generic_multiple_type_params() {
+    assert_eq!(
+        compile_and_run(
+            "struct Pair<A, B> { var first: A; var second: B; }
+             func main() -> Int32 {
+                let p = Pair(first: 42, second: true);
+                return p.first;
+             }"
+        ),
+        42
+    );
+}
+
+#[test]
+fn infer_generic_chained_calls() {
+    assert_eq!(
+        compile_and_run(
+            "func identity<T>(value: T) -> T { return value; }
+             func main() -> Int32 {
+                let x = identity(identity(42));
+                return x;
+             }"
+        ),
+        42
+    );
+}
+
+#[test]
+fn explicit_type_args_still_work() {
+    assert_eq!(
+        compile_and_run(
+            "func identity<T>(value: T) -> T { return value; }
+             func main() -> Int32 { return identity<Int32>(42); }"
+        ),
+        42
+    );
+}
