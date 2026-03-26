@@ -225,6 +225,8 @@ pub struct BirFunction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BirModule {
     pub struct_layouts: HashMap<String, Vec<(String, BirType)>>,
+    /// Type parameter names for each generic struct (e.g., "Box" -> ["T"]).
+    pub struct_type_params: HashMap<String, Vec<String>>,
     pub functions: Vec<BirFunction>,
     pub conformance_map: HashMap<(String, BirType), String>,
 }

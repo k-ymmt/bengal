@@ -455,6 +455,7 @@ bb0:
                     ("y".to_string(), BirType::I32),
                 ],
             )]),
+            struct_type_params: HashMap::new(),
             conformance_map: HashMap::new(),
             functions: vec![BirFunction {
                 name: "test".to_string(),

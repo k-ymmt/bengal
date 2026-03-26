@@ -14,14 +14,23 @@ pub fn compile_and_run(source: &str) -> i32 {
     let tokens = tokenize(source).unwrap();
     let program = parse(tokens).unwrap();
     semantic::validate_generics(&program).unwrap();
-    let (inferred, _sem_info) = semantic::analyze_pre_mono(&program).unwrap();
-    let program = bengal::monomorphize::monomorphize(&program, &inferred);
-    let sem_info = semantic::analyze_post_mono(&program).unwrap();
-    let mut bir_module = bir::lower_program(&program, &sem_info).unwrap();
+    let (inferred, sem_info) = semantic::analyze_pre_mono(&program).unwrap();
+    let inferred_map: std::collections::HashMap<
+        bengal::parser::ast::NodeId,
+        Vec<bengal::parser::ast::TypeAnnotation>,
+    > = inferred
+        .map
+        .into_iter()
+        .map(|(id, site)| (id, site.type_args))
+        .collect();
+    // No AST monomorphize — lower generics directly to BIR
+    let mut bir_module =
+        bir::lowering::lower_program_with_inferred(&program, &sem_info, &inferred_map).unwrap();
     bir::optimize_module(&mut bir_module);
+    let mono_result = bir::mono::mono_collect(&bir_module, "main");
 
     let context = Context::create();
-    let module = codegen::compile_to_module(&context, &bir_module).unwrap();
+    let module = codegen::compile_to_module_with_mono(&context, &bir_module, &mono_result).unwrap();
     let ee = module
         .create_jit_execution_engine(OptimizationLevel::None)
         .unwrap();
@@ -78,12 +87,7 @@ pub fn compile_should_fail(source: &str) -> String {
     if let Err(e) = semantic::validate_generics(&program) {
         return e.to_string();
     }
-    let (inferred, _sem_info) = match semantic::analyze_pre_mono(&program) {
-        Ok(result) => result,
-        Err(e) => return e.to_string(),
-    };
-    let program = bengal::monomorphize::monomorphize(&program, &inferred);
-    match semantic::analyze_post_mono(&program) {
+    match semantic::analyze_pre_mono(&program) {
         Err(e) => e.to_string(),
         Ok(_) => panic!("expected semantic error but analysis succeeded"),
     }

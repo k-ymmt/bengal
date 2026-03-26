@@ -650,6 +650,24 @@ fn analyze_single_module(
 // Generic validation pre-pass
 // ---------------------------------------------------------------------------
 
+/// Validate that a `main` function exists with no parameters and returns Int32.
+pub fn validate_main(program: &Program) -> Result<()> {
+    match program.functions.iter().find(|f| f.name == "main") {
+        None => Err(sem_err("no `main` function found")),
+        Some(main_fn) => {
+            if !main_fn.params.is_empty() {
+                return Err(sem_err("`main` function must have no parameters"));
+            }
+            let is_i32 = matches!(main_fn.return_type, TypeAnnotation::I32)
+                || matches!(&main_fn.return_type, TypeAnnotation::Named(n) if n == "Int32");
+            if !is_i32 {
+                return Err(sem_err("`main` function must return `Int32`"));
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Validate generic usage before full semantic analysis.
 ///
 /// Walks all expressions and checks:
@@ -928,6 +946,21 @@ fn validate_constraints(
 /// not yet used by analyze_expr/analyze_stmt (that comes in Task 8), so the
 /// returned `InferredTypeArgs` will always be empty.
 pub fn analyze_pre_mono(program: &Program) -> Result<(infer::InferredTypeArgs, SemanticInfo)> {
+    analyze_pre_mono_inner(program, false)
+}
+
+/// Lenient variant of analyze_pre_mono for per-module analysis in the package pipeline.
+/// Swallows non-inference errors that may be caused by cross-module imports.
+pub fn analyze_pre_mono_lenient(
+    program: &Program,
+) -> Result<(infer::InferredTypeArgs, SemanticInfo)> {
+    analyze_pre_mono_inner(program, true)
+}
+
+fn analyze_pre_mono_inner(
+    program: &Program,
+    lenient: bool,
+) -> Result<(infer::InferredTypeArgs, SemanticInfo)> {
     use crate::semantic::infer::{InferenceContext, InferredTypeArgs};
 
     let mut inferred = InferredTypeArgs::new();
@@ -1055,15 +1088,128 @@ pub fn analyze_pre_mono(program: &Program) -> Result<(infer::InferredTypeArgs, S
         );
     }
 
-    // Skip main function validation (left to analyze_post_mono)
+    // --- Phase 2b: analyze struct member bodies (init, methods, computed) ---
+    // Skip generic structs — their member bodies contain unsubstituted type
+    // parameters that would cause spurious errors.
+    {
+        let mut struct_ctx = InferenceContext::new();
+        for struct_def in &program.structs {
+            if !struct_def.type_params.is_empty() {
+                continue;
+            }
+            analyze_struct_members(struct_def, &mut resolver, &mut struct_ctx)?;
+            let errs = struct_ctx.apply_defaults();
+            if let Some(e) = errs.into_iter().next() {
+                return Err(e);
+            }
+            struct_ctx.reset();
+        }
+    }
+
+    // --- Phase 2c: check protocol conformance ---
+    for struct_def in &program.structs {
+        for proto_name in &struct_def.conformances {
+            let proto_info = resolver
+                .lookup_protocol(proto_name)
+                .ok_or_else(|| sem_err(format!("unknown protocol `{}`", proto_name)))?
+                .clone();
+            let struct_info = resolver
+                .lookup_struct(&struct_def.name)
+                .ok_or_else(|| sem_err(format!("undefined struct `{}`", struct_def.name)))?
+                .clone();
+
+            // Check methods
+            for req_method in &proto_info.methods {
+                match struct_info.method_index.get(&req_method.name) {
+                    Some(&idx) => {
+                        let impl_method = &struct_info.methods[idx];
+                        if impl_method.params.len() != req_method.params.len() {
+                            return Err(sem_err(format!(
+                                "method `{}` expects {} parameter(s) but protocol `{}` requires {}",
+                                req_method.name,
+                                impl_method.params.len(),
+                                proto_name,
+                                req_method.params.len()
+                            )));
+                        }
+                        for ((impl_name, impl_ty), (req_name, req_ty)) in
+                            impl_method.params.iter().zip(req_method.params.iter())
+                        {
+                            if impl_ty != req_ty {
+                                return Err(sem_err(format!(
+                                    "method `{}` has parameter `{}` of type `{}` but protocol `{}` requires `{}`",
+                                    req_method.name, impl_name, impl_ty, proto_name, req_ty
+                                )));
+                            }
+                            if impl_name != req_name {
+                                return Err(sem_err(format!(
+                                    "method `{}` has parameter `{}` but protocol `{}` requires `{}`",
+                                    req_method.name, impl_name, proto_name, req_name
+                                )));
+                            }
+                        }
+                        if impl_method.return_type != req_method.return_type {
+                            return Err(sem_err(format!(
+                                "method `{}` has return type `{}` but protocol `{}` requires `{}`",
+                                req_method.name,
+                                impl_method.return_type,
+                                proto_name,
+                                req_method.return_type
+                            )));
+                        }
+                    }
+                    None => {
+                        return Err(sem_err(format!(
+                            "type `{}` does not implement method `{}` required by protocol `{}`",
+                            struct_def.name, req_method.name, proto_name
+                        )));
+                    }
+                }
+            }
+
+            // Check properties
+            for req_prop in &proto_info.properties {
+                if let Some(&idx) = struct_info.field_index.get(&req_prop.name) {
+                    let (_, field_ty) = &struct_info.fields[idx];
+                    if *field_ty != req_prop.ty {
+                        return Err(sem_err(format!(
+                            "property `{}` has type `{}` but protocol `{}` requires `{}`",
+                            req_prop.name, field_ty, proto_name, req_prop.ty
+                        )));
+                    }
+                    continue;
+                }
+                if let Some(&idx) = struct_info.computed_index.get(&req_prop.name) {
+                    let computed = &struct_info.computed[idx];
+                    if computed.ty != req_prop.ty {
+                        return Err(sem_err(format!(
+                            "property `{}` has type `{}` but protocol `{}` requires `{}`",
+                            req_prop.name, computed.ty, proto_name, req_prop.ty
+                        )));
+                    }
+                    if req_prop.has_setter && !computed.has_setter {
+                        return Err(sem_err(format!(
+                            "property `{}` requires a setter to conform to protocol `{}`",
+                            req_prop.name, proto_name
+                        )));
+                    }
+                    continue;
+                }
+                return Err(sem_err(format!(
+                    "type `{}` does not implement property `{}` required by protocol `{}`",
+                    struct_def.name, req_prop.name, proto_name
+                )));
+            }
+        }
+    }
 
     // --- Phase 3: analyze function bodies with inference ---
     //
     // For each non-generic function, analyze the body with the InferenceContext
     // so that numeric literal types can be inferred from context. Generic
     // functions are skipped because their signatures contain unsubstituted type
-    // parameters that would cause spurious errors; they will be checked in
-    // analyze_post_mono after monomorphization.
+    // parameters that would cause spurious errors; they will be type-checked
+    // after monomorphization resolves them to concrete types.
 
     let mut all_errors: Vec<BengalError> = Vec::new();
 
@@ -1073,11 +1219,6 @@ pub fn analyze_pre_mono(program: &Program) -> Result<(infer::InferredTypeArgs, S
             continue;
         }
 
-        // Body analysis is best-effort: if a function references symbols that
-        // are not yet available (e.g. cross-module imports), we skip it and let
-        // analyze_post_mono handle the full type checking later.
-        // However, type-inference errors (conflicting constraints, unification
-        // failures) are genuine diagnostics and must be surfaced immediately.
         match analyze_function(func, &mut resolver, Some(&mut ctx)) {
             Ok(()) => {
                 let default_errors = ctx.apply_defaults();
@@ -1088,16 +1229,20 @@ pub fn analyze_pre_mono(program: &Program) -> Result<(infer::InferredTypeArgs, S
                 }
             }
             Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("conflicting constraints")
-                    || msg.contains("cannot unify")
-                    || msg.contains("cannot infer type parameter")
-                {
-                    // Genuine type-inference error — surface it immediately.
+                if lenient {
+                    // In lenient mode, only propagate type-inference errors.
+                    // Other errors (e.g. undefined symbols) may be caused by
+                    // cross-module imports that aren't yet available.
+                    let msg = e.to_string();
+                    if msg.contains("conflicting constraints")
+                        || msg.contains("cannot unify")
+                        || msg.contains("cannot infer type parameter")
+                    {
+                        all_errors.push(e);
+                    }
+                } else {
                     all_errors.push(e);
                 }
-                // Otherwise skip: symbol may not yet be available (e.g.
-                // cross-module import). analyze_post_mono will catch the error.
             }
         }
         ctx.reset();

@@ -278,7 +278,7 @@ fn collect_struct_instances(ty: &BirType, set: &mut HashSet<(String, Vec<BirType
 
 /// Like `resolve_bir_type` but passes through TypeParams that are not in subst
 /// (used when scanning non-generic callers where subst is empty and types are concrete).
-fn resolve_bir_type_lenient(ty: &BirType, subst: &HashMap<String, BirType>) -> BirType {
+pub fn resolve_bir_type_lenient(ty: &BirType, subst: &HashMap<String, BirType>) -> BirType {
     match ty {
         BirType::TypeParam(name) => subst.get(name).cloned().unwrap_or_else(|| ty.clone()),
         BirType::Array { element, size } => BirType::Array {
@@ -389,6 +389,7 @@ mod tests {
     fn make_module(functions: Vec<BirFunction>) -> BirModule {
         BirModule {
             struct_layouts: HashMap::new(),
+            struct_type_params: HashMap::new(),
             functions,
             conformance_map: HashMap::new(),
         }

@@ -20,13 +20,19 @@ pub fn compile_source(source: &str) -> Result<Vec<u8>> {
     let tokens = lexer::tokenize(source)?;
     let program = parser::parse(tokens)?;
     semantic::validate_generics(&program)?;
+    semantic::validate_main(&program)?;
     let (inferred, sem_info) = semantic::analyze_pre_mono(&program)?;
-    let program = monomorphize::monomorphize(&program, &inferred);
-    // Still run post-mono for validation, but use pre-mono sem_info for lowering
-    let _post_mono_info = semantic::analyze_post_mono(&program)?;
-    let mut bir = bir::lower_program(&program, &sem_info)?;
+    // Convert inferred type args to the lowering format
+    let inferred_map: HashMap<parser::ast::NodeId, Vec<parser::ast::TypeAnnotation>> = inferred
+        .map
+        .into_iter()
+        .map(|(id, site)| (id, site.type_args))
+        .collect();
+    // No AST monomorphize — lower generics directly to BIR
+    let mut bir = bir::lowering::lower_program_with_inferred(&program, &sem_info, &inferred_map)?;
     bir::optimize_module(&mut bir);
-    let obj_bytes = codegen::compile(&bir)?;
+    let mono_result = bir::mono::mono_collect(&bir, "main");
+    let obj_bytes = codegen::compile_with_mono(&bir, &mono_result)?;
     Ok(obj_bytes)
 }
 
@@ -35,10 +41,14 @@ pub fn compile_to_bir(source: &str) -> Result<(bir::instruction::BirModule, Stri
     let program = parser::parse(tokens)?;
     semantic::validate_generics(&program)?;
     let (inferred, sem_info) = semantic::analyze_pre_mono(&program)?;
-    let program = monomorphize::monomorphize(&program, &inferred);
-    // Still run post-mono for validation, but use pre-mono sem_info for lowering
-    let _post_mono_info = semantic::analyze_post_mono(&program)?;
-    let bir_module = bir::lower_program(&program, &sem_info)?;
+    let inferred_map: HashMap<parser::ast::NodeId, Vec<parser::ast::TypeAnnotation>> = inferred
+        .map
+        .into_iter()
+        .map(|(id, site)| (id, site.type_args))
+        .collect();
+    let mut bir_module =
+        bir::lowering::lower_program_with_inferred(&program, &sem_info, &inferred_map)?;
+    bir::optimize_module(&mut bir_module);
     let bir_text = bir::print_module(&bir_module);
     Ok((bir_module, bir_text))
 }
@@ -93,7 +103,7 @@ pub fn compile_package_to_executable(entry_path: &Path, output_path: &Path) -> R
     let mut pre_mono_sem_infos: HashMap<package::ModulePath, semantic::SemanticInfo> =
         HashMap::new();
     for (mod_path, mod_info) in graph.modules.iter_mut() {
-        let (inferred, pre_mono_sem_info) = semantic::analyze_pre_mono(&mod_info.ast)?;
+        let (inferred, pre_mono_sem_info) = semantic::analyze_pre_mono_lenient(&mod_info.ast)?;
         pre_mono_sem_infos.insert(mod_path.clone(), pre_mono_sem_info);
         mod_info.ast = monomorphize::monomorphize(&mod_info.ast, &inferred);
     }
@@ -332,7 +342,7 @@ mod tests {
         let source = "func main() -> Int32 { return 1; }";
         let tokens = lexer::tokenize(source).unwrap();
         let program = parser::parse(tokens).unwrap();
-        let sem_info = semantic::analyze_post_mono(&program).unwrap();
+        let (_inferred, sem_info) = semantic::analyze_pre_mono(&program).unwrap();
         let mut bir_module = bir::lower_program(&program, &sem_info).unwrap();
         bir::optimize_module(&mut bir_module);
 

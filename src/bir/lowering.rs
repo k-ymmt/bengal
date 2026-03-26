@@ -46,6 +46,8 @@ struct Lowering {
     pending_regions: Vec<CfgRegion>,
     // Function signatures for Call return type lookup
     func_sigs: HashMap<String, BirType>,
+    // Function type parameter names (func_name -> [param_names])
+    func_type_param_names: HashMap<String, Vec<String>>,
     // Track which variables are mutable (for while loop block args)
     mutable_vars: Vec<(String, BirType)>,
     // Loop context stack for break/continue
@@ -67,6 +69,8 @@ struct Lowering {
     getter_return_bb: Option<(u32, Value, BirType)>,
     // Current function's type params (for protocol constraint lookup)
     current_type_params: Vec<TypeParam>,
+    // Inferred type args from type inference (for omitted type args at call sites)
+    inferred_type_args: HashMap<NodeId, Vec<TypeAnnotation>>,
 }
 
 impl Lowering {
@@ -81,6 +85,7 @@ impl Lowering {
             current_block_params: Vec::new(),
             pending_regions: Vec::new(),
             func_sigs,
+            func_type_param_names: HashMap::new(),
             mutable_vars: Vec::new(),
             loop_stack: Vec::new(),
             value_types: HashMap::new(),
@@ -93,12 +98,35 @@ impl Lowering {
             last_expr_diverged: false,
             getter_return_bb: None,
             current_type_params: Vec::new(),
+            inferred_type_args: HashMap::new(),
         }
     }
 
     fn convert_type_with_structs(&self, ty: &TypeAnnotation) -> BirType {
         match ty {
-            TypeAnnotation::Named(name) => BirType::struct_simple(name.clone()),
+            TypeAnnotation::Named(name) => {
+                // Check if this name refers to a type parameter of the current function
+                if self.current_type_params.iter().any(|tp| tp.name == *name) {
+                    BirType::TypeParam(name.clone())
+                } else {
+                    BirType::struct_simple(name.clone())
+                }
+            }
+            TypeAnnotation::Generic { name, args } => {
+                // Generic struct instantiation (e.g. Box<Int32>)
+                let bir_args: Vec<BirType> = args
+                    .iter()
+                    .map(|a| self.convert_type_with_structs(a))
+                    .collect();
+                BirType::Struct {
+                    name: name.clone(),
+                    type_args: bir_args,
+                }
+            }
+            TypeAnnotation::Array { element, size } => BirType::Array {
+                element: Box::new(self.convert_type_with_structs(element)),
+                size: *size,
+            },
             other => convert_type(other),
         }
     }
@@ -215,14 +243,22 @@ impl Lowering {
 
     // ========== Struct helpers ==========
 
-    fn emit_struct_init(&mut self, struct_name: &str, field_values: &[(String, Value)]) -> Value {
-        let bir_ty = BirType::struct_simple(struct_name.to_string());
+    fn emit_struct_init(
+        &mut self,
+        struct_name: &str,
+        field_values: &[(String, Value)],
+        type_args: &[BirType],
+    ) -> Value {
+        let bir_ty = BirType::Struct {
+            name: struct_name.to_string(),
+            type_args: type_args.to_vec(),
+        };
         let result = self.fresh_value();
         self.emit(Instruction::StructInit {
             result,
             struct_name: struct_name.to_string(),
             fields: field_values.to_vec(),
-            type_args: vec![],
+            type_args: type_args.to_vec(),
             ty: bir_ty.clone(),
         });
         self.value_types.insert(result, bir_ty);
@@ -986,17 +1022,29 @@ impl Lowering {
                 args,
                 type_args,
             } => {
+                // Use explicit type_args if present, otherwise check inferred
+                let effective_type_args: Vec<TypeAnnotation> = if type_args.is_empty() {
+                    self.inferred_type_args
+                        .get(&expr.id)
+                        .cloned()
+                        .unwrap_or_default()
+                } else {
+                    type_args.clone()
+                };
+                let bir_type_args: Vec<BirType> = effective_type_args
+                    .iter()
+                    .map(|ta| self.convert_type_with_structs(ta))
+                    .collect();
                 let sem = self.sem_info.as_ref().unwrap();
                 if sem.struct_init_calls.contains(&expr.id) {
                     let struct_info = sem.struct_defs.get(name).unwrap().clone();
                     if struct_info.init.body.is_some() {
                         let field_values = self.lower_explicit_init(name, &struct_info, expr);
-                        return self.emit_struct_init(name, &field_values);
+                        return self.emit_struct_init(name, &field_values, &bir_type_args);
                     }
                     // No-arg memberwise init (call syntax with no custom init body)
-                    return self.emit_struct_init(name, &[]);
+                    return self.emit_struct_init(name, &[], &bir_type_args);
                 }
-                let bir_type_args: Vec<BirType> = type_args.iter().map(convert_type).collect();
                 let arg_vals: Vec<Value> = args.iter().map(|a| self.lower_expr(a)).collect();
                 let resolved = self.resolve_name(name);
                 let ty = self
@@ -1004,6 +1052,30 @@ impl Lowering {
                     .get(&resolved)
                     .cloned()
                     .unwrap_or(BirType::I32);
+                // Resolve TypeParam return types for the local value_types map
+                // so that subsequent instructions (BinaryOp, FieldGet, etc.)
+                // get the resolved concrete type.
+                let resolved_ty = if !bir_type_args.is_empty() {
+                    use crate::bir::mono::resolve_bir_type_lenient;
+                    let subst: HashMap<String, BirType> = self
+                        .func_type_param_names
+                        .get(&resolved)
+                        .map(|params| {
+                            params
+                                .iter()
+                                .zip(bir_type_args.iter())
+                                .map(|(p, a)| (p.clone(), a.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if subst.is_empty() {
+                        ty.clone()
+                    } else {
+                        resolve_bir_type_lenient(&ty, &subst)
+                    }
+                } else {
+                    ty.clone()
+                };
                 let result = self.fresh_value();
                 self.emit(Instruction::Call {
                     result,
@@ -1012,7 +1084,7 @@ impl Lowering {
                     type_args: bir_type_args,
                     ty: ty.clone(),
                 });
-                self.value_types.insert(result, ty);
+                self.value_types.insert(result, resolved_ty);
                 result
             }
             ExprKind::Block(block) => {
@@ -1055,18 +1127,35 @@ impl Lowering {
                 self.value_types.insert(result, to_ty);
                 result
             }
-            ExprKind::StructInit { name, args, .. } => {
+            ExprKind::StructInit {
+                name,
+                args,
+                type_args,
+            } => {
+                // Use explicit type_args if present, otherwise check inferred
+                let effective_type_args: Vec<TypeAnnotation> = if type_args.is_empty() {
+                    self.inferred_type_args
+                        .get(&expr.id)
+                        .cloned()
+                        .unwrap_or_default()
+                } else {
+                    type_args.clone()
+                };
+                let bir_type_args: Vec<BirType> = effective_type_args
+                    .iter()
+                    .map(|ta| self.convert_type_with_structs(ta))
+                    .collect();
                 let sem = self.sem_info.as_ref().unwrap();
                 let struct_info = sem.struct_defs.get(name).unwrap().clone();
                 if struct_info.init.body.is_some() {
                     let field_values = self.lower_explicit_init(name, &struct_info, expr);
-                    return self.emit_struct_init(name, &field_values);
+                    return self.emit_struct_init(name, &field_values, &bir_type_args);
                 }
                 let field_values: Vec<(String, Value)> = args
                     .iter()
                     .map(|(label, arg_expr)| (label.clone(), self.lower_expr(arg_expr)))
                     .collect();
-                self.emit_struct_init(name, &field_values)
+                self.emit_struct_init(name, &field_values, &bir_type_args)
             }
             ExprKind::FieldAccess { object, field } => {
                 // Special case: self.field during init body
@@ -1123,15 +1212,61 @@ impl Lowering {
                             .unwrap()
                             .1;
                         let field_ty = semantic_type_to_bir(field_sem_ty);
+                        // Use the object's actual type (preserves type_args for generics)
+                        let obj_ty = self
+                            .value_types
+                            .get(&recv.value)
+                            .cloned()
+                            .unwrap_or_else(|| BirType::struct_simple(recv.struct_name.clone()));
+                        // Resolve TypeParam field types using the object's type_args
+                        let resolved_field_ty = if let BirType::Struct {
+                            name: ref sname,
+                            type_args: ref ta,
+                        } = obj_ty
+                        {
+                            if !ta.is_empty() {
+                                use crate::bir::mono::resolve_bir_type_lenient;
+                                let mangled = format!("{}_{}", sname, field);
+                                let subst: HashMap<String, BirType> = self
+                                    .func_type_param_names
+                                    .get(&mangled)
+                                    .map(|params| {
+                                        params
+                                            .iter()
+                                            .zip(ta.iter())
+                                            .map(|(p, a)| (p.clone(), a.clone()))
+                                            .collect()
+                                    })
+                                    .unwrap_or_else(|| {
+                                        // Fall back to deriving type params from sem_info
+                                        let sem = self.sem_info.as_ref().unwrap();
+                                        sem.struct_defs
+                                            .get(sname)
+                                            .map(|info| {
+                                                info.type_params
+                                                    .iter()
+                                                    .zip(ta.iter())
+                                                    .map(|(tp, a)| (tp.name.clone(), a.clone()))
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default()
+                                    });
+                                resolve_bir_type_lenient(&field_ty, &subst)
+                            } else {
+                                field_ty.clone()
+                            }
+                        } else {
+                            field_ty.clone()
+                        };
                         let result = self.fresh_value();
                         self.emit(Instruction::FieldGet {
                             result,
                             object: recv.value,
                             field: field.clone(),
-                            object_ty: BirType::struct_simple(recv.struct_name),
+                            object_ty: obj_ty,
                             ty: field_ty.clone(),
                         });
-                        self.value_types.insert(result, field_ty);
+                        self.value_types.insert(result, resolved_field_ty);
                         result
                     }
                     None => unreachable!("field access on non-struct (semantic guarantees this)"),
@@ -1152,8 +1287,11 @@ impl Lowering {
                 args,
             } => {
                 let obj_val = self.lower_expr(object);
-                let struct_name = match self.value_types.get(&obj_val) {
-                    Some(BirType::Struct { name: n, .. }) => n.clone(),
+                let (struct_name, struct_type_args) = match self.value_types.get(&obj_val) {
+                    Some(BirType::Struct {
+                        name: n,
+                        type_args: ta,
+                    }) => (n.clone(), ta.clone()),
                     Some(BirType::TypeParam(type_param_name)) => {
                         // Protocol method call on constrained type parameter.
                         // Look up the type param's protocol constraint, then emit
@@ -1210,15 +1348,37 @@ impl Lowering {
                 for arg in args {
                     call_args.push(self.lower_expr(arg));
                 }
+                // Resolve TypeParam return type for value_types
+                let resolved_ret_ty = if !struct_type_args.is_empty() {
+                    use crate::bir::mono::resolve_bir_type_lenient;
+                    let subst: HashMap<String, BirType> = self
+                        .func_type_param_names
+                        .get(&resolved)
+                        .map(|params| {
+                            params
+                                .iter()
+                                .zip(struct_type_args.iter())
+                                .map(|(p, a)| (p.clone(), a.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if subst.is_empty() {
+                        ret_ty.clone()
+                    } else {
+                        resolve_bir_type_lenient(&ret_ty, &subst)
+                    }
+                } else {
+                    ret_ty.clone()
+                };
                 let result = self.fresh_value();
                 self.emit(Instruction::Call {
                     result,
                     func_name: resolved,
                     args: call_args,
-                    type_args: vec![],
+                    type_args: struct_type_args,
                     ty: ret_ty.clone(),
                 });
-                self.value_types.insert(result, ret_ty);
+                self.value_types.insert(result, resolved_ret_ty);
                 result
             }
             ExprKind::ArrayLiteral { elements } => {
@@ -1929,6 +2089,15 @@ pub fn lower_program(
     program: &Program,
     sem_info: &crate::semantic::SemanticInfo,
 ) -> Result<BirModule> {
+    lower_program_with_inferred(program, sem_info, &HashMap::new())
+}
+
+/// Lower program with inferred type args for call sites with omitted type arguments.
+pub fn lower_program_with_inferred(
+    program: &Program,
+    sem_info: &crate::semantic::SemanticInfo,
+    inferred_type_args: &HashMap<NodeId, Vec<TypeAnnotation>>,
+) -> Result<BirModule> {
     // Build struct_layouts from semantic StructInfo
     let mut struct_layouts: HashMap<String, Vec<(String, BirType)>> = HashMap::new();
     for (name, info) in &sem_info.struct_defs {
@@ -1963,11 +2132,21 @@ pub fn lower_program(
         protocols: sem_info.protocols.clone(),
     };
     let mut lowering = Lowering::new(HashMap::new(), sem_info_ref);
+    lowering.inferred_type_args = inferred_type_args.clone();
 
     // Build func_sigs using convert_type_with_structs (supports Named types)
     for func in &program.functions {
+        // Push type params so generic return types resolve to TypeParam, not Struct
+        lowering.current_type_params = func.type_params.clone();
         let bir_ty = lowering.convert_type_with_structs(&func.return_type);
+        lowering.current_type_params.clear();
         lowering.func_sigs.insert(func.name.clone(), bir_ty);
+        if !func.type_params.is_empty() {
+            lowering.func_type_param_names.insert(
+                func.name.clone(),
+                func.type_params.iter().map(|tp| tp.name.clone()).collect(),
+            );
+        }
     }
 
     // Register mangled method signatures
@@ -1975,7 +2154,13 @@ pub fn lower_program(
         for method in &info.methods {
             let mangled = format!("{}_{}", struct_name, method.name);
             let bir_ret = semantic_type_to_bir(&method.return_type);
-            lowering.func_sigs.insert(mangled, bir_ret);
+            lowering.func_sigs.insert(mangled.clone(), bir_ret);
+            if !info.type_params.is_empty() {
+                lowering.func_type_param_names.insert(
+                    mangled,
+                    info.type_params.iter().map(|tp| tp.name.clone()).collect(),
+                );
+            }
         }
     }
 
@@ -1997,16 +2182,28 @@ pub fn lower_program(
             } = member
             {
                 let mangled_name = format!("{}_{}", struct_def.name, mname);
-                // Build synthetic function with `self` as first param
+                // Build self type — for generic structs, include type params
+                let self_ty = if struct_def.type_params.is_empty() {
+                    TypeAnnotation::Named(struct_def.name.clone())
+                } else {
+                    TypeAnnotation::Generic {
+                        name: struct_def.name.clone(),
+                        args: struct_def
+                            .type_params
+                            .iter()
+                            .map(|tp| TypeAnnotation::Named(tp.name.clone()))
+                            .collect(),
+                    }
+                };
                 let mut all_params = vec![Param {
                     name: "self".to_string(),
-                    ty: TypeAnnotation::Named(struct_def.name.clone()),
+                    ty: self_ty,
                 }];
                 all_params.extend(params.clone());
                 let func = Function {
                     visibility: Visibility::Internal,
                     name: mangled_name,
-                    type_params: vec![],
+                    type_params: struct_def.type_params.clone(),
                     params: all_params,
                     return_type: return_type.clone(),
                     body: body.clone(),
@@ -2042,8 +2239,22 @@ pub fn lower_program(
         }
     }
 
+    // Build struct_type_params from semantic StructInfo
+    let struct_type_params: HashMap<String, Vec<String>> = sem_info
+        .struct_defs
+        .iter()
+        .filter(|(_, info)| !info.type_params.is_empty())
+        .map(|(name, info)| {
+            (
+                name.clone(),
+                info.type_params.iter().map(|tp| tp.name.clone()).collect(),
+            )
+        })
+        .collect();
+
     Ok(BirModule {
         struct_layouts,
+        struct_type_params,
         functions,
         conformance_map,
     })
@@ -2100,7 +2311,10 @@ pub fn lower_module(
 
     // Build func_sigs using mangled names
     for func in &program.functions {
+        // Push type params so generic return types resolve to TypeParam, not Struct
+        lowering.current_type_params = func.type_params.clone();
         let bir_ty = lowering.convert_type_with_structs(&func.return_type);
+        lowering.current_type_params.clear();
         let resolved = lowering.resolve_name(&func.name);
         lowering.func_sigs.insert(resolved, bir_ty);
     }
@@ -2139,17 +2353,29 @@ pub fn lower_module(
             } = member
             {
                 let local_mangled_name = format!("{}_{}", struct_def.name, mname);
-                // Build synthetic function with `self` as first param
+                // Build self type — for generic structs, include type params
+                let self_ty = if struct_def.type_params.is_empty() {
+                    TypeAnnotation::Named(struct_def.name.clone())
+                } else {
+                    TypeAnnotation::Generic {
+                        name: struct_def.name.clone(),
+                        args: struct_def
+                            .type_params
+                            .iter()
+                            .map(|tp| TypeAnnotation::Named(tp.name.clone()))
+                            .collect(),
+                    }
+                };
                 let mut all_params = vec![Param {
                     name: "self".to_string(),
-                    ty: TypeAnnotation::Named(struct_def.name.clone()),
+                    ty: self_ty,
                 }];
                 all_params.extend(params.clone());
                 // Use the local_mangled_name so resolve_name can map it
                 let func = Function {
                     visibility: Visibility::Internal,
                     name: local_mangled_name,
-                    type_params: vec![],
+                    type_params: struct_def.type_params.clone(),
                     params: all_params,
                     return_type: return_type.clone(),
                     body: body.clone(),
@@ -2185,8 +2411,22 @@ pub fn lower_module(
         }
     }
 
+    // Build struct_type_params from semantic StructInfo
+    let struct_type_params: HashMap<String, Vec<String>> = sem_info
+        .struct_defs
+        .iter()
+        .filter(|(_, info)| !info.type_params.is_empty())
+        .map(|(name, info)| {
+            (
+                name.clone(),
+                info.type_params.iter().map(|tp| tp.name.clone()).collect(),
+            )
+        })
+        .collect();
+
     Ok(BirModule {
         struct_layouts,
+        struct_type_params,
         functions,
         conformance_map,
     })

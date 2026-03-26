@@ -14,7 +14,7 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue};
 
 use crate::bir::instruction::*;
-use crate::bir::mono::{Instance, MonoCollectResult, resolve_bir_type};
+use crate::bir::mono::{Instance, MonoCollectResult, resolve_bir_type, resolve_bir_type_lenient};
 use crate::error::{BengalError, Result};
 
 fn codegen_err(msg: impl Into<String>) -> BengalError {
@@ -58,7 +58,18 @@ fn bir_type_to_llvm_type<'ctx>(
 }
 
 /// Collect all Values in a BirFunction with their types.
-fn collect_value_types(func: &BirFunction) -> HashMap<Value, BirType> {
+///
+/// For generic call/struct-init instructions (non-empty type_args), this resolves
+/// TypeParam return types to their concrete substitutions using the generic function's
+/// type_params from the BirModule.
+fn collect_value_types(func: &BirFunction, bir_module: &BirModule) -> HashMap<Value, BirType> {
+    // Build lookup: func_name -> type_params for resolving generic call return types
+    let func_type_params: HashMap<&str, &[String]> = bir_module
+        .functions
+        .iter()
+        .map(|f| (f.name.as_str(), f.type_params.as_slice()))
+        .collect();
+
     let mut value_types = HashMap::new();
 
     for (val, ty) in &func.params {
@@ -76,9 +87,73 @@ fn collect_value_types(func: &BirFunction) -> HashMap<Value, BirType> {
                 Instruction::Compare { result, .. } => (*result, BirType::Bool),
                 Instruction::Not { result, .. } => (*result, BirType::Bool),
                 Instruction::Cast { result, to_ty, .. } => (*result, to_ty.clone()),
-                Instruction::Call { result, ty, .. } => (*result, ty.clone()),
-                Instruction::StructInit { result, ty, .. } => (*result, ty.clone()),
-                Instruction::FieldGet { result, ty, .. } => (*result, ty.clone()),
+                Instruction::Call {
+                    result,
+                    func_name,
+                    type_args,
+                    ty,
+                    ..
+                } => {
+                    if type_args.is_empty() {
+                        (*result, ty.clone())
+                    } else {
+                        // Resolve the return type by substituting type_args
+                        let subst: HashMap<String, BirType> = func_type_params
+                            .get(func_name.as_str())
+                            .map(|params| {
+                                params
+                                    .iter()
+                                    .zip(type_args.iter())
+                                    .map(|(p, a)| (p.clone(), a.clone()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        (*result, resolve_bir_type_lenient(ty, &subst))
+                    }
+                }
+                Instruction::StructInit {
+                    result,
+                    type_args,
+                    ty,
+                    ..
+                } => {
+                    if type_args.is_empty() {
+                        (*result, ty.clone())
+                    } else {
+                        // Generic struct init — resolve TypeParam in the type
+                        (*result, ty.clone())
+                    }
+                }
+                Instruction::FieldGet {
+                    result, object, ty, ..
+                } => {
+                    // If the field type contains TypeParam, resolve it using
+                    // the object's concrete type_args.
+                    if contains_type_param(ty) {
+                        if let Some(BirType::Struct {
+                            name: sname,
+                            type_args,
+                        }) = value_types.get(object)
+                        {
+                            let subst: HashMap<String, BirType> = bir_module
+                                .struct_type_params
+                                .get(sname)
+                                .map(|params| {
+                                    params
+                                        .iter()
+                                        .zip(type_args.iter())
+                                        .map(|(p, a)| (p.clone(), a.clone()))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            (*result, resolve_bir_type_lenient(ty, &subst))
+                        } else {
+                            (*result, ty.clone())
+                        }
+                    } else {
+                        (*result, ty.clone())
+                    }
+                }
                 Instruction::FieldSet { result, ty, .. } => (*result, ty.clone()),
                 Instruction::ArrayInit { result, ty, .. } => (*result, ty.clone()),
                 Instruction::ArrayGet { result, ty, .. } => (*result, ty.clone()),
@@ -386,12 +461,36 @@ fn emit_instruction<'ctx>(
             result,
             func_name,
             args,
+            type_args,
             ty,
-            ..
         } => {
+            // If this is a generic call (has type_args), mangle the function name
+            // and resolve the return type.
+            let (resolved_name, resolved_ty) = if !type_args.is_empty() {
+                let inst = Instance {
+                    func_name: func_name.clone(),
+                    type_args: type_args.clone(),
+                };
+                // Build a substitution map from the generic function's type params
+                // to the provided type args.
+                let generic_func = bir_module.functions.iter().find(|f| f.name == *func_name);
+                let subst: HashMap<String, BirType> = if let Some(gf) = generic_func {
+                    gf.type_params
+                        .iter()
+                        .zip(type_args.iter())
+                        .map(|(tp, ta)| (tp.clone(), ta.clone()))
+                        .collect()
+                } else {
+                    HashMap::new()
+                };
+                let resolved = resolve_bir_type(ty, &subst);
+                (inst.mangled_name(), resolved)
+            } else {
+                (func_name.clone(), ty.clone())
+            };
             let callee = func_map
-                .get(func_name.as_str())
-                .ok_or_else(|| codegen_err(format!("unknown function: {}", func_name)))?;
+                .get(resolved_name.as_str())
+                .ok_or_else(|| codegen_err(format!("unknown function: {}", resolved_name)))?;
             let mut call_args: Vec<BasicValueEnum> = Vec::new();
             for arg in args {
                 let arg_ty = ctx.value_types.get(arg);
@@ -408,7 +507,7 @@ fn emit_instruction<'ctx>(
                 .builder
                 .build_call(*callee, &args_meta, "call")
                 .map_err(|e| codegen_err(e.to_string()))?;
-            if *ty != BirType::Unit {
+            if resolved_ty != BirType::Unit {
                 match call_site.try_as_basic_value() {
                     inkwell::values::ValueKind::Basic(ret_val) => {
                         ctx.builder
@@ -789,7 +888,7 @@ fn compile_function<'ctx>(
     struct_types: &HashMap<String, inkwell::types::StructType<'ctx>>,
     bir_module: &BirModule,
 ) -> Result<()> {
-    let value_types = collect_value_types(bir_func);
+    let value_types = collect_value_types(bir_func, bir_module);
 
     // Pass 1: Declare all LLVM basic blocks
     let mut bb_map: HashMap<u32, LlvmBasicBlock<'ctx>> = HashMap::new();
@@ -854,20 +953,38 @@ fn compile_function<'ctx>(
 }
 
 /// Build LLVM named struct types from BIR struct layouts (2-pass).
+/// Check if a BirType contains any TypeParam (indicates a generic template).
+fn contains_type_param(ty: &BirType) -> bool {
+    match ty {
+        BirType::TypeParam(_) => true,
+        BirType::Array { element, .. } => contains_type_param(element),
+        BirType::Struct { type_args, .. } => type_args.iter().any(contains_type_param),
+        _ => false,
+    }
+}
+
 fn build_struct_types<'ctx>(
     context: &'ctx Context,
     bir_module: &BirModule,
 ) -> HashMap<String, inkwell::types::StructType<'ctx>> {
     let mut struct_types = HashMap::new();
 
+    // Skip generic struct templates (fields contain TypeParam).
+    // They are handled by build_generic_struct_types after mono resolution.
+    let concrete_layouts: Vec<(&String, &Vec<(String, BirType)>)> = bir_module
+        .struct_layouts
+        .iter()
+        .filter(|(_, fields)| !fields.iter().any(|(_, ty)| contains_type_param(ty)))
+        .collect();
+
     // Pass 1: Create opaque structs
-    for name in bir_module.struct_layouts.keys() {
+    for (name, _) in &concrete_layouts {
         let llvm_struct = context.opaque_struct_type(name);
-        struct_types.insert(name.clone(), llvm_struct);
+        struct_types.insert((*name).clone(), llvm_struct);
     }
 
     // Pass 2: Set struct bodies
-    for (name, fields) in &bir_module.struct_layouts {
+    for (name, fields) in &concrete_layouts {
         let field_types: Vec<BasicTypeEnum<'ctx>> = fields
             .iter()
             .map(|(_, ty)| {
@@ -875,7 +992,7 @@ fn build_struct_types<'ctx>(
                     .expect("struct field must have a valid LLVM type")
             })
             .collect();
-        struct_types[name].set_body(&field_types, false);
+        struct_types[*name].set_body(&field_types, false);
     }
 
     struct_types
@@ -1601,6 +1718,137 @@ pub fn compile_with_mono(
         .map_err(|e| codegen_err(e.to_string()))?;
 
     Ok(buf.as_slice().to_vec())
+}
+
+/// Build an LLVM Module from a BIR module with monomorphization support.
+///
+/// Returns an LLVM `Module` suitable for JIT execution. This is the mono-aware
+/// equivalent of `compile_to_module`.
+pub fn compile_to_module_with_mono<'ctx>(
+    context: &'ctx Context,
+    bir_module: &BirModule,
+    mono_result: &MonoCollectResult,
+) -> Result<Module<'ctx>> {
+    let module = context.create_module("bengal");
+    let builder = context.create_builder();
+
+    Target::initialize_native(&InitializationConfig::default())
+        .map_err(|e| codegen_err(e.to_string()))?;
+
+    let triple = TargetMachine::get_default_triple();
+    let target = Target::from_triple(&triple).map_err(|e| codegen_err(e.to_string()))?;
+    let target_machine = target
+        .create_target_machine(
+            &triple,
+            "generic",
+            "",
+            OptimizationLevel::Default,
+            RelocMode::Default,
+            CodeModel::Default,
+        )
+        .ok_or_else(|| codegen_err("failed to create target machine"))?;
+
+    module.set_data_layout(&target_machine.get_target_data().get_data_layout());
+    module.set_triple(&triple);
+
+    let mut struct_types = build_struct_types(context, bir_module);
+    build_generic_struct_types(context, bir_module, mono_result, &mut struct_types);
+
+    // Build function lookup map for resolving generic instances.
+    let func_map_bir: HashMap<&str, &BirFunction> = bir_module
+        .functions
+        .iter()
+        .map(|f| (f.name.as_str(), f))
+        .collect();
+
+    // Resolve all generic function instances into concrete BirFunctions.
+    let resolved_instances: Vec<BirFunction> = mono_result
+        .func_instances
+        .iter()
+        .filter_map(|instance| {
+            let generic_func = func_map_bir.get(instance.func_name.as_str())?;
+            Some(resolve_function(
+                generic_func,
+                instance,
+                &bir_module.conformance_map,
+            ))
+        })
+        .collect();
+
+    // Collect non-generic functions (skip generic function templates).
+    let non_generic_funcs: Vec<&BirFunction> = bir_module
+        .functions
+        .iter()
+        .filter(|f| f.type_params.is_empty())
+        .collect();
+
+    // Pass 1: Declare all functions (non-generic + resolved instances).
+    let mut func_map: HashMap<String, FunctionValue> = HashMap::new();
+
+    let all_funcs_to_declare: Vec<&BirFunction> = non_generic_funcs
+        .iter()
+        .copied()
+        .chain(resolved_instances.iter())
+        .collect();
+
+    for func in &all_funcs_to_declare {
+        let param_types: Vec<BasicMetadataTypeEnum> = func
+            .params
+            .iter()
+            .filter(|(_, ty)| !matches!(ty, BirType::Unit))
+            .map(|(_, ty)| {
+                bir_type_to_llvm_type(context, ty, &struct_types).ok_or_else(|| {
+                    codegen_err(format!("non-Unit param must have LLVM type: {:?}", ty))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(|t| t.into())
+            .collect();
+
+        let fn_type = if func.return_type == BirType::Unit {
+            context.void_type().fn_type(&param_types, false)
+        } else {
+            let ret_ty = bir_type_to_llvm_type(context, &func.return_type, &struct_types)
+                .ok_or_else(|| codegen_err("unsupported return type"))?;
+            ret_ty.fn_type(&param_types, false)
+        };
+
+        let llvm_func = module.add_function(&func.name, fn_type, None);
+        func_map.insert(func.name.clone(), llvm_func);
+    }
+
+    // Pass 2: Compile non-generic functions.
+    for func in &non_generic_funcs {
+        let llvm_func = func_map[&func.name];
+        compile_function(
+            context,
+            &module,
+            &builder,
+            func,
+            llvm_func,
+            &func_map,
+            &struct_types,
+            bir_module,
+        )?;
+    }
+
+    // Pass 3: Compile resolved generic instances.
+    for func in &resolved_instances {
+        let llvm_func = func_map[&func.name];
+        compile_function(
+            context,
+            &module,
+            &builder,
+            func,
+            llvm_func,
+            &func_map,
+            &struct_types,
+            bir_module,
+        )?;
+    }
+
+    Ok(module)
 }
 
 /// Compile BIR module to native object code bytes.
