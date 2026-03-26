@@ -32,6 +32,36 @@ pub enum BengalError {
 
 pub type Result<T> = std::result::Result<T, BengalError>;
 
+#[derive(Debug, Error)]
+#[error("{phase} error in {module}: {source_error}")]
+pub struct PipelineError {
+    pub phase: &'static str,
+    pub module: String,
+    pub source_code: Option<String>,
+    pub source_error: BengalError,
+}
+
+impl PipelineError {
+    pub fn new(phase: &'static str, module: &str, source: Option<&str>, err: BengalError) -> Self {
+        PipelineError {
+            phase,
+            module: module.to_string(),
+            source_code: source.map(|s| s.to_string()),
+            source_error: err,
+        }
+    }
+
+    pub fn package(phase: &'static str, err: BengalError) -> Self {
+        Self::new(phase, "<package>", None, err)
+    }
+
+    pub fn into_diagnostic(self) -> BengalDiagnostic {
+        let filename = self.module.clone();
+        let source = self.source_code.unwrap_or_default();
+        self.source_error.into_diagnostic(&filename, &source)
+    }
+}
+
 #[derive(Debug, Diagnostic, Error)]
 #[error("{message}")]
 pub struct BengalDiagnostic {
