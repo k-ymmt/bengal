@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::error::{BengalError, Result};
+use crate::error::{BengalError, Result, Span};
 use crate::parser::ast::*;
 use crate::semantic::resolver;
 
@@ -141,10 +141,11 @@ impl Lowering {
         }
     }
 
-    fn record_error(&mut self, message: impl Into<String>) -> Value {
+    fn record_error(&mut self, message: impl Into<String>, span: Option<Span>) -> Value {
         if self.lowering_error.is_none() {
             self.lowering_error = Some(BengalError::LoweringError {
                 message: message.into(),
+                span,
             });
         }
         let dummy = self.fresh_value();
@@ -478,10 +479,13 @@ impl Lowering {
             if let Some(info) = sem.struct_defs.get(&struct_name)
                 && info.computed.iter().any(|p| p.name == field)
             {
-                self.record_error(format!(
-                    "computed property setter `{}` on non-direct receiver is not yet supported",
-                    field
-                ));
+                self.record_error(
+                    format!(
+                        "computed property setter `{}` on non-direct receiver is not yet supported",
+                        field
+                    ),
+                    Some(object.span),
+                );
                 return;
             }
         }
@@ -526,10 +530,13 @@ impl Lowering {
                     if let Some(info) = sem.struct_defs.get(&parent_struct)
                         && info.computed.iter().any(|p| p.name == *parent_field)
                     {
-                        self.record_error(format!(
-                            "assignment through computed property `{}` is not yet supported",
-                            parent_field
-                        ));
+                        self.record_error(
+                            format!(
+                                "assignment through computed property `{}` is not yet supported",
+                                parent_field
+                            ),
+                            Some(parent.span),
+                        );
                         return;
                     }
                 }
@@ -851,11 +858,14 @@ impl Lowering {
                         if let Some(info) = sem.struct_defs.get(&struct_name)
                             && info.computed.iter().any(|p| p.name == *field)
                         {
-                            self.record_error(format!(
-                                "computed property setter `{}` on `self` in initializer body \
+                            self.record_error(
+                                format!(
+                                    "computed property setter `{}` on `self` in initializer body \
                                      is not supported (self is not fully materialized during init)",
-                                field
-                            ));
+                                    field
+                                ),
+                                Some(object.span),
+                            );
                             return StmtResult::None;
                         }
                         // Stored field — write to per-field variable
@@ -873,6 +883,7 @@ impl Lowering {
                     if self.expr_refers_to_self(object) {
                         self.record_error(
                             "nested field assignment through `self` in initializer body is not supported",
+                            Some(object.span),
                         );
                         return StmtResult::None;
                     }
@@ -1169,21 +1180,27 @@ impl Lowering {
                     if let Some(info) = sem.struct_defs.get(&struct_name)
                         && info.computed.iter().any(|p| p.name == *field)
                     {
-                        return self.record_error(format!(
-                                        "computed property `{}` access on `self` in initializer body \
-                                         is not supported (self is not fully materialized during init)",
-                                        field
-                                    ));
+                        return self.record_error(
+                            format!(
+                                "computed property `{}` access on `self` in initializer body \
+                                 is not supported (self is not fully materialized during init)",
+                                field
+                            ),
+                            Some(expr.span),
+                        );
                     }
                     // Stored field — read from per-field variable
                     let key = format!("{}.{}", self_name, field);
                     if let Some(val) = self.try_lookup_var(&key) {
                         return val;
                     }
-                    return self.record_error(format!(
-                        "read-before-init: field `{}` read before initialization",
-                        field
-                    ));
+                    return self.record_error(
+                        format!(
+                            "read-before-init: field `{}` read before initialization",
+                            field
+                        ),
+                        Some(expr.span),
+                    );
                 }
 
                 // General case: lower the receiver, then dispatch on lowered type
@@ -1277,6 +1294,7 @@ impl Lowering {
                 if self.in_init_body {
                     return self.record_error(
                         "bare `self` in initializer body is not supported; use self.field instead",
+                        Some(expr.span),
                     );
                 }
                 self.lookup_var(self_name)
@@ -1305,10 +1323,13 @@ impl Lowering {
                         let proto_name = match bound {
                             Some(b) => b,
                             None => {
-                                return self.record_error(format!(
-                                    "type parameter `{}` has no protocol constraint for method `{}`",
-                                    type_param_name, method
-                                ));
+                                return self.record_error(
+                                    format!(
+                                        "type parameter `{}` has no protocol constraint for method `{}`",
+                                        type_param_name, method
+                                    ),
+                                    Some(expr.span),
+                                );
                             }
                         };
                         // Look up the protocol's method signature for the return type
@@ -1335,7 +1356,10 @@ impl Lowering {
                         self.value_types.insert(result, ret_ty);
                         return result;
                     }
-                    _ => return self.record_error("method call on non-struct value"),
+                    _ => {
+                        return self
+                            .record_error("method call on non-struct value", Some(expr.span));
+                    }
                 };
                 let local_mangled = format!("{}_{}", struct_name, method);
                 let resolved = self.resolve_name(&local_mangled);
@@ -2027,10 +2051,14 @@ pub fn semantic_type_to_bir(ty: &crate::semantic::types::Type) -> BirType {
     }
 }
 
-fn check_acyclic_structs(layouts: &HashMap<String, Vec<(String, BirType)>>) -> Result<()> {
+fn check_acyclic_structs(
+    layouts: &HashMap<String, Vec<(String, BirType)>>,
+    struct_spans: &HashMap<&str, Span>,
+) -> Result<()> {
     fn visit(
         name: &str,
         layouts: &HashMap<String, Vec<(String, BirType)>>,
+        struct_spans: &HashMap<&str, Span>,
         visiting: &mut HashSet<String>,
         visited: &mut HashSet<String>,
     ) -> Result<()> {
@@ -2043,12 +2071,13 @@ fn check_acyclic_structs(layouts: &HashMap<String, Vec<(String, BirType)>>) -> R
                     "recursive struct `{}` is not supported (infinitely sized)",
                     name
                 ),
+                span: struct_spans.get(name).copied(),
             });
         }
         if let Some(fields) = layouts.get(name) {
             for (_, ty) in fields {
                 if let BirType::Struct { name: dep, .. } = ty {
-                    visit(dep, layouts, visiting, visited)?;
+                    visit(dep, layouts, struct_spans, visiting, visited)?;
                 }
             }
         }
@@ -2059,7 +2088,7 @@ fn check_acyclic_structs(layouts: &HashMap<String, Vec<(String, BirType)>>) -> R
     let mut visiting = HashSet::new();
     let mut visited = HashSet::new();
     for name in layouts.keys() {
-        visit(name, layouts, &mut visiting, &mut visited)?;
+        visit(name, layouts, struct_spans, &mut visiting, &mut visited)?;
     }
     Ok(())
 }
@@ -2109,6 +2138,13 @@ pub(crate) fn lower_program_with_inferred(
         struct_layouts.insert(name.clone(), fields);
     }
 
+    // Build name-to-span lookup from AST StructDefs
+    let struct_spans: HashMap<&str, Span> = program
+        .structs
+        .iter()
+        .map(|s| (s.name.as_str(), s.span))
+        .collect();
+
     // Reject Unit-typed stored fields
     for (name, fields) in &struct_layouts {
         for (fname, fty) in fields {
@@ -2118,13 +2154,14 @@ pub(crate) fn lower_program_with_inferred(
                         "struct `{}` has Unit-typed stored field `{}`; Unit fields are not supported",
                         name, fname
                     ),
+                    span: struct_spans.get(name.as_str()).copied(),
                 });
             }
         }
     }
 
     // Reject recursive structs (infinitely sized)
-    check_acyclic_structs(&struct_layouts)?;
+    check_acyclic_structs(&struct_layouts, &struct_spans)?;
 
     let sem_info_ref = SemInfoRef {
         struct_defs: sem_info.struct_defs.clone(),
@@ -2207,6 +2244,7 @@ pub(crate) fn lower_program_with_inferred(
                     params: all_params,
                     return_type: return_type.clone(),
                     body: body.clone(),
+                    span: struct_def.span,
                 };
 
                 // Set up self context for lowering
@@ -2297,6 +2335,13 @@ pub(crate) fn lower_module_with_inferred(
         struct_layouts.insert(name.clone(), fields);
     }
 
+    // Build name-to-span lookup from AST StructDefs
+    let struct_spans: HashMap<&str, Span> = program
+        .structs
+        .iter()
+        .map(|s| (s.name.as_str(), s.span))
+        .collect();
+
     // Reject Unit-typed stored fields
     for (name, fields) in &struct_layouts {
         for (fname, fty) in fields {
@@ -2306,13 +2351,14 @@ pub(crate) fn lower_module_with_inferred(
                         "struct `{}` has Unit-typed stored field `{}`; Unit fields are not supported",
                         name, fname
                     ),
+                    span: struct_spans.get(name.as_str()).copied(),
                 });
             }
         }
     }
 
     // Reject recursive structs (infinitely sized)
-    check_acyclic_structs(&struct_layouts)?;
+    check_acyclic_structs(&struct_layouts, &struct_spans)?;
 
     let sem_info_ref = SemInfoRef {
         struct_defs: sem_info.struct_defs.clone(),
@@ -2405,6 +2451,7 @@ pub(crate) fn lower_module_with_inferred(
                     params: all_params,
                     return_type: return_type.clone(),
                     body: body.clone(),
+                    span: struct_def.span,
                 };
 
                 // Set up self context for lowering
@@ -2717,6 +2764,22 @@ bb0:
         let result = lower_program(&program, &sem_info);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("recursive struct"));
+    }
+
+    #[test]
+    fn lower_err_recursive_struct_has_span() {
+        let source =
+            "struct A { var b: B; } struct B { var a: A; } func main() -> Int32 { return 0; }";
+        let tokens = crate::lexer::tokenize(source).unwrap();
+        let program = crate::parser::parse(tokens).unwrap();
+        let sem_info = crate::semantic::analyze_post_mono(&program).unwrap();
+        let result = lower_program(&program, &sem_info);
+        match result {
+            Err(crate::error::BengalError::LoweringError { span, .. }) => {
+                assert!(span.is_some(), "recursive struct error should include span");
+            }
+            other => panic!("expected LoweringError, got {:?}", other),
+        }
     }
 
     #[test]

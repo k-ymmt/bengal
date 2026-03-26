@@ -21,7 +21,7 @@ pub enum BengalError {
     SemanticError { message: String, span: Span },
 
     #[error("Lowering error: {message}")]
-    LoweringError { message: String },
+    LoweringError { message: String, span: Option<Span> },
 
     #[error("Codegen error: {message}")]
     CodegenError { message: String },
@@ -98,11 +98,15 @@ impl BengalError {
                 span: Some(SourceSpan::new(span.start.into(), span.end - span.start)),
                 label: "here".to_string(),
             },
-            BengalError::LoweringError { message } => BengalDiagnostic {
+            BengalError::LoweringError { message, span } => BengalDiagnostic {
                 message,
                 src_code: source,
-                span: None,
-                label: String::new(),
+                span: span.map(|s| SourceSpan::new(s.start.into(), s.end - s.start)),
+                label: if span.is_some() {
+                    "here".to_string()
+                } else {
+                    String::new()
+                },
             },
             BengalError::CodegenError { message } => BengalDiagnostic {
                 message,
