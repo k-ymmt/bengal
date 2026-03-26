@@ -102,6 +102,7 @@ pub struct InferenceContext {
 New methods:
 
 - `fresh_var_with_provenance(prov) -> InferVarId` — creates a var and records provenance.
+- `set_provenance(id, prov)` — sets or replaces provenance on an existing var.
 - `update_arg_name(id, name)` — sets `arg_name` on an existing var's provenance.
 - `propagate_provenance(from, to)` — copies provenance from `from`'s root to `to`'s root
   if `to` has none. Called at two points in `unify()`:
@@ -286,7 +287,25 @@ Note: this path should be unreachable if `apply_defaults` error collection works
 `record_inferred_type_args` is only called when `apply_defaults` returns no errors. The
 `try_` variant is purely a defensive measure to convert a panic into a catchable error.
 
-### 7. Call Site Provenance Registration
+### 7. Extend `FuncSig` to Include Parameter Names
+
+`FuncSig.params` is currently `Vec<Type>`, which does not carry parameter names.
+To provide argument names in error messages, extend it to `Vec<(String, Type)>`,
+matching the existing pattern used by `MethodInfo` and `StructInitInfo`:
+
+```rust
+// semantic/resolver.rs
+pub struct FuncSig {
+    pub type_params: Vec<TypeParam>,
+    pub params: Vec<(String, Type)>,  // was Vec<Type>
+    pub return_type: Type,
+}
+```
+
+All call sites that construct or destructure `FuncSig.params` must be updated
+to use the `(name, ty)` tuple form.
+
+### 8. Call Site Provenance Registration
 
 In `analyze_expr` Call handler (`semantic/mod.rs`):
 
@@ -305,13 +324,13 @@ if let Some(ref mut c) = ctx {
 }
 
 // During argument unification:
-for (arg, param) in args.iter().zip(sig.params.iter()) {
+for (arg, (param_name, param_ty)) in args.iter().zip(sig.params.iter()) {
     let arg_ty = analyze_expr(arg, resolver, ctx.as_deref_mut())?;
-    let effective_ty = substitute_type(&param.ty, &subst);
+    let effective_ty = substitute_type(param_ty, &subst);
     if let Some(ref mut c) = ctx {
         // Update arg_name for bare InferVar parameters (e.g., `a: T`)
         if let Type::InferVar(id) = &effective_ty {
-            c.update_arg_name(*id, param.name.clone());
+            c.update_arg_name(*id, param_name.clone());
         }
         // Also set arg_name on literal vars created for this argument,
         // so provenance propagation can carry the argument name through.
@@ -319,7 +338,7 @@ for (arg, param) in args.iter().zip(sig.params.iter()) {
             c.set_provenance(*id, VarProvenance {
                 type_param_name: String::new(), // will be filled by propagation
                 def_name: name.clone(),
-                arg_name: Some(param.name.clone()),
+                arg_name: Some(param_name.clone()),
                 span: arg.span,
             });
         }
@@ -344,6 +363,7 @@ can be improved later by walking the type tree to find nested InferVars.
 | `parser/ast.rs` | Add `span: Span` to `Expr` |
 | `parser/mod.rs` | Capture span in `expr()`, update test helpers |
 | `monomorphize.rs` | Propagate `expr.span` in all `Expr` rewrites |
+| `semantic/resolver.rs` | Extend `FuncSig.params` to `Vec<(String, Type)>` |
 | `semantic/infer.rs` | `VarProvenance`, `apply_defaults` → `Vec<BengalError>`, `try_type_to_annotation`, provenance propagation |
 | `semantic/mod.rs` | `analyze_pre_mono` error collection, provenance registration in Call/StructInit |
 | `tests/type_inference.rs` | Update existing error tests, add new test cases |
