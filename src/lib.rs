@@ -87,8 +87,14 @@ pub fn compile_package_to_executable(entry_path: &Path, output_path: &Path) -> R
     for mod_info in graph.modules.values() {
         semantic::validate_generics(&mod_info.ast)?;
     }
-    for mod_info in graph.modules.values_mut() {
-        let (inferred, _sem_info) = semantic::analyze_pre_mono(&mod_info.ast)?;
+    // Collect pre-mono SemanticInfo per module for future use in BIR-level mono.
+    // For now we still use the post-mono package sem_info for lowering because
+    // it includes cross-module imported symbol definitions needed for name resolution.
+    let mut pre_mono_sem_infos: HashMap<package::ModulePath, semantic::SemanticInfo> =
+        HashMap::new();
+    for (mod_path, mod_info) in graph.modules.iter_mut() {
+        let (inferred, pre_mono_sem_info) = semantic::analyze_pre_mono(&mod_info.ast)?;
+        pre_mono_sem_infos.insert(mod_path.clone(), pre_mono_sem_info);
         mod_info.ast = monomorphize::monomorphize(&mod_info.ast, &inferred);
     }
 
