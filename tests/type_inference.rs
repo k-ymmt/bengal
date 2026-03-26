@@ -208,3 +208,70 @@ fn explicit_type_args_still_work() {
         42
     );
 }
+
+// --- Task 10: Loop inference ---
+
+#[test]
+fn loop_break_unit() {
+    assert_eq!(
+        compile_and_run("func main() -> Int32 { while true { break; }; return 0; }"),
+        0
+    );
+}
+
+#[test]
+fn loop_no_break_unit() {
+    assert_eq!(
+        compile_and_run(
+            "func main() -> Int32 {
+            var i: Int32 = 0;
+            while i < 3 { i = i + 1; };
+            return i;
+         }"
+        ),
+        3
+    );
+}
+
+#[test]
+fn loop_break_with_value() {
+    assert_eq!(
+        compile_and_run(
+            "func main() -> Int32 {
+            let x: Int32 = while true { break 42; };
+            return x;
+         }"
+        ),
+        42
+    );
+}
+
+#[test]
+fn loop_break_infer_i64() {
+    assert_eq!(
+        compile_and_run(
+            "func main() -> Int32 {
+            let x: Int64 = while true { break 42; };
+            return 0;
+         }"
+        ),
+        0
+    );
+}
+
+#[test]
+fn loop_nobreak_infer_i64() {
+    assert_eq!(
+        compile_and_run(
+            "func main() -> Int32 {
+            var i: Int32 = 0;
+            let x: Int64 = while i < 10 {
+                if i == 5 { break 99; };
+                i = i + 1;
+            } nobreak { yield 0; };
+            return 0;
+         }"
+        ),
+        0
+    );
+}
