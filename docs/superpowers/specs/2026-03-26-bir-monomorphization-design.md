@@ -34,13 +34,19 @@ monomorphization.
 ### BirType
 
 ```rust
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]  // Hash added for Instance dedup
 pub enum BirType {
     Unit, I32, I64, F32, F64, Bool,
-    Struct(String),
+    Struct { name: String, type_args: Vec<BirType> },  // CHANGED: type_args for generic structs
     Array { element: Box<BirType>, size: u64 },
     TypeParam(String),  // NEW: "T", "U", etc.
 }
 ```
+
+The `Struct` variant changes from `Struct(String)` to include `type_args`. For
+non-generic structs, `type_args` is empty. For `Pair<Int32, T>`, it would be
+`Struct { name: "Pair", type_args: [I32, TypeParam("T")] }`. `Hash` is added
+to support `Instance` deduplication in the mono collector.
 
 ### BirFunction
 
@@ -117,25 +123,59 @@ parse -> validate_generics -> analyze(unified) -> lower_program(generic-aware)
 ## Mono Collector
 
 ```rust
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Instance {
     pub func_name: String,
     pub type_args: Vec<BirType>,  // always concrete (no TypeParam)
 }
 
-pub fn mono_collect(bir: &BirModule, entry: &str) -> Vec<Instance>
+pub struct MonoCollectResult {
+    pub func_instances: Vec<Instance>,
+    pub struct_instances: HashSet<(String, Vec<BirType>)>,  // (struct_name, concrete_type_args)
+}
+
+pub fn mono_collect(bir: &BirModule, entry: &str) -> MonoCollectResult
 ```
 
 ### Algorithm
 
 1. Add entry point functions (non-generic) to worklist.
 2. Pop an `Instance` from worklist.
-3. Walk the BIR function's instructions.
+3. Walk the BIR function's instructions, applying the current substitution map.
 4. For each `Call` with non-empty `type_args`, resolve `TypeParam` references
    using the current instance's substitution map, creating a new concrete
-   `Instance`.
-5. If the new `Instance` is not already seen, add to worklist.
-6. Repeat until worklist is empty.
-7. Return all discovered instances.
+   `Instance`. Add to worklist if not already seen.
+5. For each `StructInit` with non-empty `type_args`, resolve and record the
+   concrete struct instance in `struct_instances`.
+6. For each `BirType::Struct` with non-empty `type_args` encountered in any
+   instruction (FieldGet, FieldSet, etc.), also record the concrete struct
+   instance.
+7. Repeat until worklist is empty.
+8. Return all discovered function and struct instances.
+
+### Generic Struct Layout Resolution
+
+`BirModule.struct_layouts` stores generic struct layouts with `TypeParam` in
+field types:
+
+```rust
+// Generic layout for Pair<T, U>
+struct_layouts: {
+    "Pair" => [("first", TypeParam("T")), ("second", TypeParam("U"))]
+}
+```
+
+During codegen, for each concrete struct instance (e.g., `("Pair", [I32, Bool])`),
+the substitution map is applied to the generic layout to produce a concrete
+layout:
+
+```rust
+// Concrete layout for Pair<Int32, Bool>
+[("first", I32), ("second", Bool)]
+```
+
+This concrete layout is used to create the LLVM struct type and compute field
+indices for GEP instructions.
 
 ## Codegen Substitution
 
@@ -156,6 +196,38 @@ fn codegen_instance(instance: &Instance, bir: &BirModule, ...) {
 Non-generic functions have empty `type_params` and empty substitution maps,
 so no overhead for the common case.
 
+### Type Resolution Utility
+
+A single `resolve_bir_type` function ensures consistent substitution across all
+BIR locations — instructions, terminators, block parameters, and struct layouts:
+
+```rust
+fn resolve_bir_type(ty: &BirType, subst: &HashMap<String, BirType>) -> BirType {
+    match ty {
+        BirType::TypeParam(name) => subst.get(name)
+            .unwrap_or_else(|| panic!("unresolved TypeParam: {name}"))
+            .clone(),
+        BirType::Array { element, size } => BirType::Array {
+            element: Box::new(resolve_bir_type(element, subst)),
+            size: *size,
+        },
+        BirType::Struct { name, type_args } => BirType::Struct {
+            name: name.clone(),
+            type_args: type_args.iter().map(|t| resolve_bir_type(t, subst)).collect(),
+        },
+        other => other.clone(),
+    }
+}
+```
+
+This function is applied to:
+- All `BirType` fields in instructions (`Literal.ty`, `BinaryOp.ty`,
+  `Call.ty`, `Cast.from_ty`, `Cast.to_ty`, `FieldGet.ty`, etc.)
+- Terminator argument types (`Br.args`, `BrBreak.args`, `BrContinue.args`,
+  `BrBreak.value`)
+- Basic block parameter types (`BasicBlock.params`)
+- Struct layouts (for concrete layout computation)
+
 ### Protocol Method Resolution
 
 For generic functions with protocol constraints (e.g., `T: Summable`), method
@@ -165,8 +237,23 @@ calls are represented in BIR as:
 Call { func: "Summable.add", type_args: [TypeParam("T")], ... }
 ```
 
-During codegen with `T = Int32`, the substitution resolves this to the concrete
-method `Int32_add` (following existing name mangling rules).
+During codegen with `T = Int32`, protocol method resolution proceeds as:
+
+1. Resolve `type_args`: `[TypeParam("T")]` -> `[I32]` via substitution map.
+2. Look up the concrete implementation using a **conformance map** stored in
+   `BirModule`:
+
+```rust
+// BirModule addition
+pub conformance_map: HashMap<(String, String), String>,
+// (protocol_method, concrete_type) -> implementation_name
+// e.g., ("Summable.add", "Int32") -> "Int32_add"
+```
+
+3. Replace the `Call` target with the concrete function name `Int32_add`.
+
+The conformance map is populated during BIR lowering from the semantic analysis
+results (protocol conformance declarations).
 
 ## Example
 
@@ -213,14 +300,85 @@ Generate `identity_Int32`:
 - return type `TypeParam("T")` -> `I32`
 - Emit LLVM function `@identity_Int32(i32) -> i32`
 
+### Example 2: Generic Struct
+
+#### Source
+
+```bengal
+struct Pair<T, U> {
+    let first: T
+    let second: U
+}
+func getFirst<T, U>(p: Pair<T, U>) -> T {
+    return p.first;
+}
+func main() -> Int32 {
+    let p = Pair<Int32, Bool>(first: 10, second: true);
+    return getFirst<Int32, Bool>(p);
+}
+```
+
+#### Generic BIR
+
+```
+struct_layouts: { "Pair" => [("first", TypeParam("T")), ("second", TypeParam("U"))] }
+
+@getFirst<T, U>(%0: Struct("Pair", [TypeParam("T"), TypeParam("U")])) -> TypeParam("T") {
+  bb0:
+    %1 = field_get %0, "first" : Struct("Pair", [TypeParam("T"), TypeParam("U")]) -> TypeParam("T")
+    return %1
+}
+
+@main() -> I32 {
+  bb0:
+    %0 = literal 10 : I32
+    %1 = literal 1 : Bool
+    %2 = struct_init @Pair { first: %0, second: %1 } type_args=[I32, Bool] : Struct("Pair", [I32, Bool])
+    %3 = call @getFirst(%2) type_args=[I32, Bool] : TypeParam("T")
+    return %3
+}
+```
+
+#### Mono Collection
+
+- Walk `main` -> `StructInit @Pair type_args=[I32, Bool]` -> record struct `("Pair", [I32, Bool])`
+- Walk `main` -> `Call @getFirst type_args=[I32, Bool]` -> record `Instance("getFirst", [I32, Bool])`
+- Walk `getFirst` with `T=I32, U=Bool` -> no further generic calls
+- Struct instances: `{("Pair", [I32, Bool])}`
+- Func instances: `[Instance("getFirst", [I32, Bool])]`
+
+#### Codegen
+
+- Build concrete layout for `Pair_Int32_Bool`: `[("first", I32), ("second", Bool)]`
+- Generate `getFirst_Int32_Bool`: resolve `Struct("Pair", [TypeParam("T"), TypeParam("U")])` -> `Struct("Pair", [I32, Bool])`
+
+## Multi-Module Considerations
+
+The multi-module pipeline (`compile_package`) currently runs `analyze_pre_mono`
++ `monomorphize` per module, then `analyze_package` for cross-module analysis.
+
+For this migration, the mono collector runs on the **entire package's BIR** (all
+modules combined), so cross-module generic instantiations are naturally
+discovered. Module A calling a generic function from module B is handled by the
+collector finding the `Call` in A's BIR and adding the `Instance` for B's
+function.
+
+Full cross-module separate compilation (where module B's BIR is loaded from an
+interface file rather than compiled in the same session) is out of scope and
+tracked in TODO.md §1.6.2.
+
 ## Incremental Migration Strategy
 
 ### Phase 1: BIR Data Structure Changes
 
-- Add `BirType::TypeParam(String)`
+- Add `BirType::TypeParam(String)` and `Hash` derive to `BirType`
+- Change `BirType::Struct(String)` to `BirType::Struct { name, type_args }`
 - Add `BirFunction.type_params: Vec<String>`
 - Add `type_args: Vec<BirType>` to `Call` and `StructInit`
+- Add `conformance_map` to `BirModule`
+- Update all existing code for the `Struct` variant change (mechanical)
 - Existing code uses `type_params: vec![]`, `type_args: vec![]`
+- Update BIR printer for `TypeParam`, `type_args`, and new `Struct` format
 - **All existing tests pass unchanged.**
 
 ### Phase 2: Generic BIR Lowering
@@ -244,7 +402,8 @@ Generate `identity_Int32`:
 
 ### Phase 4: Mono Collector
 
-- Implement `mono_collect(bir: &BirModule, entry: &str) -> Vec<Instance>`.
+- Implement `mono_collect(bir: &BirModule, entry: &str) -> MonoCollectResult`.
+- Collect both function instances and struct instances.
 - Recursive discovery from entry points with deduplication.
 - **Cross-validation: compare AST mono's specialized function set against BIR
   mono collector's `Instance` set for the same program.**
@@ -263,7 +422,6 @@ Generate `identity_Int32`:
 - Remove all `monomorphize()` call sites.
 - Clean up `InferredTypeArgs` (keep type inference results, remove mono-specific
   parts).
-- Update BIR printer for `TypeParam` and `type_args` display.
 - **All existing tests pass on the new BIR mono pipeline.**
 
 ### Phase Dependencies
