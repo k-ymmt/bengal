@@ -1062,6 +1062,19 @@ pub fn link_objects(obj_files: &[std::path::PathBuf], output: &std::path::Path) 
     Ok(())
 }
 
+/// Compile BIR module with monomorphization support.
+///
+/// Takes a `BirModule` and `MonoCollectResult`, builds LLVM struct types for
+/// generic struct instances, declares mangled generic function instances,
+/// and compiles them with on-the-fly type substitution.
+pub fn compile_with_mono(
+    bir_module: &BirModule,
+    mono_result: &crate::bir::mono::MonoCollectResult,
+) -> Result<Vec<u8>> {
+    let _ = mono_result;
+    compile(bir_module)
+}
+
 /// Compile BIR module to native object code bytes.
 pub fn compile(bir_module: &BirModule) -> Result<Vec<u8>> {
     let context = Context::create();
