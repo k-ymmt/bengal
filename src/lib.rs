@@ -45,10 +45,12 @@ pub fn compile_to_bir(source: &str) -> Result<(bir::instruction::BirModule, Stri
 ///
 /// 1. Find the package root (Bengal.toml) starting from `entry_path`'s parent.
 /// 2. Build the module graph from the entry file.
-/// 3. Run `analyze_package()` for cross-module semantic analysis.
-/// 4. For each module: build name maps, lower to BIR, optimize, compile to .o.
-/// 5. Link all .o files into the final executable at `output_path`.
-/// 6. Clean up temporary .o files.
+/// 3. For each module: validate generics (relaxed), run pre-mono type inference,
+///    and monomorphize with inferred type arguments.
+/// 4. Run `analyze_package()` for cross-module post-mono semantic analysis.
+/// 5. For each module: build name maps, lower to BIR, optimize, compile to .o.
+/// 6. Link all .o files into the final executable at `output_path`.
+/// 7. Clean up temporary .o files.
 pub fn compile_package_to_executable(entry_path: &Path, output_path: &Path) -> Result<()> {
     // 1. Find package root and load config
     let entry_dir = entry_path

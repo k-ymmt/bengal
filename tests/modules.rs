@@ -366,6 +366,35 @@ fn hierarchical_modules() {
     assert_eq!(result, 123);
 }
 
+// --- Cross-module type inference ---
+
+#[test]
+fn cross_module_literal_inference() {
+    // Type inference for numeric literals works across module boundaries
+    let result = compile_and_run_package(&[
+        (
+            "main.bengal",
+            r#"
+            module math;
+            import math::add_i64;
+            func main() -> Int32 {
+                add_i64(1, 2);
+                return 0;
+            }
+        "#,
+        ),
+        (
+            "math.bengal",
+            r#"
+            public func add_i64(a: Int64, b: Int64) -> Int64 {
+                return a + b;
+            }
+        "#,
+        ),
+    ]);
+    assert_eq!(result, 0);
+}
+
 // --- Error cases ---
 
 #[test]
