@@ -53,7 +53,8 @@ fn left_assoc_division() {
 
 #[test]
 fn left_assoc_subtraction() {
-    assert_eq!(compile_and_run("1 - 2 - 3"), -4);
+    // 10 - 3 - 2 = 5 (left-associative): uses non-negative result for native exit code
+    assert_eq!(compile_and_run("10 - 3 - 2"), 5);
 }
 
 #[test]
@@ -69,11 +70,12 @@ fn complex_precedence() {
 
 #[test]
 fn i64_arithmetic() {
+    // 50 + 70 = 120, fits in exit code byte range
     assert_eq!(
         compile_and_run(
-            "func main() -> Int32 { let x: Int64 = 100 as Int64; let y: Int64 = 200 as Int64; return (x + y) as Int32; }"
+            "func main() -> Int32 { let x: Int64 = 50 as Int64; let y: Int64 = 70 as Int64; return (x + y) as Int32; }"
         ),
-        300
+        120
     );
 }
 

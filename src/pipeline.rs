@@ -362,6 +362,12 @@ fn collect_external_functions(
     let mut seen_externals = HashSet::new();
 
     for func in &bir.functions {
+        // Skip generic function templates — their bodies contain unresolved TypeParams
+        // that would produce incorrect external function signatures.
+        if !func.type_params.is_empty() {
+            continue;
+        }
+
         // Build value -> type map for this function
         let mut value_types: HashMap<Value, BirType> = HashMap::new();
         for (val, ty) in &func.params {

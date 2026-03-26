@@ -523,8 +523,13 @@ fn analyze_single_module(
     }
 
     // Pass 3: analyze struct member bodies and function bodies
+    // Skip generic structs — their member bodies contain unsubstituted type
+    // parameters that would cause spurious errors.
     let mut infer_ctx = InferenceContext::new();
     for struct_def in &program.structs {
+        if !struct_def.type_params.is_empty() {
+            continue;
+        }
         analyze_struct_members(struct_def, resolver, &mut infer_ctx)?;
         let _ = infer_ctx.apply_defaults(); // best-effort; errors ignored here
         infer_ctx.reset();
