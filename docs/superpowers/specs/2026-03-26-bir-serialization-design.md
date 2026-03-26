@@ -36,6 +36,17 @@ pub struct BengalModFile {
 
 Each module's `BirModule` contains the full BIR: struct layouts, struct type parameters, all functions (generic and concrete), and the conformance map.
 
+### `conformance_map` Serialization
+
+`BirModule.conformance_map` has type `HashMap<(String, BirType), String>`. MessagePack (via `rmp-serde`) does not support non-string map keys. To handle this, add a serde attribute on the field to serialize it as a `Vec<((String, BirType), String)>`:
+
+```rust
+#[serde(with = "conformance_map_serde")]
+pub conformance_map: HashMap<(String, BirType), String>,
+```
+
+The `conformance_map_serde` helper module converts to/from `Vec` for serialization.
+
 ## Serialization Approach
 
 Derive `Serialize` and `Deserialize` directly on existing BIR types. No intermediate DTO layer — format changes are handled by version number rejection.
@@ -57,16 +68,9 @@ In `src/bir/instruction.rs`:
 In `src/package.rs`:
 - `ModulePath`
 
-### Types Requiring `PartialEq` (for round-trip testing and future use)
+### `PartialEq`
 
-- `Instruction`
-- `Terminator`
-- `BasicBlock`
-- `CfgRegion`
-- `BirFunction`
-- `BirModule`
-
-(`BirType`, `Value`, `BirBinOp`, `BirCompareOp` already derive `PartialEq`.)
+All BIR types already derive `PartialEq`. No changes needed.
 
 ### Types NOT Serialized
 
@@ -95,6 +99,10 @@ pub fn write_interface(package: &LoweredPackage, path: &Path) -> Result<()>
 pub fn read_interface(path: &Path) -> Result<BengalModFile>
 ```
 
+### Intended Call Point
+
+`write_interface` is designed to be called after `optimize` and before `monomorphize` — at the point where BIR is fully lowered and optimized but still generic. Pipeline integration (adding an explicit stage) is deferred to separate compilation work.
+
 ### `write_interface` Flow
 
 1. Build `BengalModFile` from `LoweredPackage.modules` (collect each `LoweredModule.bir`)
@@ -111,7 +119,7 @@ pub fn read_interface(path: &Path) -> Result<BengalModFile>
 
 ### Error Handling
 
-Add `InterfaceError { message: String }` variant to `BengalError`. Covers: file I/O errors, magic mismatch, version mismatch, deserialization failures.
+Add `InterfaceError { message: String }` variant to `BengalError`. Covers: file I/O errors, magic mismatch, version mismatch, deserialization failures. Also add a corresponding match arm in `into_diagnostic` (and any other exhaustive matches on `BengalError`).
 
 ### `lib.rs` Integration
 
@@ -154,9 +162,9 @@ Source patterns to cover:
 | File | Change |
 |------|--------|
 | `Cargo.toml` | Add `rmp-serde` |
-| `src/bir/instruction.rs` | Add `Serialize, Deserialize, PartialEq` derives |
+| `src/bir/instruction.rs` | Add `Serialize, Deserialize` derives; add `conformance_map_serde` helper |
 | `src/package.rs` | Add `Serialize, Deserialize` to `ModulePath` |
-| `src/error.rs` | Add `InterfaceError` variant |
+| `src/error.rs` | Add `InterfaceError` variant and corresponding `into_diagnostic` arm |
 | `src/interface.rs` | **New** — `BengalModFile`, `write_interface`, `read_interface` |
 | `src/lib.rs` | Add `pub mod interface;` |
 | `tests/interface.rs` | **New** — round-trip and validation tests |
