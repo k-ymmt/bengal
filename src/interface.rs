@@ -50,6 +50,34 @@ pub fn write_interface(package: &LoweredPackage, path: &Path) -> Result<()> {
 }
 
 /// Read a .bengalmod interface file.
-pub fn read_interface(_path: &Path) -> Result<BengalModFile> {
-    todo!("read_interface not yet implemented")
+pub fn read_interface(path: &Path) -> Result<BengalModFile> {
+    let data = std::fs::read(path).map_err(|e| BengalError::InterfaceError {
+        message: format!("failed to read '{}': {}", path.display(), e),
+    })?;
+
+    if data.len() < 8 {
+        return Err(BengalError::InterfaceError {
+            message: "file too short to be a valid .bengalmod file".to_string(),
+        });
+    }
+
+    if &data[..4] != MAGIC {
+        return Err(BengalError::InterfaceError {
+            message: "invalid magic bytes: not a .bengalmod file".to_string(),
+        });
+    }
+
+    let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
+    if version != FORMAT_VERSION {
+        return Err(BengalError::InterfaceError {
+            message: format!(
+                "incompatible format version {} (expected {}), please rebuild",
+                version, FORMAT_VERSION
+            ),
+        });
+    }
+
+    rmp_serde::from_slice(&data[8..]).map_err(|e| BengalError::InterfaceError {
+        message: format!("failed to deserialize interface: {}", e),
+    })
 }

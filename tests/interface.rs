@@ -1,7 +1,7 @@
 mod common;
 
-#[allow(unused_imports)]
 use bengal::interface::{read_interface, write_interface};
+use bengal::package::ModulePath;
 use bengal::pipeline::{self, LoweredPackage};
 use tempfile::NamedTempFile;
 
@@ -20,4 +20,20 @@ fn write_interface_creates_file() {
     write_interface(&lowered, file.path()).unwrap();
     let metadata = std::fs::metadata(file.path()).unwrap();
     assert!(metadata.len() > 8, "file must contain header + payload");
+}
+
+#[test]
+fn round_trip_simple_function() {
+    let lowered = source_to_lowered(
+        "func add(a: Int32, b: Int32) -> Int32 { return a + b; }
+         func main() -> Int32 { return add(1, 2); }",
+    );
+    let file = NamedTempFile::new().unwrap();
+    write_interface(&lowered, file.path()).unwrap();
+    let loaded = read_interface(file.path()).unwrap();
+
+    assert_eq!(loaded.package_name, "test");
+    let original_bir = &lowered.modules.get(&ModulePath::root()).unwrap().bir;
+    let loaded_bir = loaded.modules.get(&ModulePath::root()).unwrap();
+    assert_eq!(original_bir, loaded_bir);
 }
