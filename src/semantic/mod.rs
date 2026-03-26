@@ -1076,7 +1076,101 @@ pub fn analyze_pre_mono(program: &Program) -> Result<infer::InferredTypeArgs> {
         ctx.reset();
     }
 
+    // --- Stage 2: validate protocol constraints on inferred type args ---
+    validate_inferred_constraints(&inferred, program)?;
+
     Ok(inferred)
+}
+
+/// Check that inferred type arguments satisfy protocol constraints.
+///
+/// This is Stage 2 of constraint validation. Stage 1 (`validate_generics`)
+/// checks explicit type args at call sites. Stage 2 checks inferred type args
+/// that were resolved during `analyze_pre_mono`. Stage 3 (constraint checking
+/// after monomorphization substitutes TypeParam args into concrete types) is
+/// handled implicitly: since `analyze_post_mono` performs full type checking on
+/// monomorphized code, any constraint violation from a formerly-TypeParam arg
+/// will surface as a type mismatch when the protocol method is called on a
+/// non-conforming type.
+fn validate_inferred_constraints(
+    inferred: &infer::InferredTypeArgs,
+    program: &Program,
+) -> Result<()> {
+    let struct_map: HashMap<String, &StructDef> = program
+        .structs
+        .iter()
+        .map(|s| (s.name.clone(), s))
+        .collect();
+
+    for site in inferred.map.values() {
+        for (param, arg) in site.type_params.iter().zip(&site.type_args) {
+            // Skip args that are still TypeParam references (deferred to Stage 3 / post-mono)
+            if let TypeAnnotation::Named(name) = arg
+                && !struct_map.contains_key(name)
+                && !is_builtin_type(name)
+            {
+                continue;
+            }
+
+            if let Some(ref bound) = param.bound {
+                let arg_name = match arg {
+                    TypeAnnotation::Named(name) => name.as_str(),
+                    TypeAnnotation::Generic { name, .. } => name.as_str(),
+                    // Primitives cannot conform to protocols (for now)
+                    _ => {
+                        let type_name = type_annotation_display_name(arg);
+                        return Err(sem_err(format!(
+                            "type `{}` does not conform to protocol `{}`",
+                            type_name, bound
+                        )));
+                    }
+                };
+                if let Some(struct_def) = struct_map.get(arg_name) {
+                    if !struct_def.conformances.contains(bound) {
+                        return Err(sem_err(format!(
+                            "type `{}` does not conform to protocol `{}` (required by {} type parameter `{}`)",
+                            arg_name, bound, site.def_name, param.name
+                        )));
+                    }
+                } else {
+                    // Not a known struct — builtins / primitives don't conform to protocols
+                    return Err(sem_err(format!(
+                        "type `{}` does not conform to protocol `{}`",
+                        arg_name, bound
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Return true if `name` is a built-in type name.
+fn is_builtin_type(name: &str) -> bool {
+    matches!(
+        name,
+        "Int32" | "Int64" | "Float32" | "Float64" | "Bool" | "Unit"
+    )
+}
+
+/// Human-readable display name for a `TypeAnnotation`.
+fn type_annotation_display_name(ta: &TypeAnnotation) -> String {
+    match ta {
+        TypeAnnotation::I32 => "Int32".to_string(),
+        TypeAnnotation::I64 => "Int64".to_string(),
+        TypeAnnotation::F32 => "Float32".to_string(),
+        TypeAnnotation::F64 => "Float64".to_string(),
+        TypeAnnotation::Bool => "Bool".to_string(),
+        TypeAnnotation::Unit => "Unit".to_string(),
+        TypeAnnotation::Named(name) => name.clone(),
+        TypeAnnotation::Generic { name, args } => {
+            let arg_strs: Vec<String> = args.iter().map(type_annotation_display_name).collect();
+            format!("{}<{}>", name, arg_strs.join(", "))
+        }
+        TypeAnnotation::Array { element, size } => {
+            format!("[{}; {}]", type_annotation_display_name(element), size)
+        }
+    }
 }
 
 pub fn analyze_post_mono(program: &Program) -> Result<SemanticInfo> {

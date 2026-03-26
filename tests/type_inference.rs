@@ -275,3 +275,81 @@ fn loop_nobreak_infer_i64() {
         0
     );
 }
+
+// --- Task 11: Protocol constraint validation for inferred type args ---
+
+#[test]
+fn infer_constraint_violation() {
+    let result = compile_should_fail(
+        "protocol Summable { func sum() -> Int32; }
+         struct Wrapper<T: Summable> { var value: T; }
+         func main() -> Int32 {
+            let w = Wrapper(value: true);
+            return 0;
+         }",
+    );
+    assert!(
+        result.contains("does not conform")
+            || result.contains("constraint")
+            || result.contains("Summable"),
+        "Expected constraint error, got: {}",
+        result
+    );
+}
+
+#[test]
+fn infer_constraint_satisfied() {
+    // Wrapper<T: Summable> with inferred T = MyNum should pass constraint check
+    assert_eq!(
+        compile_and_run(
+            "protocol Summable { func sum() -> Int32; }
+             struct MyNum: Summable {
+                var x: Int32;
+                func sum() -> Int32 { return self.x; }
+             }
+             struct Wrapper<T: Summable> { var value: T; }
+             func main() -> Int32 {
+                let w = Wrapper(value: MyNum(x: 42));
+                return 0;
+             }"
+        ),
+        0
+    );
+}
+
+#[test]
+fn infer_constraint_violation_func() {
+    let result = compile_should_fail(
+        "protocol Printable { func show() -> Int32; }
+         func wrap<T: Printable>(value: T) -> T { return value; }
+         func main() -> Int32 {
+            let x = wrap(42);
+            return 0;
+         }",
+    );
+    assert!(
+        result.contains("does not conform") || result.contains("Printable"),
+        "Expected constraint error, got: {}",
+        result
+    );
+}
+
+#[test]
+fn infer_constraint_satisfied_func() {
+    // extract<T: Showable> with inferred T = Val should pass constraint check
+    assert_eq!(
+        compile_and_run(
+            "protocol Showable { func show() -> Int32; }
+             struct Val: Showable {
+                var n: Int32;
+                func show() -> Int32 { return self.n; }
+             }
+             func use_val(v: Val) -> Int32 { return v.n; }
+             func extract<T: Showable>(value: T) -> T { return value; }
+             func main() -> Int32 {
+                return use_val(extract(Val(n: 7)));
+             }"
+        ),
+        7
+    );
+}
