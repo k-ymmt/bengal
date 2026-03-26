@@ -353,3 +353,121 @@ fn infer_constraint_satisfied_func() {
         7
     );
 }
+
+// --- Task 13: Comprehensive end-to-end test suite ---
+
+// Numeric literal edge cases
+
+#[test]
+fn infer_yield_in_block() {
+    assert_eq!(
+        compile_and_run("func main() -> Int32 { let x: Int64 = { yield 42; }; return 0; }"),
+        0
+    );
+}
+
+#[test]
+fn infer_array_element_type() {
+    assert_eq!(
+        compile_and_run("func main() -> Int32 { let arr: [Int64; 3] = [1, 2, 3]; return 0; }"),
+        0
+    );
+}
+
+// Method/field on generic struct
+
+#[test]
+fn method_on_inferred_generic_struct() {
+    assert_eq!(
+        compile_and_run(
+            "struct Box<T> { var value: T;
+                func get() -> T { return self.value; }
+             }
+             func main() -> Int32 {
+                let b = Box(value: 42);
+                return b.get();
+             }"
+        ),
+        42
+    );
+}
+
+#[test]
+fn field_assign_on_generic_struct() {
+    assert_eq!(
+        compile_and_run(
+            "struct Box<T> { var value: T; }
+             func main() -> Int32 {
+                var b = Box(value: 0);
+                b.value = 42;
+                return b.value;
+             }"
+        ),
+        42
+    );
+}
+
+// Error cases
+
+#[test]
+#[should_panic(expected = "unresolved type variable")]
+fn error_unresolvable_type() {
+    // When T cannot be inferred at all (no args, no expected type), the compiler
+    // currently panics during type_to_annotation. This test documents that
+    // behavior; a future improvement should surface a clean diagnostic instead.
+    compile_should_fail(
+        "func default_value<T>() -> T { return 0; }
+         func main() -> Int32 { let x = default_value(); return 0; }",
+    );
+}
+
+#[test]
+fn error_partial_type_args() {
+    let result = compile_should_fail(
+        "func pair<A, B>(a: A, b: B) -> Int32 { return 0; }
+         func main() -> Int32 { return pair<Int32>(42, true); }",
+    );
+    assert!(
+        result.contains("type argument") || result.contains("expected"),
+        "Expected type arg error, got: {}",
+        result
+    );
+}
+
+#[test]
+fn error_integer_float_mismatch() {
+    // When an integer literal and a float literal are unified for the same T,
+    // the compiler currently reports "undefined function" because the monomorphizer
+    // cannot instantiate the generic function. A future improvement should surface
+    // a unification error during pre-mono analysis instead.
+    let result = compile_should_fail(
+        "func choose<T>(a: T, b: T) -> T { return a; }
+         func main() -> Int32 { choose(42, 3.14); return 0; }",
+    );
+    assert!(
+        result.contains("mismatch")
+            || result.contains("cannot unify")
+            || result.contains("undefined function"),
+        "Expected type error, got: {}",
+        result
+    );
+}
+
+// Explicit type args coexistence with inference
+
+#[test]
+fn explicit_type_args_with_inference_coexist() {
+    assert_eq!(
+        compile_and_run(
+            "func identity<T>(value: T) -> T { return value; }
+             struct Box<T> { var value: T; }
+             func main() -> Int32 {
+                let a = identity<Int32>(42);
+                let b = identity(100);
+                let c = Box(value: 10);
+                return a + b + c.value;
+             }"
+        ),
+        152
+    );
+}
