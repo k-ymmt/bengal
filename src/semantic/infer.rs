@@ -1,5 +1,7 @@
+use std::collections::HashMap;
+
 use crate::error::{BengalError, Span};
-use crate::parser::ast::NodeId;
+use crate::parser::ast::{NodeId, TypeAnnotation, TypeParam};
 use crate::semantic::types::Type;
 
 fn unify_err(message: impl Into<String>) -> BengalError {
@@ -11,6 +13,65 @@ fn unify_err(message: impl Into<String>) -> BengalError {
 
 pub type InferVarId = u32;
 
+/// Stores inferred type arguments for call sites, indexed by NodeId.
+pub struct InferredTypeArgs {
+    pub map: HashMap<NodeId, InferredCallSite>,
+}
+
+/// One call site's inferred type args + definition info for constraint checking.
+pub struct InferredCallSite {
+    pub type_args: Vec<TypeAnnotation>,
+    pub type_params: Vec<TypeParam>,
+    pub def_name: String,
+}
+
+impl InferredTypeArgs {
+    pub fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+        }
+    }
+}
+
+impl Default for InferredTypeArgs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Convert a fully-resolved `Type` to `TypeAnnotation`.
+/// Called after `apply_defaults`, so no InferVar/IntegerLiteral/FloatLiteral should remain.
+pub fn type_to_annotation(ty: &Type) -> TypeAnnotation {
+    match ty {
+        Type::I32 => TypeAnnotation::I32,
+        Type::I64 => TypeAnnotation::I64,
+        Type::F32 => TypeAnnotation::F32,
+        Type::F64 => TypeAnnotation::F64,
+        Type::Bool => TypeAnnotation::Bool,
+        Type::Unit => TypeAnnotation::Unit,
+        Type::Struct(name) => TypeAnnotation::Named(name.clone()),
+        Type::TypeParam { name, .. } => TypeAnnotation::Named(name.clone()),
+        Type::Generic { name, args } => TypeAnnotation::Generic {
+            name: name.clone(),
+            args: args.iter().map(type_to_annotation).collect(),
+        },
+        Type::Array { element, size } => TypeAnnotation::Array {
+            element: Box::new(type_to_annotation(element)),
+            size: *size,
+        },
+        Type::InferVar(_) | Type::IntegerLiteral(_) | Type::FloatLiteral(_) => {
+            unreachable!("unresolved type variable in type_to_annotation")
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VarKind {
+    General,
+    IntegerLiteral,
+    FloatLiteral,
+}
+
 #[derive(Debug, Clone)]
 enum VarState {
     Unbound,
@@ -21,13 +82,15 @@ enum VarState {
 #[derive(Debug)]
 pub struct InferenceContext {
     var_states: Vec<VarState>,
-    pub pending_type_args: Vec<(NodeId, Vec<InferVarId>)>,
+    var_kinds: Vec<VarKind>,
+    pub pending_type_args: Vec<(NodeId, Vec<InferVarId>, Vec<TypeParam>, String)>,
 }
 
 impl InferenceContext {
     pub fn new() -> Self {
         Self {
             var_states: Vec::new(),
+            var_kinds: Vec::new(),
             pending_type_args: Vec::new(),
         }
     }
@@ -36,19 +99,24 @@ impl InferenceContext {
     pub fn fresh_var(&mut self) -> InferVarId {
         let id = self.var_states.len() as InferVarId;
         self.var_states.push(VarState::Unbound);
+        self.var_kinds.push(VarKind::General);
         id
     }
 
     /// Create a fresh variable for an integer literal.
-    /// The IntegerLiteral vs InferVar distinction is in the Type enum, not VarState.
     pub fn fresh_integer(&mut self) -> InferVarId {
-        self.fresh_var()
+        let id = self.var_states.len() as InferVarId;
+        self.var_states.push(VarState::Unbound);
+        self.var_kinds.push(VarKind::IntegerLiteral);
+        id
     }
 
     /// Create a fresh variable for a float literal.
-    /// The FloatLiteral vs InferVar distinction is in the Type enum, not VarState.
     pub fn fresh_float(&mut self) -> InferVarId {
-        self.fresh_var()
+        let id = self.var_states.len() as InferVarId;
+        self.var_states.push(VarState::Unbound);
+        self.var_kinds.push(VarKind::FloatLiteral);
+        id
     }
 
     /// Follow the Union-Find chain with path compression and return the resolved type.
@@ -80,6 +148,7 @@ impl InferenceContext {
     /// Clear all state.
     pub fn reset(&mut self) {
         self.var_states.clear();
+        self.var_kinds.clear();
         self.pending_type_args.clear();
     }
 
@@ -125,6 +194,78 @@ impl InferenceContext {
                 }
             }
             _ => ty,
+        }
+    }
+
+    /// After analyzing a function body, resolve remaining type variables to defaults:
+    /// - `IntegerLiteral` -> `I32`
+    /// - `FloatLiteral` -> `F64`
+    /// - `InferVar` still unbound -> error
+    pub fn apply_defaults(&mut self) -> Result<(), BengalError> {
+        for id in 0..self.var_states.len() {
+            let id = id as InferVarId;
+            let resolved = self.deep_resolve(Type::InferVar(id));
+            match resolved {
+                Type::InferVar(_) => {
+                    // Variable is still unbound; check its kind for defaulting
+                    match self.var_kinds[id as usize] {
+                        VarKind::IntegerLiteral => {
+                            self.set_resolved(id, Type::I32);
+                        }
+                        VarKind::FloatLiteral => {
+                            self.set_resolved(id, Type::F64);
+                        }
+                        VarKind::General => {
+                            return Err(unify_err(
+                                "cannot infer type; add explicit type annotation",
+                            ));
+                        }
+                    }
+                }
+                Type::IntegerLiteral(_) => {
+                    self.set_resolved(id, Type::I32);
+                }
+                Type::FloatLiteral(_) => {
+                    self.set_resolved(id, Type::F64);
+                }
+                _ => {} // already resolved to concrete type
+            }
+        }
+        Ok(())
+    }
+
+    /// Record that a call site needs inferred type args.
+    pub fn register_call_site(
+        &mut self,
+        node_id: NodeId,
+        var_ids: Vec<InferVarId>,
+        type_params: Vec<TypeParam>,
+        def_name: String,
+    ) {
+        self.pending_type_args
+            .push((node_id, var_ids, type_params, def_name));
+    }
+
+    /// After `apply_defaults`, convert pending type args to TypeAnnotation
+    /// and store in InferredTypeArgs.
+    pub fn record_inferred_type_args(&mut self, inferred: &mut InferredTypeArgs) {
+        let pending: Vec<_> = self.pending_type_args.drain(..).collect();
+        for (node_id, var_ids, type_params, def_name) in pending {
+            let type_args: Vec<TypeAnnotation> = var_ids
+                .iter()
+                .map(|&id| {
+                    let resolved = self.deep_resolve(Type::InferVar(id));
+                    type_to_annotation(&resolved)
+                })
+                .collect();
+            inferred.map.insert(
+                node_id,
+                InferredCallSite {
+                    type_args,
+                    type_params,
+                    def_name,
+                },
+            );
         }
     }
 
@@ -497,5 +638,107 @@ mod tests {
             ctx.unify(Type::Struct("Foo".into()), Type::Struct("Bar".into()))
                 .is_err()
         );
+    }
+
+    // --- Task 4: apply_defaults, type_to_annotation, register/record ---
+
+    #[test]
+    fn apply_defaults_integer_literal_to_i32() {
+        let mut ctx = InferenceContext::new();
+        let a = ctx.fresh_integer();
+        // a is unbound, should default to I32
+        assert!(ctx.apply_defaults().is_ok());
+        assert_eq!(ctx.resolve(a), Type::I32);
+    }
+
+    #[test]
+    fn apply_defaults_float_literal_to_f64() {
+        let mut ctx = InferenceContext::new();
+        let a = ctx.fresh_float();
+        assert!(ctx.apply_defaults().is_ok());
+        assert_eq!(ctx.resolve(a), Type::F64);
+    }
+
+    #[test]
+    fn apply_defaults_already_resolved() {
+        let mut ctx = InferenceContext::new();
+        let a = ctx.fresh_integer();
+        ctx.set_resolved(a, Type::I64);
+        assert!(ctx.apply_defaults().is_ok());
+        assert_eq!(ctx.resolve(a), Type::I64); // stays I64, not defaulted to I32
+    }
+
+    #[test]
+    fn apply_defaults_unresolved_infer_var_error() {
+        let mut ctx = InferenceContext::new();
+        let _a = ctx.fresh_var();
+        assert!(ctx.apply_defaults().is_err());
+    }
+
+    #[test]
+    fn type_to_annotation_primitives() {
+        assert_eq!(type_to_annotation(&Type::I32), TypeAnnotation::I32);
+        assert_eq!(type_to_annotation(&Type::I64), TypeAnnotation::I64);
+        assert_eq!(type_to_annotation(&Type::F32), TypeAnnotation::F32);
+        assert_eq!(type_to_annotation(&Type::F64), TypeAnnotation::F64);
+        assert_eq!(type_to_annotation(&Type::Bool), TypeAnnotation::Bool);
+        assert_eq!(type_to_annotation(&Type::Unit), TypeAnnotation::Unit);
+    }
+
+    #[test]
+    fn type_to_annotation_struct() {
+        assert_eq!(
+            type_to_annotation(&Type::Struct("Foo".into())),
+            TypeAnnotation::Named("Foo".into())
+        );
+    }
+
+    #[test]
+    fn type_to_annotation_type_param() {
+        assert_eq!(
+            type_to_annotation(&Type::TypeParam {
+                name: "T".into(),
+                bound: Some("Proto".into())
+            }),
+            TypeAnnotation::Named("T".into())
+        );
+    }
+
+    #[test]
+    fn type_to_annotation_generic() {
+        let ty = Type::Generic {
+            name: "Box".into(),
+            args: vec![Type::I32],
+        };
+        assert_eq!(
+            type_to_annotation(&ty),
+            TypeAnnotation::Generic {
+                name: "Box".into(),
+                args: vec![TypeAnnotation::I32],
+            }
+        );
+    }
+
+    #[test]
+    fn register_and_record_type_args() {
+        let mut ctx = InferenceContext::new();
+        let mut inferred = InferredTypeArgs::new();
+        let node_id = NodeId(42);
+        let var_id = ctx.fresh_var();
+        ctx.register_call_site(
+            node_id,
+            vec![var_id],
+            vec![TypeParam {
+                name: "T".into(),
+                bound: None,
+            }],
+            "identity".into(),
+        );
+        // Resolve the var
+        ctx.set_resolved(var_id, Type::I32);
+        ctx.record_inferred_type_args(&mut inferred);
+        let site = inferred.map.get(&node_id).unwrap();
+        assert_eq!(site.type_args, vec![TypeAnnotation::I32]);
+        assert_eq!(site.def_name, "identity");
     }
 }
