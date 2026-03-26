@@ -228,6 +228,26 @@ impl Resolver {
         }
     }
 
+    /// Like `set_break_type`, but uses `InferenceContext::unify` when there's
+    /// already a break type, so inference variables are handled correctly.
+    pub fn set_or_unify_break_type(
+        &mut self,
+        ty: Type,
+        ctx: &mut crate::semantic::infer::InferenceContext,
+    ) -> Result<()> {
+        let current = self.loop_break_types.last_mut().unwrap();
+        match current {
+            Some(existing) => {
+                ctx.unify(ty, existing.clone())?;
+                Ok(())
+            }
+            None => {
+                *current = Some(ty);
+                Ok(())
+            }
+        }
+    }
+
     // Type parameter scope management
 
     pub fn push_type_params(&mut self, params: &[TypeParam]) {

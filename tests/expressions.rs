@@ -198,7 +198,9 @@ fn err_as_binds_tighter_than_addition() {
 
 #[test]
 fn err_comparison_type_mismatch() {
+    // With type inference, numeric literals adapt to context, so use an explicit
+    // cast to produce a genuine mismatch (Int64 vs Int32).
     compile_source_should_fail(
-        "func main() -> Int32 { let x: Int64 = 1 as Int64; let r = if x == 1 { yield 1; } else { yield 0; }; return r; }",
+        "func main() -> Int32 { let x: Int64 = 1 as Int64; let y: Int32 = 1; let r = if x == y { yield 1; } else { yield 0; }; return r; }",
     );
 }

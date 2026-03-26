@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use crate::error::{BengalError, Result, Span};
 use crate::package::{ModuleGraph, ModulePath};
 use crate::parser::ast::*;
+use infer::InferenceContext;
 use resolver::{FuncSig, ProtocolInfo, Resolver, StructInfo, VarInfo, is_accessible};
 use types::{Type, resolve_type};
 
@@ -521,8 +522,11 @@ fn analyze_single_module(
     }
 
     // Pass 3: analyze struct member bodies and function bodies
+    let mut infer_ctx = InferenceContext::new();
     for struct_def in &program.structs {
-        analyze_struct_members(struct_def, resolver)?;
+        analyze_struct_members(struct_def, resolver, &mut infer_ctx)?;
+        let _ = infer_ctx.apply_defaults();
+        infer_ctx.reset();
     }
 
     // Pass 3b: check protocol conformance
@@ -622,8 +626,13 @@ fn analyze_single_module(
         }
     }
 
-    for func in &program.functions {
-        analyze_function(func, resolver)?;
+    {
+        let mut ctx = InferenceContext::new();
+        for func in &program.functions {
+            analyze_function(func, resolver, Some(&mut ctx))?;
+            ctx.apply_defaults()?;
+            ctx.reset();
+        }
     }
 
     Ok(SemanticInfo {
@@ -916,7 +925,7 @@ fn validate_constraints(
 pub fn analyze_pre_mono(program: &Program) -> Result<infer::InferredTypeArgs> {
     use crate::semantic::infer::{InferenceContext, InferredTypeArgs};
 
-    let inferred = InferredTypeArgs::new();
+    let mut inferred = InferredTypeArgs::new();
     let mut ctx = InferenceContext::new();
     let mut resolver = Resolver::new();
 
@@ -1043,19 +1052,29 @@ pub fn analyze_pre_mono(program: &Program) -> Result<infer::InferredTypeArgs> {
 
     // Skip main function validation (left to analyze_post_mono)
 
-    // --- Phase 3: placeholder for body analysis ---
+    // --- Phase 3: analyze function bodies with inference ---
     //
-    // In the initial implementation the InferenceContext is created but not yet
-    // used by analyze_expr / analyze_stmt (that comes in Task 8).  Body
-    // analysis at this stage would also fail on non-generic functions that call
-    // generic functions, because the generic signatures still contain
-    // unsubstituted type parameters.  Therefore we skip body analysis entirely
-    // here; the real type checking is done in analyze_post_mono after
-    // monomorphization.
-    //
-    // Once Task 8 adds bidirectional inference, this phase will walk non-generic
-    // bodies and use the InferenceContext to collect inferred type arguments.
-    let _ = (&mut ctx, &mut resolver);
+    // For each non-generic function, analyze the body with the InferenceContext
+    // so that numeric literal types can be inferred from context. Generic
+    // functions are skipped because their signatures contain unsubstituted type
+    // parameters that would cause spurious errors; they will be checked in
+    // analyze_post_mono after monomorphization.
+
+    for func in &program.functions {
+        // Skip generic functions — they will be monomorphized first
+        if !func.type_params.is_empty() {
+            continue;
+        }
+
+        // Body analysis is best-effort: if a function references symbols that
+        // are not yet available (e.g. cross-module imports), we skip it and let
+        // analyze_post_mono handle the full type checking later.
+        if analyze_function(func, &mut resolver, Some(&mut ctx)).is_ok() {
+            let _ = ctx.apply_defaults();
+            ctx.record_inferred_type_args(&mut inferred);
+        }
+        ctx.reset();
+    }
 
     Ok(inferred)
 }
@@ -1198,8 +1217,13 @@ pub fn analyze_post_mono(program: &Program) -> Result<SemanticInfo> {
     }
 
     // Pass 3: analyze struct member bodies and function bodies
-    for struct_def in &program.structs {
-        analyze_struct_members(struct_def, &mut resolver)?;
+    {
+        let mut struct_ctx = InferenceContext::new();
+        for struct_def in &program.structs {
+            analyze_struct_members(struct_def, &mut resolver, &mut struct_ctx)?;
+            struct_ctx.apply_defaults()?;
+            struct_ctx.reset();
+        }
     }
 
     // Pass 3b: check protocol conformance
@@ -1302,8 +1326,13 @@ pub fn analyze_post_mono(program: &Program) -> Result<SemanticInfo> {
         }
     }
 
-    for func in &program.functions {
-        analyze_function(func, &mut resolver)?;
+    {
+        let mut ctx = InferenceContext::new();
+        for func in &program.functions {
+            analyze_function(func, &mut resolver, Some(&mut ctx))?;
+            ctx.apply_defaults()?;
+            ctx.reset();
+        }
     }
 
     Ok(SemanticInfo {
@@ -1336,6 +1365,13 @@ fn resolve_type_checked(ty: &TypeAnnotation, resolver: &Resolver) -> Result<Type
             Ok(Type::Generic {
                 name: name.clone(),
                 args: resolved_args,
+            })
+        }
+        TypeAnnotation::Array { element, size } => {
+            let resolved_elem = resolve_type_checked(element, resolver)?;
+            Ok(Type::Array {
+                element: Box::new(resolved_elem),
+                size: *size,
             })
         }
         other => Ok(resolve_type(other)),
@@ -1559,7 +1595,11 @@ fn block_always_returns(block: &Block) -> bool {
     }
 }
 
-fn analyze_function(func: &Function, resolver: &mut Resolver) -> Result<()> {
+fn analyze_function(
+    func: &Function,
+    resolver: &mut Resolver,
+    ctx: Option<&mut InferenceContext>,
+) -> Result<()> {
     // Push type params into scope for the duration of this function analysis
     resolver.push_type_params(&func.type_params);
 
@@ -1589,6 +1629,7 @@ fn analyze_function(func: &Function, resolver: &mut Resolver) -> Result<()> {
         )));
     }
 
+    let mut ctx = ctx;
     for stmt in stmts.iter() {
         // Yield is not allowed in function bodies
         if matches!(stmt, Stmt::Yield(_)) {
@@ -1598,7 +1639,7 @@ fn analyze_function(func: &Function, resolver: &mut Resolver) -> Result<()> {
             ));
         }
 
-        analyze_stmt(stmt, resolver)?;
+        analyze_stmt(stmt, resolver, ctx.as_deref_mut())?;
     }
 
     resolver.pop_scope();
@@ -1608,7 +1649,11 @@ fn analyze_function(func: &Function, resolver: &mut Resolver) -> Result<()> {
 }
 
 /// Analyze a block expression (Expr::Block) — yield required, return forbidden
-fn analyze_block_expr(block: &Block, resolver: &mut Resolver) -> Result<Type> {
+fn analyze_block_expr(
+    block: &Block,
+    resolver: &mut Resolver,
+    mut ctx: Option<&mut InferenceContext>,
+) -> Result<Type> {
     resolver.push_scope();
 
     let stmts = &block.stmts;
@@ -1643,11 +1688,11 @@ fn analyze_block_expr(block: &Block, resolver: &mut Resolver) -> Result<Type> {
             ));
         }
 
-        analyze_stmt(stmt, resolver)?;
+        analyze_stmt(stmt, resolver, ctx.as_deref_mut())?;
 
         // If this is the Yield statement, get the type
         if let Stmt::Yield(expr) = stmt {
-            yield_type = analyze_expr(expr, resolver)?;
+            yield_type = analyze_expr(expr, resolver, ctx.as_deref_mut())?;
         }
     }
 
@@ -1657,7 +1702,11 @@ fn analyze_block_expr(block: &Block, resolver: &mut Resolver) -> Result<Type> {
 
 /// Analyze a control block (if then/else) — yield and return both allowed.
 /// Returns Some(type) if block yields a value, None if block diverges via return.
-fn analyze_control_block(block: &Block, resolver: &mut Resolver) -> Result<Option<Type>> {
+fn analyze_control_block(
+    block: &Block,
+    resolver: &mut Resolver,
+    mut ctx: Option<&mut InferenceContext>,
+) -> Result<Option<Type>> {
     resolver.push_scope();
 
     let stmts = &block.stmts;
@@ -1677,12 +1726,12 @@ fn analyze_control_block(block: &Block, resolver: &mut Resolver) -> Result<Optio
             return Err(sem_err("`yield` must be the last statement in the block"));
         }
 
-        analyze_stmt(stmt, resolver)?;
+        analyze_stmt(stmt, resolver, ctx.as_deref_mut())?;
 
         if is_last {
             match stmt {
                 Stmt::Yield(expr) => {
-                    let ty = analyze_expr(expr, resolver)?;
+                    let ty = analyze_expr(expr, resolver, ctx.as_deref_mut())?;
                     result = Some(ty);
                 }
                 Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue => {
@@ -1701,28 +1750,40 @@ fn analyze_control_block(block: &Block, resolver: &mut Resolver) -> Result<Optio
 }
 
 /// Analyze a loop body block — return allowed, yield forbidden.
-fn analyze_loop_block(block: &Block, resolver: &mut Resolver) -> Result<()> {
+fn analyze_loop_block(
+    block: &Block,
+    resolver: &mut Resolver,
+    mut ctx: Option<&mut InferenceContext>,
+) -> Result<()> {
     resolver.push_scope();
 
     for stmt in &block.stmts {
         if matches!(stmt, Stmt::Yield(_)) {
             return Err(sem_err("`yield` cannot be used in a while loop body"));
         }
-        analyze_stmt(stmt, resolver)?;
+        analyze_stmt(stmt, resolver, ctx.as_deref_mut())?;
     }
 
     resolver.pop_scope();
     Ok(())
 }
 
-fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
+fn analyze_stmt(
+    stmt: &Stmt,
+    resolver: &mut Resolver,
+    mut ctx: Option<&mut InferenceContext>,
+) -> Result<()> {
     match stmt {
         Stmt::Let { name, ty, value } => {
-            let val_ty = analyze_expr(value, resolver)?;
+            let val_ty = analyze_expr(value, resolver, ctx.as_deref_mut())?;
             let var_ty = match ty {
                 Some(ann) => {
                     let declared = resolve_type_checked(ann, resolver)?;
-                    check_type_match(&declared, &val_ty)?;
+                    if let Some(ref mut c) = ctx {
+                        c.unify(val_ty.clone(), declared.clone())?;
+                    } else {
+                        check_type_match(&declared, &val_ty)?;
+                    }
                     declared
                 }
                 None => val_ty,
@@ -1736,11 +1797,15 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
             );
         }
         Stmt::Var { name, ty, value } => {
-            let val_ty = analyze_expr(value, resolver)?;
+            let val_ty = analyze_expr(value, resolver, ctx.as_deref_mut())?;
             let var_ty = match ty {
                 Some(ann) => {
                     let declared = resolve_type_checked(ann, resolver)?;
-                    check_type_match(&declared, &val_ty)?;
+                    if let Some(ref mut c) = ctx {
+                        c.unify(val_ty.clone(), declared.clone())?;
+                    } else {
+                        check_type_match(&declared, &val_ty)?;
+                    }
                     declared
                 }
                 None => val_ty,
@@ -1754,7 +1819,7 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
             );
         }
         Stmt::Assign { name, value } => {
-            let val_ty = analyze_expr(value, resolver)?;
+            let val_ty = analyze_expr(value, resolver, ctx.as_deref_mut())?;
             match resolver.lookup_var(name) {
                 None => {
                     return Err(sem_err(format!("undefined variable `{}`", name)));
@@ -1766,24 +1831,33 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
                             name
                         )));
                     }
-                    if val_ty != info.ty {
+                    let expected_ty = info.ty.clone();
+                    if let Some(ref mut c) = ctx {
+                        c.unify(val_ty.clone(), expected_ty)?;
+                    } else if val_ty != expected_ty {
                         return Err(sem_err(format!(
                             "type mismatch in assignment: expected `{}`, found `{}`",
-                            info.ty, val_ty
+                            expected_ty, val_ty
                         )));
                     }
                 }
             }
         }
         Stmt::Return(Some(expr)) => {
-            let ty = analyze_expr(expr, resolver)?;
-            if let Some(ref return_type) = resolver.current_return_type
-                && !types_compatible(&ty, return_type)
-            {
-                return Err(sem_err(format!(
-                    "return type mismatch: expected `{}`, found `{}`",
-                    return_type, ty
-                )));
+            let ty = analyze_expr(expr, resolver, ctx.as_deref_mut())?;
+            if let Some(ref return_type) = resolver.current_return_type {
+                if let Some(ref mut c) = ctx {
+                    // In inference mode, unify return value with return type
+                    // (but skip TypeParam since those are generic and will be checked later)
+                    if !matches!(return_type, Type::TypeParam { .. }) {
+                        c.unify(ty.clone(), return_type.clone())?;
+                    }
+                } else if !types_compatible(&ty, return_type) {
+                    return Err(sem_err(format!(
+                        "return type mismatch: expected `{}`, found `{}`",
+                        return_type, ty
+                    )));
+                }
             }
         }
         Stmt::Return(None) => {
@@ -1797,20 +1871,25 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
             }
         }
         Stmt::Yield(expr) => {
-            let _ty = analyze_expr(expr, resolver)?;
+            let _ty = analyze_expr(expr, resolver, ctx.as_deref_mut())?;
         }
         Stmt::Expr(expr) => {
-            let _ty = analyze_expr(expr, resolver)?;
+            let _ty = analyze_expr(expr, resolver, ctx.as_deref_mut())?;
         }
         Stmt::Break(opt_expr) => {
             if !resolver.in_loop() {
                 return Err(sem_err("break outside of loop"));
             }
             let break_ty = match opt_expr {
-                Some(expr) => analyze_expr(expr, resolver)?,
+                Some(expr) => analyze_expr(expr, resolver, ctx.as_deref_mut())?,
                 None => Type::Unit,
             };
-            resolver.set_break_type(break_ty)?;
+            if let Some(ref mut c) = ctx {
+                // In inference mode, unify with existing break type instead of equality check
+                resolver.set_or_unify_break_type(break_ty, c)?;
+            } else {
+                resolver.set_break_type(break_ty)?;
+            }
         }
         Stmt::Continue => {
             if !resolver.in_loop() {
@@ -1822,8 +1901,8 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
             field,
             value,
         } => {
-            let obj_ty = analyze_expr(object, resolver)?;
-            let val_ty = analyze_expr(value, resolver)?;
+            let obj_ty = analyze_expr(object, resolver, ctx.as_deref_mut())?;
+            let val_ty = analyze_expr(value, resolver, ctx.as_deref_mut())?;
             match &obj_ty {
                 Type::Struct(struct_name) => {
                     let struct_info = resolver
@@ -1847,7 +1926,9 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
                             struct_name, field
                         )));
                     };
-                    if val_ty != field_ty {
+                    if let Some(ref mut c) = ctx {
+                        c.unify(val_ty.clone(), field_ty)?;
+                    } else if val_ty != field_ty {
                         return Err(sem_err(format!(
                             "type mismatch in field assignment: expected `{}`, found `{}`",
                             field_ty, val_ty
@@ -1883,7 +1964,9 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
                             name, field
                         )));
                     };
-                    if val_ty != field_ty {
+                    if let Some(ref mut c) = ctx {
+                        c.unify(val_ty.clone(), field_ty)?;
+                    } else if val_ty != field_ty {
                         return Err(sem_err(format!(
                             "type mismatch in field assignment: expected `{}`, found `{}`",
                             field_ty, val_ty
@@ -1904,9 +1987,9 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
             index,
             value,
         } => {
-            let obj_ty = analyze_expr(object, resolver)?;
-            let idx_ty = analyze_expr(index, resolver)?;
-            let val_ty = analyze_expr(value, resolver)?;
+            let obj_ty = analyze_expr(object, resolver, ctx.as_deref_mut())?;
+            let idx_ty = analyze_expr(index, resolver, ctx.as_deref_mut())?;
+            let val_ty = analyze_expr(value, resolver, ctx.as_deref_mut())?;
             match &obj_ty {
                 Type::Array { element, size } => {
                     if !idx_ty.is_integer() {
@@ -1915,7 +1998,9 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
                             idx_ty
                         )));
                     }
-                    if val_ty != **element {
+                    if let Some(ref mut c) = ctx {
+                        c.unify(val_ty.clone(), *element.clone())?;
+                    } else if val_ty != **element {
                         return Err(sem_err(format!(
                             "type mismatch in index assignment: expected '{}', found '{}'",
                             element, val_ty
@@ -1961,16 +2046,28 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
     Ok(())
 }
 
-fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
+fn analyze_expr(
+    expr: &Expr,
+    resolver: &mut Resolver,
+    mut ctx: Option<&mut InferenceContext>,
+) -> Result<Type> {
     match &expr.kind {
         ExprKind::Number(n) => {
-            if *n < i32::MIN as i64 || *n > i32::MAX as i64 {
-                return Err(sem_err(format!(
-                    "integer literal `{}` is out of range for `Int32`",
-                    n
-                )));
+            if let Some(ref mut c) = ctx {
+                // In inference mode, create an IntegerLiteral variable and defer
+                // the range check until after the concrete type is resolved.
+                let id = c.fresh_integer();
+                c.register_int_range_check(id, *n);
+                Ok(Type::IntegerLiteral(id))
+            } else {
+                if *n < i32::MIN as i64 || *n > i32::MAX as i64 {
+                    return Err(sem_err(format!(
+                        "integer literal `{}` is out of range for `Int32`",
+                        n
+                    )));
+                }
+                Ok(Type::I32)
             }
-            Ok(Type::I32)
         }
         ExprKind::Bool(_) => Ok(Type::Bool),
         ExprKind::Ident(name) => match resolver.lookup_var(name) {
@@ -1978,7 +2075,7 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             None => Err(sem_err(format!("undefined variable `{}`", name))),
         },
         ExprKind::UnaryOp { op, operand } => {
-            let operand_ty = analyze_expr(operand, resolver)?;
+            let operand_ty = analyze_expr(operand, resolver, ctx.as_deref_mut())?;
             match op {
                 UnaryOp::Not => {
                     if operand_ty != Type::Bool {
@@ -1989,26 +2086,37 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             }
         }
         ExprKind::BinaryOp { op, left, right } => {
-            let left_ty = analyze_expr(left, resolver)?;
-            let right_ty = analyze_expr(right, resolver)?;
+            let left_ty = analyze_expr(left, resolver, ctx.as_deref_mut())?;
+            let right_ty = analyze_expr(right, resolver, ctx.as_deref_mut())?;
             match op {
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
-                    if !left_ty.is_numeric() || left_ty != right_ty {
-                        return Err(sem_err(format!(
-                            "arithmetic operation requires matching numeric operands, found `{}` and `{}`",
-                            left_ty, right_ty
-                        )));
+                    if let Some(ref mut c) = ctx {
+                        // In inference mode, unify left and right operands
+                        c.unify(left_ty.clone(), right_ty.clone())?;
+                        Ok(left_ty)
+                    } else {
+                        if !left_ty.is_numeric() || left_ty != right_ty {
+                            return Err(sem_err(format!(
+                                "arithmetic operation requires matching numeric operands, found `{}` and `{}`",
+                                left_ty, right_ty
+                            )));
+                        }
+                        Ok(left_ty)
                     }
-                    Ok(left_ty)
                 }
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
-                    if !left_ty.is_numeric() || left_ty != right_ty {
-                        return Err(sem_err(format!(
-                            "comparison requires matching numeric operands, found `{}` and `{}`",
-                            left_ty, right_ty
-                        )));
+                    if let Some(ref mut c) = ctx {
+                        c.unify(left_ty.clone(), right_ty.clone())?;
+                        Ok(Type::Bool)
+                    } else {
+                        if !left_ty.is_numeric() || left_ty != right_ty {
+                            return Err(sem_err(format!(
+                                "comparison requires matching numeric operands, found `{}` and `{}`",
+                                left_ty, right_ty
+                            )));
+                        }
+                        Ok(Type::Bool)
                     }
-                    Ok(Type::Bool)
                 }
                 // Logical: bool x bool → bool
                 BinOp::And | BinOp::Or => {
@@ -2065,9 +2173,15 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             };
 
             for (arg, expected_ty) in args.iter().zip(sig.params.iter()) {
-                let arg_ty = analyze_expr(arg, resolver)?;
+                let arg_ty = analyze_expr(arg, resolver, ctx.as_deref_mut())?;
                 let effective_ty = substitute_type(expected_ty, &subst);
-                if !types_compatible(&arg_ty, &effective_ty) {
+                if let Some(ref mut c) = ctx {
+                    // In inference mode, unify arg type with expected parameter type
+                    // (skip TypeParam since those are generic)
+                    if !matches!(effective_ty, Type::TypeParam { .. }) {
+                        c.unify(arg_ty.clone(), effective_ty)?;
+                    }
+                } else if !types_compatible(&arg_ty, &effective_ty) {
                     return Err(sem_err(format!(
                         "argument type mismatch: expected `{}`, found `{}`",
                         effective_ty, arg_ty
@@ -2076,32 +2190,37 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             }
             Ok(substitute_type(&sig.return_type, &subst))
         }
-        ExprKind::Block(block) => analyze_block_expr(block, resolver),
+        ExprKind::Block(block) => analyze_block_expr(block, resolver, ctx),
         ExprKind::If {
             condition,
             then_block,
             else_block,
         } => {
-            let cond_ty = analyze_expr(condition, resolver)?;
+            let cond_ty = analyze_expr(condition, resolver, ctx.as_deref_mut())?;
             if cond_ty != Type::Bool {
                 return Err(sem_err("if condition must be `Bool`"));
             }
 
-            let then_ty = analyze_control_block(then_block, resolver)?;
+            let then_ty = analyze_control_block(then_block, resolver, ctx.as_deref_mut())?;
 
             match else_block {
                 Some(else_blk) => {
-                    let else_ty = analyze_control_block(else_blk, resolver)?;
+                    let else_ty = analyze_control_block(else_blk, resolver, ctx.as_deref_mut())?;
                     // Type merging with divergence
                     match (then_ty, else_ty) {
                         (Some(t1), Some(t2)) => {
-                            if t1 != t2 {
-                                return Err(sem_err(format!(
-                                    "if/else branch type mismatch: `{}` vs `{}`",
-                                    t1, t2
-                                )));
+                            if let Some(ref mut c) = ctx {
+                                c.unify(t1.clone(), t2.clone())?;
+                                Ok(t1)
+                            } else {
+                                if t1 != t2 {
+                                    return Err(sem_err(format!(
+                                        "if/else branch type mismatch: `{}` vs `{}`",
+                                        t1, t2
+                                    )));
+                                }
+                                Ok(t1)
                             }
-                            Ok(t1)
                         }
                         (None, Some(t)) => Ok(t), // then diverges, use else type
                         (Some(t), None) => Ok(t), // else diverges, use then type
@@ -2126,14 +2245,14 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             body,
             nobreak,
         } => {
-            let cond_ty = analyze_expr(condition, resolver)?;
+            let cond_ty = analyze_expr(condition, resolver, ctx.as_deref_mut())?;
             if cond_ty != Type::Bool {
                 return Err(sem_err("while condition must be `Bool`"));
             }
             let is_while_true = condition.kind == ExprKind::Bool(true);
 
             resolver.enter_loop();
-            analyze_loop_block(body, resolver)?;
+            analyze_loop_block(body, resolver, ctx.as_deref_mut())?;
             let break_ty = resolver.exit_loop();
 
             let while_ty = break_ty.unwrap_or(Type::Unit);
@@ -2148,15 +2267,17 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                     ));
                 }
                 (false, Some(nobreak_block)) => {
-                    let nobreak_ty = analyze_control_block(nobreak_block, resolver)?;
-                    match nobreak_ty {
-                        Some(t) if t != while_ty => {
+                    let nobreak_ty =
+                        analyze_control_block(nobreak_block, resolver, ctx.as_deref_mut())?;
+                    if let Some(t) = nobreak_ty {
+                        if let Some(ref mut c) = ctx {
+                            c.unify(t.clone(), while_ty.clone())?;
+                        } else if t != while_ty {
                             return Err(sem_err(format!(
                                 "nobreak type `{}` does not match while type `{}`",
                                 t, while_ty
                             )));
                         }
-                        _ => {}
                     }
                 }
                 _ => {}
@@ -2164,7 +2285,13 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
 
             Ok(while_ty)
         }
-        ExprKind::Float(_) => Ok(Type::F64),
+        ExprKind::Float(_) => {
+            if let Some(ref mut c) = ctx {
+                Ok(Type::FloatLiteral(c.fresh_float()))
+            } else {
+                Ok(Type::F64)
+            }
+        }
         ExprKind::StructInit { name, args, .. } => {
             let struct_info = resolver
                 .lookup_struct(name)
@@ -2186,8 +2313,12 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                         param_name, label
                     )));
                 }
-                let arg_ty = analyze_expr(arg_expr, resolver)?;
-                if !types_compatible(&arg_ty, param_ty) {
+                let arg_ty = analyze_expr(arg_expr, resolver, ctx.as_deref_mut())?;
+                if let Some(ref mut c) = ctx {
+                    if !matches!(param_ty, Type::TypeParam { .. }) {
+                        c.unify(arg_ty.clone(), param_ty.clone())?;
+                    }
+                } else if !types_compatible(&arg_ty, param_ty) {
                     return Err(sem_err(format!(
                         "argument type mismatch: expected `{}`, found `{}`",
                         param_ty, arg_ty
@@ -2197,7 +2328,7 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             Ok(Type::Struct(name.clone()))
         }
         ExprKind::FieldAccess { object, field } => {
-            let obj_ty = analyze_expr(object, resolver)?;
+            let obj_ty = analyze_expr(object, resolver, ctx.as_deref_mut())?;
             match &obj_ty {
                 Type::Struct(struct_name) => {
                     let struct_info = resolver
@@ -2250,7 +2381,7 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             )),
         },
         ExprKind::Cast { expr, target_type } => {
-            let source_ty = analyze_expr(expr, resolver)?;
+            let source_ty = analyze_expr(expr, resolver, ctx.as_deref_mut())?;
             let target_ty = resolve_type_checked(target_type, resolver)?;
             if !source_ty.is_numeric() || !target_ty.is_numeric() {
                 return Err(sem_err(format!(
@@ -2265,7 +2396,7 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             method,
             args,
         } => {
-            let obj_ty = analyze_expr(object, resolver)?;
+            let obj_ty = analyze_expr(object, resolver, ctx.as_deref_mut())?;
             match &obj_ty {
                 Type::Struct(struct_name) => {
                     let struct_info = resolver
@@ -2291,8 +2422,12 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                     }
                     for (arg, (param_name, param_ty)) in args.iter().zip(method_info.params.iter())
                     {
-                        let arg_ty = analyze_expr(arg, resolver)?;
-                        if arg_ty != *param_ty {
+                        let arg_ty = analyze_expr(arg, resolver, ctx.as_deref_mut())?;
+                        if let Some(ref mut c) = ctx {
+                            if !matches!(param_ty, Type::TypeParam { .. }) {
+                                c.unify(arg_ty.clone(), param_ty.clone())?;
+                            }
+                        } else if arg_ty != *param_ty {
                             return Err(sem_err(format!(
                                 "expected `{}` but got `{}` in argument `{}` of method `{}`",
                                 param_ty, arg_ty, param_name, method
@@ -2335,9 +2470,13 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                     }
                     for (arg, (param_name, param_ty)) in args.iter().zip(method_info.params.iter())
                     {
-                        let arg_ty = analyze_expr(arg, resolver)?;
+                        let arg_ty = analyze_expr(arg, resolver, ctx.as_deref_mut())?;
                         let expected_ty = substitute_type(param_ty, &subst);
-                        if arg_ty != expected_ty {
+                        if let Some(ref mut c) = ctx {
+                            if !matches!(expected_ty, Type::TypeParam { .. }) {
+                                c.unify(arg_ty.clone(), expected_ty)?;
+                            }
+                        } else if arg_ty != expected_ty {
                             return Err(sem_err(format!(
                                 "expected `{}` but got `{}` in argument `{}` of method `{}`",
                                 expected_ty, arg_ty, param_name, method
@@ -2371,8 +2510,12 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                         )));
                     }
                     for (arg, param) in args.iter().zip(method_sig.params.iter()) {
-                        let arg_ty = analyze_expr(arg, resolver)?;
-                        if arg_ty != param.1 {
+                        let arg_ty = analyze_expr(arg, resolver, ctx.as_deref_mut())?;
+                        if let Some(ref mut c) = ctx {
+                            if !matches!(param.1, Type::TypeParam { .. }) {
+                                c.unify(arg_ty.clone(), param.1.clone())?;
+                            }
+                        } else if arg_ty != param.1 {
                             return Err(sem_err(format!(
                                 "expected `{}` but got `{}` in argument `{}` of method `{}`",
                                 param.1, arg_ty, param.0, method
@@ -2395,10 +2538,17 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             if elements.is_empty() {
                 return Err(sem_err("cannot infer type of empty array literal"));
             }
-            let first_ty = analyze_expr(&elements[0], resolver)?;
+            let first_ty = analyze_expr(&elements[0], resolver, ctx.as_deref_mut())?;
             for elem in &elements[1..] {
-                let elem_ty = analyze_expr(elem, resolver)?;
-                if elem_ty != first_ty {
+                let elem_ty = analyze_expr(elem, resolver, ctx.as_deref_mut())?;
+                if let Some(ref mut c) = ctx {
+                    c.unify(elem_ty.clone(), first_ty.clone()).map_err(|_| {
+                        sem_err(format!(
+                            "array elements must all have the same type: expected '{}', found '{}'",
+                            first_ty, elem_ty
+                        ))
+                    })?;
+                } else if elem_ty != first_ty {
                     return Err(sem_err(format!(
                         "array elements must all have the same type: expected '{}', found '{}'",
                         first_ty, elem_ty
@@ -2411,8 +2561,8 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
             })
         }
         ExprKind::IndexAccess { object, index } => {
-            let obj_ty = analyze_expr(object, resolver)?;
-            let idx_ty = analyze_expr(index, resolver)?;
+            let obj_ty = analyze_expr(object, resolver, ctx.as_deref_mut())?;
+            let idx_ty = analyze_expr(index, resolver, ctx)?;
             match &obj_ty {
                 Type::Array { element, size } => {
                     if !idx_ty.is_integer() {
@@ -2439,7 +2589,11 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
     }
 }
 
-fn analyze_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Result<()> {
+fn analyze_struct_members(
+    struct_def: &StructDef,
+    resolver: &mut Resolver,
+    ctx: &mut InferenceContext,
+) -> Result<()> {
     use resolver::SelfContext;
 
     for member in &struct_def.members {
@@ -2468,7 +2622,7 @@ fn analyze_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
                     );
                 }
                 for stmt in &body.stmts {
-                    analyze_stmt(stmt, resolver)?;
+                    analyze_stmt(stmt, resolver, Some(ctx))?;
                 }
                 resolver.pop_scope();
 
@@ -2493,7 +2647,7 @@ fn analyze_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
                     resolver.current_return_type = Some(resolved_ty.clone());
 
                     resolver.push_scope();
-                    analyze_getter_block(getter, resolver)?;
+                    analyze_getter_block(getter, resolver, ctx)?;
                     resolver.pop_scope();
 
                     resolver.current_return_type = prev_return;
@@ -2519,7 +2673,7 @@ fn analyze_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
                         },
                     );
                     for stmt in &setter_block.stmts {
-                        analyze_stmt(stmt, resolver)?;
+                        analyze_stmt(stmt, resolver, Some(ctx))?;
                     }
                     resolver.pop_scope();
 
@@ -2568,7 +2722,7 @@ fn analyze_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
                             "`yield` cannot be used in method body (use `return` instead)",
                         ));
                     }
-                    analyze_stmt(stmt, resolver)?;
+                    analyze_stmt(stmt, resolver, Some(ctx))?;
                 }
 
                 resolver.pop_scope();
@@ -2614,12 +2768,16 @@ fn check_all_fields_initialized(
     Ok(())
 }
 
-fn analyze_getter_block(block: &Block, resolver: &mut Resolver) -> Result<()> {
+fn analyze_getter_block(
+    block: &Block,
+    resolver: &mut Resolver,
+    ctx: &mut InferenceContext,
+) -> Result<()> {
     if !block_always_returns(block) {
         return Err(sem_err("getter must end with a `return` statement"));
     }
     for stmt in &block.stmts {
-        analyze_stmt(stmt, resolver)?;
+        analyze_stmt(stmt, resolver, Some(ctx))?;
     }
     Ok(())
 }

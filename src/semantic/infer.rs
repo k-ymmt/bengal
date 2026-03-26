@@ -84,6 +84,8 @@ pub struct InferenceContext {
     var_states: Vec<VarState>,
     var_kinds: Vec<VarKind>,
     pub pending_type_args: Vec<(NodeId, Vec<InferVarId>, Vec<TypeParam>, String)>,
+    /// Integer literal values pending range checks after type resolution.
+    pending_int_range_checks: Vec<(InferVarId, i64)>,
 }
 
 impl InferenceContext {
@@ -92,6 +94,7 @@ impl InferenceContext {
             var_states: Vec::new(),
             var_kinds: Vec::new(),
             pending_type_args: Vec::new(),
+            pending_int_range_checks: Vec::new(),
         }
     }
 
@@ -109,6 +112,13 @@ impl InferenceContext {
         self.var_states.push(VarState::Unbound);
         self.var_kinds.push(VarKind::IntegerLiteral);
         id
+    }
+
+    /// Register a pending range check for an integer literal.
+    /// Called when creating an IntegerLiteral variable so we can verify
+    /// the value fits after the concrete type is resolved.
+    pub fn register_int_range_check(&mut self, id: InferVarId, value: i64) {
+        self.pending_int_range_checks.push((id, value));
     }
 
     /// Create a fresh variable for a float literal.
@@ -150,6 +160,7 @@ impl InferenceContext {
         self.var_states.clear();
         self.var_kinds.clear();
         self.pending_type_args.clear();
+        self.pending_int_range_checks.clear();
     }
 
     /// Deeply resolve a type by following all inference variable chains and
@@ -231,6 +242,27 @@ impl InferenceContext {
                 _ => {} // already resolved to concrete type
             }
         }
+
+        // Check that integer literal values fit in their resolved type
+        let range_checks: Vec<_> = self.pending_int_range_checks.clone();
+        for &(id, value) in &range_checks {
+            let resolved = self.deep_resolve(Type::InferVar(id));
+            match resolved {
+                Type::I32 => {
+                    if value < i32::MIN as i64 || value > i32::MAX as i64 {
+                        return Err(unify_err(format!(
+                            "integer literal `{}` is out of range for `Int32`",
+                            value
+                        )));
+                    }
+                }
+                Type::I64 => {
+                    // i64 is the widest type we have; value is already i64
+                }
+                _ => {} // resolved to non-integer — will be caught by type checking
+            }
+        }
+
         Ok(())
     }
 
@@ -280,6 +312,10 @@ impl InferenceContext {
         }
 
         match (ty1, ty2) {
+            // TypeParam is opaque in pre-mono — treat as compatible with anything.
+            // The real check happens post-monomorphization.
+            (Type::TypeParam { .. }, _) | (_, Type::TypeParam { .. }) => Ok(()),
+
             // InferVar binds to anything
             (Type::InferVar(a), other) | (other, Type::InferVar(a)) => {
                 self.set_resolved(a, other);
@@ -592,13 +628,14 @@ mod tests {
     }
 
     #[test]
-    fn unify_type_param_different_error() {
+    fn unify_type_param_with_concrete_ok() {
+        // TypeParam is treated as opaque in pre-mono; unification should succeed.
         let mut ctx = InferenceContext::new();
         let t = Type::TypeParam {
             name: "T".to_string(),
             bound: None,
         };
-        assert!(ctx.unify(t, Type::I32).is_err());
+        assert!(ctx.unify(t, Type::I32).is_ok());
     }
 
     #[test]

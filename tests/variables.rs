@@ -197,6 +197,6 @@ fn err_immutable_assign() {
 
 #[test]
 fn err_type_annotation_mismatch() {
-    // Integer literal defaults to Int32, but annotation says Int64
-    compile_source_should_fail("func main() -> Int32 { let x: Int64 = 10; return 0; }");
+    // Bool value cannot be assigned to Int32 variable
+    compile_source_should_fail("func main() -> Int32 { let x: Int32 = true; return 0; }");
 }
