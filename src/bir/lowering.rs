@@ -976,7 +976,11 @@ impl Lowering {
                     result
                 }
             },
-            ExprKind::Call { name, args, .. } => {
+            ExprKind::Call {
+                name,
+                args,
+                type_args,
+            } => {
                 let sem = self.sem_info.as_ref().unwrap();
                 if sem.struct_init_calls.contains(&expr.id) {
                     let struct_info = sem.struct_defs.get(name).unwrap().clone();
@@ -987,6 +991,7 @@ impl Lowering {
                     // No-arg memberwise init (call syntax with no custom init body)
                     return self.emit_struct_init(name, &[]);
                 }
+                let bir_type_args: Vec<BirType> = type_args.iter().map(convert_type).collect();
                 let arg_vals: Vec<Value> = args.iter().map(|a| self.lower_expr(a)).collect();
                 let resolved = self.resolve_name(name);
                 let ty = self
@@ -999,7 +1004,7 @@ impl Lowering {
                     result,
                     func_name: resolved,
                     args: arg_vals,
-                    type_args: vec![],
+                    type_args: bir_type_args,
                     ty: ty.clone(),
                 });
                 self.value_types.insert(result, ty);
