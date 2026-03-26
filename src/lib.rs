@@ -20,9 +20,10 @@ pub fn compile_source(source: &str) -> Result<Vec<u8>> {
     let tokens = lexer::tokenize(source)?;
     let program = parser::parse(tokens)?;
     semantic::validate_generics(&program)?;
-    let (inferred, _sem_info) = semantic::analyze_pre_mono(&program)?;
+    let (inferred, sem_info) = semantic::analyze_pre_mono(&program)?;
     let program = monomorphize::monomorphize(&program, &inferred);
-    let sem_info = semantic::analyze_post_mono(&program)?;
+    // Still run post-mono for validation, but use pre-mono sem_info for lowering
+    let _post_mono_info = semantic::analyze_post_mono(&program)?;
     let mut bir = bir::lower_program(&program, &sem_info)?;
     bir::optimize_module(&mut bir);
     let obj_bytes = codegen::compile(&bir)?;
@@ -33,9 +34,10 @@ pub fn compile_to_bir(source: &str) -> Result<(bir::instruction::BirModule, Stri
     let tokens = lexer::tokenize(source)?;
     let program = parser::parse(tokens)?;
     semantic::validate_generics(&program)?;
-    let (inferred, _sem_info) = semantic::analyze_pre_mono(&program)?;
+    let (inferred, sem_info) = semantic::analyze_pre_mono(&program)?;
     let program = monomorphize::monomorphize(&program, &inferred);
-    let sem_info = semantic::analyze_post_mono(&program)?;
+    // Still run post-mono for validation, but use pre-mono sem_info for lowering
+    let _post_mono_info = semantic::analyze_post_mono(&program)?;
     let bir_module = bir::lower_program(&program, &sem_info)?;
     let bir_text = bir::print_module(&bir_module);
     Ok((bir_module, bir_text))
