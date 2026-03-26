@@ -1,6 +1,7 @@
 pub mod bir;
 pub mod codegen;
 pub mod error;
+pub mod interface;
 pub mod lexer;
 pub mod mangle;
 pub mod package;
