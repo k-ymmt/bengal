@@ -48,30 +48,39 @@ impl Default for InferredTypeArgs {
     }
 }
 
+/// Try to convert a `Type` to `TypeAnnotation`, returning an error for unresolved variables.
+pub fn try_type_to_annotation(ty: &Type) -> std::result::Result<TypeAnnotation, BengalError> {
+    match ty {
+        Type::I32 => Ok(TypeAnnotation::I32),
+        Type::I64 => Ok(TypeAnnotation::I64),
+        Type::F32 => Ok(TypeAnnotation::F32),
+        Type::F64 => Ok(TypeAnnotation::F64),
+        Type::Bool => Ok(TypeAnnotation::Bool),
+        Type::Unit => Ok(TypeAnnotation::Unit),
+        Type::Struct(name) => Ok(TypeAnnotation::Named(name.clone())),
+        Type::TypeParam { name, .. } => Ok(TypeAnnotation::Named(name.clone())),
+        Type::Generic { name, args } => {
+            let converted: std::result::Result<Vec<_>, _> =
+                args.iter().map(try_type_to_annotation).collect();
+            Ok(TypeAnnotation::Generic {
+                name: name.clone(),
+                args: converted?,
+            })
+        }
+        Type::Array { element, size } => Ok(TypeAnnotation::Array {
+            element: Box::new(try_type_to_annotation(element)?),
+            size: *size,
+        }),
+        Type::InferVar(_) | Type::IntegerLiteral(_) | Type::FloatLiteral(_) => {
+            Err(unify_err("unresolved type variable in type_to_annotation"))
+        }
+    }
+}
+
 /// Convert a fully-resolved `Type` to `TypeAnnotation`.
 /// Called after `apply_defaults`, so no InferVar/IntegerLiteral/FloatLiteral should remain.
 pub fn type_to_annotation(ty: &Type) -> TypeAnnotation {
-    match ty {
-        Type::I32 => TypeAnnotation::I32,
-        Type::I64 => TypeAnnotation::I64,
-        Type::F32 => TypeAnnotation::F32,
-        Type::F64 => TypeAnnotation::F64,
-        Type::Bool => TypeAnnotation::Bool,
-        Type::Unit => TypeAnnotation::Unit,
-        Type::Struct(name) => TypeAnnotation::Named(name.clone()),
-        Type::TypeParam { name, .. } => TypeAnnotation::Named(name.clone()),
-        Type::Generic { name, args } => TypeAnnotation::Generic {
-            name: name.clone(),
-            args: args.iter().map(type_to_annotation).collect(),
-        },
-        Type::Array { element, size } => TypeAnnotation::Array {
-            element: Box::new(type_to_annotation(element)),
-            size: *size,
-        },
-        Type::InferVar(_) | Type::IntegerLiteral(_) | Type::FloatLiteral(_) => {
-            unreachable!("unresolved type variable in type_to_annotation")
-        }
-    }
+    try_type_to_annotation(ty).expect("unresolved type variable in type_to_annotation")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
