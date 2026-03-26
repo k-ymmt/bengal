@@ -3,7 +3,6 @@ pub mod codegen;
 pub mod error;
 pub mod lexer;
 pub mod mangle;
-pub mod monomorphize;
 pub mod package;
 pub mod parser;
 pub mod semantic;
@@ -28,7 +27,6 @@ pub fn compile_source(source: &str) -> Result<Vec<u8>> {
         .into_iter()
         .map(|(id, site)| (id, site.type_args))
         .collect();
-    // No AST monomorphize — lower generics directly to BIR
     let mut bir = bir::lowering::lower_program_with_inferred(&program, &sem_info, &inferred_map)?;
     bir::optimize_module(&mut bir);
     let mono_result = bir::mono::mono_collect(&bir, "main");
@@ -57,10 +55,10 @@ pub fn compile_to_bir(source: &str) -> Result<(bir::instruction::BirModule, Stri
 ///
 /// 1. Find the package root (Bengal.toml) starting from `entry_path`'s parent.
 /// 2. Build the module graph from the entry file.
-/// 3. For each module: validate generics, run pre-mono type inference (no AST mono).
+/// 3. For each module: validate generics, run pre-mono type inference.
 /// 4. Run `analyze_package()` for cross-module semantic analysis.
-/// 5. For each module: lower the ORIGINAL AST (with generics) to BIR, optimize,
-///    run BIR-level mono_collect, compile with compile_module_with_mono.
+/// 5. For each module: lower to BIR, optimize, run BIR-level mono_collect,
+///    compile with compile_module_with_mono.
 /// 6. Link all .o files into the final executable at `output_path`.
 /// 7. Clean up temporary .o files.
 pub fn compile_package_to_executable(entry_path: &Path, output_path: &Path) -> Result<()> {
@@ -94,7 +92,6 @@ pub fn compile_package_to_executable(entry_path: &Path, output_path: &Path) -> R
     let graph = package::build_module_graph(entry_path)?;
 
     // 2.5. Validate generics and run pre-mono analysis per module.
-    //       No AST monomorphization — generics are preserved for BIR-level mono.
     for mod_info in graph.modules.values() {
         semantic::validate_generics(&mod_info.ast)?;
     }
@@ -112,7 +109,7 @@ pub fn compile_package_to_executable(entry_path: &Path, output_path: &Path) -> R
         inferred_maps.insert(mod_path.clone(), inferred_map);
     }
 
-    // 3. Run cross-module semantic analysis on the original (un-monomorphized) AST
+    // 3. Run cross-module semantic analysis
     let pkg_sem_info = semantic::analyze_package(&graph, &package_name)?;
 
     // 4. For each module: build name map, lower with inferred type args, optimize,

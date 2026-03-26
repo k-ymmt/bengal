@@ -23,7 +23,6 @@ pub fn compile_and_run(source: &str) -> i32 {
         .into_iter()
         .map(|(id, site)| (id, site.type_args))
         .collect();
-    // No AST monomorphize — lower generics directly to BIR
     let mut bir_module =
         bir::lowering::lower_program_with_inferred(&program, &sem_info, &inferred_map).unwrap();
     bir::optimize_module(&mut bir_module);

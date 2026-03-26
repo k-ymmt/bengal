@@ -937,7 +937,7 @@ fn validate_constraints(
     Ok(())
 }
 
-/// Pre-monomorphization analysis pass.
+/// Pre-mono analysis pass (runs before BIR lowering and BIR-level monomorphization).
 ///
 /// Runs the same setup phases as `analyze_post_mono` (register symbols, resolve
 /// types, validate main) and then analyzes function/struct bodies. After each
@@ -1207,14 +1207,14 @@ fn analyze_pre_mono_inner(
     //
     // For each non-generic function, analyze the body with the InferenceContext
     // so that numeric literal types can be inferred from context. Generic
-    // functions are skipped because their signatures contain unsubstituted type
-    // parameters that would cause spurious errors; they will be type-checked
-    // after monomorphization resolves them to concrete types.
+    // Generic functions are skipped because their signatures contain unsubstituted
+    // type parameters that would cause spurious errors; they are checked at the
+    // BIR level after monomorphization resolves them to concrete types.
 
     let mut all_errors: Vec<BengalError> = Vec::new();
 
     for func in &program.functions {
-        // Skip generic functions — they will be monomorphized first
+        // Skip generic functions — checked after BIR-level monomorphization
         if !func.type_params.is_empty() {
             continue;
         }
@@ -1269,11 +1269,9 @@ fn analyze_pre_mono_inner(
 /// This is Stage 2 of constraint validation. Stage 1 (`validate_generics`)
 /// checks explicit type args at call sites. Stage 2 checks inferred type args
 /// that were resolved during `analyze_pre_mono`. Stage 3 (constraint checking
-/// after monomorphization substitutes TypeParam args into concrete types) is
-/// handled implicitly: since `analyze_post_mono` performs full type checking on
-/// monomorphized code, any constraint violation from a formerly-TypeParam arg
-/// will surface as a type mismatch when the protocol method is called on a
-/// non-conforming type.
+/// after BIR-level monomorphization substitutes TypeParam args into concrete
+/// types) is handled implicitly: any constraint violation will surface as a
+/// type mismatch when the protocol method is called on a non-conforming type.
 fn validate_inferred_constraints(
     inferred: &infer::InferredTypeArgs,
     program: &Program,
@@ -1692,7 +1690,7 @@ fn check_type_match(declared: &Type, actual: &Type) -> Result<()> {
 }
 
 /// Check whether two types are compatible for type checking purposes.
-/// A TypeParam is compatible with any type (will be checked at monomorphization time).
+/// A TypeParam is compatible with any type (checked after BIR-level monomorphization).
 fn types_compatible(a: &Type, b: &Type) -> bool {
     if a == b {
         return true;
