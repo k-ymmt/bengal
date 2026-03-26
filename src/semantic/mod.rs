@@ -15,6 +15,7 @@ use types::{Type, resolve_type};
 pub struct SemanticInfo {
     pub struct_defs: HashMap<String, StructInfo>,
     pub struct_init_calls: HashSet<NodeId>,
+    pub protocols: HashMap<String, ProtocolInfo>,
 }
 
 #[derive(Debug)]
@@ -641,6 +642,7 @@ fn analyze_single_module(
     Ok(SemanticInfo {
         struct_defs: resolver.take_all_struct_defs(),
         struct_init_calls: resolver.take_struct_init_calls(),
+        protocols: resolver.take_all_protocols(),
     })
 }
 
@@ -925,7 +927,7 @@ fn validate_constraints(
 /// `InferenceContext`. For the initial implementation the context is created but
 /// not yet used by analyze_expr/analyze_stmt (that comes in Task 8), so the
 /// returned `InferredTypeArgs` will always be empty.
-pub fn analyze_pre_mono(program: &Program) -> Result<infer::InferredTypeArgs> {
+pub fn analyze_pre_mono(program: &Program) -> Result<(infer::InferredTypeArgs, SemanticInfo)> {
     use crate::semantic::infer::{InferenceContext, InferredTypeArgs};
 
     let mut inferred = InferredTypeArgs::new();
@@ -1109,7 +1111,12 @@ pub fn analyze_pre_mono(program: &Program) -> Result<infer::InferredTypeArgs> {
         return Err(all_errors.remove(0));
     }
 
-    Ok(inferred)
+    let sem_info = SemanticInfo {
+        struct_defs: resolver.take_struct_defs(),
+        struct_init_calls: resolver.take_struct_init_calls(),
+        protocols: resolver.take_protocols(),
+    };
+    Ok((inferred, sem_info))
 }
 
 /// Check that inferred type arguments satisfy protocol constraints.
@@ -1468,6 +1475,7 @@ pub fn analyze_post_mono(program: &Program) -> Result<SemanticInfo> {
     Ok(SemanticInfo {
         struct_defs: resolver.take_struct_defs(),
         struct_init_calls: resolver.take_struct_init_calls(),
+        protocols: resolver.take_protocols(),
     })
 }
 

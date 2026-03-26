@@ -14,7 +14,7 @@ pub fn compile_and_run(source: &str) -> i32 {
     let tokens = tokenize(source).unwrap();
     let program = parse(tokens).unwrap();
     semantic::validate_generics(&program).unwrap();
-    let inferred = semantic::analyze_pre_mono(&program).unwrap();
+    let (inferred, _sem_info) = semantic::analyze_pre_mono(&program).unwrap();
     let program = bengal::monomorphize::monomorphize(&program, &inferred);
     let sem_info = semantic::analyze_post_mono(&program).unwrap();
     let mut bir_module = bir::lower_program(&program, &sem_info).unwrap();
@@ -78,8 +78,8 @@ pub fn compile_should_fail(source: &str) -> String {
     if let Err(e) = semantic::validate_generics(&program) {
         return e.to_string();
     }
-    let inferred = match semantic::analyze_pre_mono(&program) {
-        Ok(inferred) => inferred,
+    let (inferred, _sem_info) = match semantic::analyze_pre_mono(&program) {
+        Ok(result) => result,
         Err(e) => return e.to_string(),
     };
     let program = bengal::monomorphize::monomorphize(&program, &inferred);

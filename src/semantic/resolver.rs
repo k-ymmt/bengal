@@ -196,6 +196,19 @@ impl Resolver {
         std::mem::take(&mut self.struct_init_calls)
     }
 
+    pub fn take_protocols(&mut self) -> HashMap<String, ProtocolInfo> {
+        std::mem::take(&mut self.protocol_defs)
+    }
+
+    /// Take all protocol definitions (local + imported) for use in BIR lowering.
+    pub fn take_all_protocols(&mut self) -> HashMap<String, ProtocolInfo> {
+        let mut all = std::mem::take(&mut self.protocol_defs);
+        for (name, info) in std::mem::take(&mut self.imported_protocols) {
+            all.entry(name).or_insert(info);
+        }
+        all
+    }
+
     pub fn enter_loop(&mut self) {
         self.loop_depth += 1;
         self.loop_break_types.push(None);

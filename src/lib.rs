@@ -20,7 +20,7 @@ pub fn compile_source(source: &str) -> Result<Vec<u8>> {
     let tokens = lexer::tokenize(source)?;
     let program = parser::parse(tokens)?;
     semantic::validate_generics(&program)?;
-    let inferred = semantic::analyze_pre_mono(&program)?;
+    let (inferred, _sem_info) = semantic::analyze_pre_mono(&program)?;
     let program = monomorphize::monomorphize(&program, &inferred);
     let sem_info = semantic::analyze_post_mono(&program)?;
     let mut bir = bir::lower_program(&program, &sem_info)?;
@@ -33,7 +33,7 @@ pub fn compile_to_bir(source: &str) -> Result<(bir::instruction::BirModule, Stri
     let tokens = lexer::tokenize(source)?;
     let program = parser::parse(tokens)?;
     semantic::validate_generics(&program)?;
-    let inferred = semantic::analyze_pre_mono(&program)?;
+    let (inferred, _sem_info) = semantic::analyze_pre_mono(&program)?;
     let program = monomorphize::monomorphize(&program, &inferred);
     let sem_info = semantic::analyze_post_mono(&program)?;
     let bir_module = bir::lower_program(&program, &sem_info)?;
@@ -86,7 +86,7 @@ pub fn compile_package_to_executable(entry_path: &Path, output_path: &Path) -> R
         semantic::validate_generics(&mod_info.ast)?;
     }
     for mod_info in graph.modules.values_mut() {
-        let inferred = semantic::analyze_pre_mono(&mod_info.ast)?;
+        let (inferred, _sem_info) = semantic::analyze_pre_mono(&mod_info.ast)?;
         mod_info.ast = monomorphize::monomorphize(&mod_info.ast, &inferred);
     }
 
