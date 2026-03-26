@@ -71,37 +71,52 @@ fn run() -> miette::Result<()> {
         }
         Command::Eval { expr, emit_bir } => {
             let source = &expr;
-            let filename = "<eval>";
-
-            let bir_output = bengal::compile_source_to_bir(source)
-                .map_err(|e| Report::new(e.into_diagnostic()))?;
 
             if emit_bir {
+                let bir_output = bengal::compile_source_to_bir(source)
+                    .map_err(|e| Report::new(e.into_diagnostic()))?;
                 for text in bir_output.bir_texts.values() {
                     println!("{text}");
                 }
             }
 
-            // Extract the single module's BIR for JIT execution
-            let root_path = bengal::package::ModulePath::root();
-            let root_module = bir_output
-                .modules
-                .get(&root_path)
-                .ok_or_else(|| miette::miette!("no root module found"))?;
+            let obj_bytes = bengal::compile_source_to_objects(source)
+                .map_err(|e| Report::new(e.into_diagnostic("<eval>", source)))?;
 
-            let context = inkwell::context::Context::create();
-            let module = bengal::codegen::compile_to_module(&context, &root_module.bir)
-                .map_err(|e| Report::new(e.into_diagnostic(filename, source)))?;
+            let dir = std::env::temp_dir().join(format!("bengal_eval_{}", std::process::id()));
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| miette::miette!("failed to create temp dir: {e}"))?;
+            let obj_path = dir.join("eval.o");
+            let exe_path = dir.join("eval");
 
-            let ee = module
-                .create_jit_execution_engine(inkwell::OptimizationLevel::None)
-                .map_err(|e| miette::miette!("JIT error: {e}"))?;
-            let main_fn = unsafe {
-                ee.get_function::<unsafe extern "C" fn() -> i32>("main")
-                    .map_err(|e| miette::miette!("failed to find main: {e}"))?
-            };
-            let result = unsafe { main_fn.call() };
-            println!("{result}");
+            std::fs::write(&obj_path, &obj_bytes)
+                .map_err(|e| miette::miette!("failed to write object file: {e}"))?;
+
+            let link = process::Command::new("cc")
+                .arg(&obj_path)
+                .arg("-o")
+                .arg(&exe_path)
+                .output()
+                .map_err(|e| miette::miette!("cc not found: {e}"))?;
+            if !link.status.success() {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(miette::miette!(
+                    "link failed: {}",
+                    String::from_utf8_lossy(&link.stderr)
+                ));
+            }
+
+            let run = process::Command::new(&exe_path)
+                .output()
+                .map_err(|e| miette::miette!("failed to execute binary: {e}"))?;
+
+            let _ = std::fs::remove_dir_all(&dir);
+
+            let code = run
+                .status
+                .code()
+                .ok_or_else(|| miette::miette!("process terminated by signal"))?;
+            println!("{code}");
         }
     }
     Ok(())
