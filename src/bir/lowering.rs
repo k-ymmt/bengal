@@ -2110,7 +2110,7 @@ mod tests {
     fn lower_str(input: &str) -> String {
         let tokens = tokenize(input).unwrap();
         let program = parse(tokens).unwrap();
-        let sem_info = semantic::analyze(&program).unwrap();
+        let sem_info = semantic::analyze_post_mono(&program).unwrap();
         let module = lower_program(&program, &sem_info).unwrap();
         print_module(&module)
     }
@@ -2341,7 +2341,7 @@ bb0:
             "struct Foo { var x: Int32; init(val: Int32) { let y: Int32 = self.x; self.x = val; } } func main() -> Int32 { var f = Foo(val: 1); return f.x; }",
         ).unwrap();
         let program = parse(tokens).unwrap();
-        let sem_info = semantic::analyze(&program).unwrap();
+        let sem_info = semantic::analyze_post_mono(&program).unwrap();
         let result = lower_program(&program, &sem_info);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("read-before-init"));
@@ -2352,7 +2352,7 @@ bb0:
         let tokens =
             tokenize("struct Node { var next: Node; } func main() -> Int32 { return 0; }").unwrap();
         let program = parse(tokens).unwrap();
-        let sem_info = semantic::analyze(&program).unwrap();
+        let sem_info = semantic::analyze_post_mono(&program).unwrap();
         let result = lower_program(&program, &sem_info);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("recursive struct"));
@@ -2364,7 +2364,7 @@ bb0:
             "struct Foo { var x: Int32; init(val: Int32) { self.x = val; let s = self; } } func main() -> Int32 { var f = Foo(val: 1); return f.x; }",
         ).unwrap();
         let program = parse(tokens).unwrap();
-        let sem_info = semantic::analyze(&program).unwrap();
+        let sem_info = semantic::analyze_post_mono(&program).unwrap();
         let result = lower_program(&program, &sem_info);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("bare `self`"));
@@ -2376,7 +2376,7 @@ bb0:
             "struct Foo { var x: Int32; var double: Int32 { get { return self.x; } }; init(val: Int32) { self.x = val; let d: Int32 = self.double; } } func main() -> Int32 { var f = Foo(val: 1); return f.x; }",
         ).unwrap();
         let program = parse(tokens).unwrap();
-        let sem_info = semantic::analyze(&program).unwrap();
+        let sem_info = semantic::analyze_post_mono(&program).unwrap();
         let result = lower_program(&program, &sem_info);
         assert!(result.is_err());
         assert!(
@@ -2393,7 +2393,7 @@ bb0:
             "struct Inner { var x: Int32; } struct Outer { var inner: Inner; init() { self.inner = Inner(x: 0); self.inner.x = 10; } } func main() -> Int32 { var o = Outer(); return o.inner.x; }",
         ).unwrap();
         let program = parse(tokens).unwrap();
-        let sem_info = semantic::analyze(&program).unwrap();
+        let sem_info = semantic::analyze_post_mono(&program).unwrap();
         let result = lower_program(&program, &sem_info);
         assert!(result.is_err());
         assert!(
@@ -2411,7 +2411,7 @@ bb0:
         let input = "func add(a: Int32, b: Int32) -> Int32 { return a + b; } func main() -> Int32 { return add(3, 4); }";
         let tokens = tokenize(input).unwrap();
         let program = parse(tokens).unwrap();
-        let sem_info = semantic::analyze(&program).unwrap();
+        let sem_info = semantic::analyze_post_mono(&program).unwrap();
 
         // Build name_map: main stays as "main", add gets mangled
         let mut name_map = HashMap::new();
@@ -2446,7 +2446,7 @@ bb0:
         let input = "struct Point { var x: Int32; func get_x() -> Int32 { return self.x; } } func main() -> Int32 { var p = Point(x: 42); return p.get_x(); }";
         let tokens = tokenize(input).unwrap();
         let program = parse(tokens).unwrap();
-        let sem_info = semantic::analyze(&program).unwrap();
+        let sem_info = semantic::analyze_post_mono(&program).unwrap();
 
         let mut name_map = HashMap::new();
         name_map.insert("main".to_string(), "main".to_string());

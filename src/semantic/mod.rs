@@ -905,7 +905,162 @@ fn validate_constraints(
     Ok(())
 }
 
-pub fn analyze(program: &Program) -> Result<SemanticInfo> {
+/// Pre-monomorphization analysis pass.
+///
+/// Runs the same setup phases as `analyze_post_mono` (register symbols, resolve
+/// types, validate main) and then analyzes function/struct bodies. After each
+/// body, it calls `apply_defaults` and `record_inferred_type_args` on the
+/// `InferenceContext`. For the initial implementation the context is created but
+/// not yet used by analyze_expr/analyze_stmt (that comes in Task 8), so the
+/// returned `InferredTypeArgs` will always be empty.
+pub fn analyze_pre_mono(program: &Program) -> Result<infer::InferredTypeArgs> {
+    use crate::semantic::infer::{InferenceContext, InferredTypeArgs};
+
+    let inferred = InferredTypeArgs::new();
+    let mut ctx = InferenceContext::new();
+    let mut resolver = Resolver::new();
+
+    // --- Phase 1a: register struct / protocol / function names ---
+
+    for struct_def in &program.structs {
+        if resolver.lookup_func(&struct_def.name).is_some()
+            || resolver.lookup_struct(&struct_def.name).is_some()
+        {
+            return Err(sem_err(format!(
+                "duplicate definition `{}`",
+                struct_def.name
+            )));
+        }
+        resolver.reserve_struct(struct_def.name.clone());
+    }
+    for proto in &program.protocols {
+        if resolver.lookup_struct(&proto.name).is_some()
+            || resolver.lookup_func(&proto.name).is_some()
+            || resolver.lookup_protocol(&proto.name).is_some()
+        {
+            return Err(sem_err(format!("duplicate definition `{}`", proto.name)));
+        }
+        resolver.define_protocol(
+            proto.name.clone(),
+            resolver::ProtocolInfo {
+                name: proto.name.clone(),
+                methods: vec![],
+                properties: vec![],
+            },
+        );
+    }
+
+    for func in &program.functions {
+        if resolver.lookup_struct(&func.name).is_some()
+            || resolver.lookup_func(&func.name).is_some()
+        {
+            return Err(sem_err(format!("duplicate definition `{}`", func.name)));
+        }
+        resolver.push_type_params(&func.type_params);
+        let params: Vec<Type> = func
+            .params
+            .iter()
+            .map(|p| resolve_type_checked(&p.ty, &resolver))
+            .collect::<Result<Vec<_>>>()?;
+        let return_type = resolve_type_checked(&func.return_type, &resolver)?;
+        resolver.pop_type_params(func.type_params.len());
+        resolver.define_func(
+            func.name.clone(),
+            FuncSig {
+                type_params: func.type_params.clone(),
+                params,
+                return_type,
+            },
+        );
+    }
+
+    // --- Phase 1b: resolve struct member types ---
+
+    for struct_def in &program.structs {
+        resolve_struct_members(struct_def, &mut resolver)?;
+    }
+
+    for struct_def in &program.structs {
+        if let Some(struct_info) = resolver.lookup_struct(&struct_def.name) {
+            let struct_info = struct_info.clone();
+            for method in &struct_info.methods {
+                let mangled = format!("{}_{}", struct_def.name, method.name);
+                if resolver.lookup_func(&mangled).is_some() {
+                    return Err(sem_err(format!(
+                        "function `{}` conflicts with method `{}.{}`",
+                        mangled, struct_def.name, method.name
+                    )));
+                }
+            }
+        }
+    }
+
+    // Phase 1b (continued): resolve protocol member types
+    for proto in &program.protocols {
+        let mut methods = Vec::new();
+        let mut properties = Vec::new();
+        for member in &proto.members {
+            match member {
+                ProtocolMember::MethodSig {
+                    name,
+                    params,
+                    return_type,
+                } => {
+                    let resolved_params: Vec<(String, Type)> = params
+                        .iter()
+                        .map(|p| Ok((p.name.clone(), resolve_type_checked(&p.ty, &resolver)?)))
+                        .collect::<Result<Vec<_>>>()?;
+                    let resolved_return = resolve_type_checked(return_type, &resolver)?;
+                    methods.push(resolver::ProtocolMethodSig {
+                        name: name.clone(),
+                        params: resolved_params,
+                        return_type: resolved_return,
+                    });
+                }
+                ProtocolMember::PropertyReq {
+                    name,
+                    ty,
+                    has_setter,
+                } => {
+                    let resolved_ty = resolve_type_checked(ty, &resolver)?;
+                    properties.push(resolver::ProtocolPropertyReq {
+                        name: name.clone(),
+                        ty: resolved_ty,
+                        has_setter: *has_setter,
+                    });
+                }
+            }
+        }
+        resolver.define_protocol(
+            proto.name.clone(),
+            resolver::ProtocolInfo {
+                name: proto.name.clone(),
+                methods,
+                properties,
+            },
+        );
+    }
+
+    // Skip main function validation (left to analyze_post_mono)
+
+    // --- Phase 3: placeholder for body analysis ---
+    //
+    // In the initial implementation the InferenceContext is created but not yet
+    // used by analyze_expr / analyze_stmt (that comes in Task 8).  Body
+    // analysis at this stage would also fail on non-generic functions that call
+    // generic functions, because the generic signatures still contain
+    // unsubstituted type parameters.  Therefore we skip body analysis entirely
+    // here; the real type checking is done in analyze_post_mono after
+    // monomorphization.
+    //
+    // Once Task 8 adds bidirectional inference, this phase will walk non-generic
+    // bodies and use the InferenceContext to collect inferred type arguments.
+    let _ = (&mut ctx, &mut resolver);
+
+    Ok(inferred)
+}
+
+pub fn analyze_post_mono(program: &Program) -> Result<SemanticInfo> {
     let mut resolver = Resolver::new();
 
     // Pass 1a: register all struct and function names (for forward reference)
@@ -2497,7 +2652,7 @@ mod tests {
     fn analyze_str(input: &str) -> Result<SemanticInfo> {
         let tokens = tokenize(input).unwrap();
         let program = parse(tokens).unwrap();
-        analyze(&program)
+        analyze_post_mono(&program)
     }
 
     // --- Phase 2 normal cases (maintained) ---

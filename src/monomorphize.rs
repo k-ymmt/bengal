@@ -4,14 +4,18 @@ use crate::parser::ast::{
     Block, Expr, ExprKind, Function, Param, Program, Stmt, StructDef, StructMember, TypeAnnotation,
     TypeParam,
 };
+use crate::semantic::infer::InferredTypeArgs;
 
 /// Monomorphize a program: collect all generic instantiations, generate
 /// specialized (concrete) versions, rewrite call sites, and remove generic
 /// definitions.
 ///
 /// This pass runs BEFORE semantic analysis so the analyzer only sees concrete types.
-pub fn monomorphize(program: &Program) -> Program {
-    let mut mono = Monomorphizer::new(program);
+/// The `inferred` side table provides type arguments that were inferred during
+/// `analyze_pre_mono`; when a call site has no explicit type args but appears in
+/// the side table, the inferred args are used.
+pub fn monomorphize(program: &Program, inferred: &InferredTypeArgs) -> Program {
+    let mut mono = Monomorphizer::new(program, inferred);
     mono.collect_instantiations();
     mono.generate_specializations();
     mono.build_output()
@@ -56,6 +60,8 @@ type InstKey = (String, Vec<TypeAnnotation>);
 
 struct Monomorphizer<'a> {
     program: &'a Program,
+    /// Inferred type arguments from pre-mono analysis.
+    inferred: &'a InferredTypeArgs,
     /// All unique function instantiations found.
     func_insts: Vec<InstKey>,
     /// All unique struct instantiations found.
@@ -71,7 +77,7 @@ struct Monomorphizer<'a> {
 }
 
 impl<'a> Monomorphizer<'a> {
-    fn new(program: &'a Program) -> Self {
+    fn new(program: &'a Program, inferred: &'a InferredTypeArgs) -> Self {
         let generic_funcs: HashMap<String, &Function> = program
             .functions
             .iter()
@@ -88,6 +94,7 @@ impl<'a> Monomorphizer<'a> {
 
         Monomorphizer {
             program,
+            inferred,
             func_insts: Vec::new(),
             struct_insts: Vec::new(),
             generic_funcs,
@@ -164,16 +171,26 @@ impl<'a> Monomorphizer<'a> {
                 type_args,
                 args,
             } => {
-                if !type_args.is_empty() {
+                // Determine the effective type args: explicit ones, or inferred
+                // from the side table when none were written.
+                let effective_type_args = if !type_args.is_empty() {
+                    type_args.clone()
+                } else if let Some(site) = self.inferred.map.get(&expr.id) {
+                    site.type_args.clone()
+                } else {
+                    vec![]
+                };
+
+                if !effective_type_args.is_empty() {
                     // Could be either a function call or struct init parsed as Call
                     if self.generic_funcs.contains_key(name) {
-                        let key = (name.clone(), type_args.clone());
+                        let key = (name.clone(), effective_type_args.clone());
                         if !self.func_insts.contains(&key) {
                             self.func_insts.push(key);
                         }
                     }
                     if self.generic_structs.contains_key(name) {
-                        let key = (name.clone(), type_args.clone());
+                        let key = (name.clone(), effective_type_args.clone());
                         if !self.struct_insts.contains(&key) {
                             self.struct_insts.push(key);
                         }
@@ -188,8 +205,17 @@ impl<'a> Monomorphizer<'a> {
                 type_args,
                 args,
             } => {
-                if !type_args.is_empty() && self.generic_structs.contains_key(name) {
-                    let key = (name.clone(), type_args.clone());
+                // Determine the effective type args
+                let effective_type_args = if !type_args.is_empty() {
+                    type_args.clone()
+                } else if let Some(site) = self.inferred.map.get(&expr.id) {
+                    site.type_args.clone()
+                } else {
+                    vec![]
+                };
+
+                if !effective_type_args.is_empty() && self.generic_structs.contains_key(name) {
+                    let key = (name.clone(), effective_type_args.clone());
                     if !self.struct_insts.contains(&key) {
                         self.struct_insts.push(key);
                     }

@@ -20,8 +20,9 @@ pub fn compile_source(source: &str) -> Result<Vec<u8>> {
     let tokens = lexer::tokenize(source)?;
     let program = parser::parse(tokens)?;
     semantic::validate_generics(&program)?;
-    let program = monomorphize::monomorphize(&program);
-    let sem_info = semantic::analyze(&program)?;
+    let inferred = semantic::analyze_pre_mono(&program)?;
+    let program = monomorphize::monomorphize(&program, &inferred);
+    let sem_info = semantic::analyze_post_mono(&program)?;
     let mut bir = bir::lower_program(&program, &sem_info)?;
     bir::optimize_module(&mut bir);
     let obj_bytes = codegen::compile(&bir)?;
@@ -32,8 +33,9 @@ pub fn compile_to_bir(source: &str) -> Result<(bir::instruction::BirModule, Stri
     let tokens = lexer::tokenize(source)?;
     let program = parser::parse(tokens)?;
     semantic::validate_generics(&program)?;
-    let program = monomorphize::monomorphize(&program);
-    let sem_info = semantic::analyze(&program)?;
+    let inferred = semantic::analyze_pre_mono(&program)?;
+    let program = monomorphize::monomorphize(&program, &inferred);
+    let sem_info = semantic::analyze_post_mono(&program)?;
     let bir_module = bir::lower_program(&program, &sem_info)?;
     let bir_text = bir::print_module(&bir_module);
     Ok((bir_module, bir_text))
@@ -77,12 +79,13 @@ pub fn compile_package_to_executable(entry_path: &Path, output_path: &Path) -> R
     // 2. Build module graph
     let mut graph = package::build_module_graph(entry_path)?;
 
-    // 2.5. Validate generics and monomorphize each module's AST
+    // 2.5. Validate generics, run pre-mono analysis, and monomorphize each module's AST
     for mod_info in graph.modules.values() {
         semantic::validate_generics(&mod_info.ast)?;
     }
     for mod_info in graph.modules.values_mut() {
-        mod_info.ast = monomorphize::monomorphize(&mod_info.ast);
+        let inferred = semantic::analyze_pre_mono(&mod_info.ast)?;
+        mod_info.ast = monomorphize::monomorphize(&mod_info.ast, &inferred);
     }
 
     // 3. Run cross-module semantic analysis
@@ -319,7 +322,7 @@ mod tests {
         let source = "func main() -> Int32 { return 1; }";
         let tokens = lexer::tokenize(source).unwrap();
         let program = parser::parse(tokens).unwrap();
-        let sem_info = semantic::analyze(&program).unwrap();
+        let sem_info = semantic::analyze_post_mono(&program).unwrap();
         let mut bir_module = bir::lower_program(&program, &sem_info).unwrap();
         bir::optimize_module(&mut bir_module);
 

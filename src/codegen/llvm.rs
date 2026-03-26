@@ -1099,7 +1099,7 @@ mod tests {
     fn compile_and_run(source: &str) -> i32 {
         let tokens = tokenize(source).unwrap();
         let program = parse(tokens).unwrap();
-        let sem_info = semantic::analyze(&program).unwrap();
+        let sem_info = semantic::analyze_post_mono(&program).unwrap();
         let mut bir_module = bir::lower_program(&program, &sem_info).unwrap();
         bir::optimize_module(&mut bir_module);
 
@@ -1269,7 +1269,7 @@ mod tests {
         let source = "func main() -> Int32 { return 42; }";
         let tokens = tokenize(source).unwrap();
         let program = parse(tokens).unwrap();
-        let sem_info = semantic::analyze(&program).unwrap();
+        let sem_info = semantic::analyze_post_mono(&program).unwrap();
         let mut bir_module = bir::lower_program(&program, &sem_info).unwrap();
         bir::optimize_module(&mut bir_module);
 
@@ -1424,7 +1424,7 @@ mod tests {
         let source = "struct Point { var x: Int32; var y: Int32; } func main() -> Int32 { let p = Point(x: 3, y: 4); return p.x + p.y; }";
         let tokens = tokenize(source).unwrap();
         let program = parse(tokens).unwrap();
-        let sem_info = semantic::analyze(&program).unwrap();
+        let sem_info = semantic::analyze_post_mono(&program).unwrap();
         let mut bir_module = bir::lower_program(&program, &sem_info).unwrap();
         bir::optimize_module(&mut bir_module);
 

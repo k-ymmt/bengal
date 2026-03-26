@@ -353,7 +353,7 @@ mod tests {
     fn print_str(input: &str) -> String {
         let tokens = tokenize(input).unwrap();
         let program = parse(tokens).unwrap();
-        let sem_info = crate::semantic::analyze(&program).unwrap();
+        let sem_info = crate::semantic::analyze_post_mono(&program).unwrap();
         let module = lower_program(&program, &sem_info).unwrap();
         print_module(&module)
     }
