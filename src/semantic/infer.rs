@@ -13,6 +13,15 @@ fn unify_err(message: impl Into<String>) -> BengalError {
 
 pub type InferVarId = u32;
 
+/// Provenance metadata for an inference variable — tracks where it came from.
+#[derive(Debug, Clone)]
+pub struct VarProvenance {
+    pub type_param_name: String,
+    pub def_name: String,
+    pub arg_name: Option<String>,
+    pub span: Span,
+}
+
 /// Stores inferred type arguments for call sites, indexed by NodeId.
 pub struct InferredTypeArgs {
     pub map: HashMap<NodeId, InferredCallSite>,
@@ -83,6 +92,7 @@ enum VarState {
 pub struct InferenceContext {
     var_states: Vec<VarState>,
     var_kinds: Vec<VarKind>,
+    var_provenance: Vec<Option<VarProvenance>>,
     pub pending_type_args: Vec<(NodeId, Vec<InferVarId>, Vec<TypeParam>, String)>,
     /// Integer literal values pending range checks after type resolution.
     pending_int_range_checks: Vec<(InferVarId, i64)>,
@@ -93,6 +103,7 @@ impl InferenceContext {
         Self {
             var_states: Vec::new(),
             var_kinds: Vec::new(),
+            var_provenance: Vec::new(),
             pending_type_args: Vec::new(),
             pending_int_range_checks: Vec::new(),
         }
@@ -103,6 +114,7 @@ impl InferenceContext {
         let id = self.var_states.len() as InferVarId;
         self.var_states.push(VarState::Unbound);
         self.var_kinds.push(VarKind::General);
+        self.var_provenance.push(None);
         id
     }
 
@@ -111,6 +123,7 @@ impl InferenceContext {
         let id = self.var_states.len() as InferVarId;
         self.var_states.push(VarState::Unbound);
         self.var_kinds.push(VarKind::IntegerLiteral);
+        self.var_provenance.push(None);
         id
     }
 
@@ -126,7 +139,46 @@ impl InferenceContext {
         let id = self.var_states.len() as InferVarId;
         self.var_states.push(VarState::Unbound);
         self.var_kinds.push(VarKind::FloatLiteral);
+        self.var_provenance.push(None);
         id
+    }
+
+    /// Create a fresh var and immediately attach provenance.
+    pub fn fresh_var_with_provenance(&mut self, prov: VarProvenance) -> InferVarId {
+        let id = self.fresh_var();
+        self.set_provenance(id, prov);
+        id
+    }
+
+    /// Set (or replace) the provenance for an inference variable.
+    pub fn set_provenance(&mut self, id: InferVarId, prov: VarProvenance) {
+        let root = self.find(id);
+        self.var_provenance[root as usize] = Some(prov);
+    }
+
+    /// If provenance exists for this variable, update its arg_name.
+    pub fn update_arg_name(&mut self, id: InferVarId, name: String) {
+        let root = self.find(id);
+        if let Some(prov) = self.var_provenance[root as usize].as_mut() {
+            prov.arg_name = Some(name);
+        }
+    }
+
+    /// Copy provenance from `from` to `to` if `to` currently has none.
+    pub fn propagate_provenance(&mut self, from: InferVarId, to: InferVarId) {
+        let from_root = self.find(from);
+        let to_root = self.find(to);
+        if self.var_provenance[to_root as usize].is_none()
+            && let Some(prov) = self.var_provenance[from_root as usize].clone()
+        {
+            self.var_provenance[to_root as usize] = Some(prov);
+        }
+    }
+
+    /// Get the provenance for an inference variable, if any.
+    pub fn get_provenance(&mut self, id: InferVarId) -> Option<&VarProvenance> {
+        let root = self.find(id);
+        self.var_provenance[root as usize].as_ref()
     }
 
     /// Follow the Union-Find chain with path compression and return the resolved type.
@@ -159,6 +211,7 @@ impl InferenceContext {
     pub fn reset(&mut self) {
         self.var_states.clear();
         self.var_kinds.clear();
+        self.var_provenance.clear();
         self.pending_type_args.clear();
         self.pending_int_range_checks.clear();
     }
@@ -777,5 +830,104 @@ mod tests {
         let site = inferred.map.get(&node_id).unwrap();
         assert_eq!(site.type_args, vec![TypeAnnotation::I32]);
         assert_eq!(site.def_name, "identity");
+    }
+
+    // --- Task 3: VarProvenance tests ---
+
+    #[test]
+    fn fresh_var_with_provenance_records() {
+        let mut ctx = InferenceContext::new();
+        let id = ctx.fresh_var_with_provenance(VarProvenance {
+            type_param_name: "T".into(),
+            def_name: "foo".into(),
+            arg_name: None,
+            span: Span { start: 10, end: 20 },
+        });
+        let prov = ctx.get_provenance(id).unwrap();
+        assert_eq!(prov.type_param_name, "T");
+        assert_eq!(prov.def_name, "foo");
+        assert!(prov.arg_name.is_none());
+    }
+
+    #[test]
+    fn set_provenance_replaces() {
+        let mut ctx = InferenceContext::new();
+        let id = ctx.fresh_var();
+        assert!(ctx.get_provenance(id).is_none());
+        ctx.set_provenance(
+            id,
+            VarProvenance {
+                type_param_name: "U".into(),
+                def_name: "bar".into(),
+                arg_name: Some("x".into()),
+                span: Span { start: 0, end: 5 },
+            },
+        );
+        assert_eq!(ctx.get_provenance(id).unwrap().type_param_name, "U");
+    }
+
+    #[test]
+    fn update_arg_name_sets_name() {
+        let mut ctx = InferenceContext::new();
+        let id = ctx.fresh_var_with_provenance(VarProvenance {
+            type_param_name: "T".into(),
+            def_name: "f".into(),
+            arg_name: None,
+            span: Span { start: 0, end: 0 },
+        });
+        ctx.update_arg_name(id, "x".into());
+        assert_eq!(
+            ctx.get_provenance(id).unwrap().arg_name.as_deref(),
+            Some("x")
+        );
+    }
+
+    #[test]
+    fn propagate_provenance_copies_to_empty() {
+        let mut ctx = InferenceContext::new();
+        let a = ctx.fresh_var_with_provenance(VarProvenance {
+            type_param_name: "T".into(),
+            def_name: "f".into(),
+            arg_name: Some("a".into()),
+            span: Span { start: 0, end: 5 },
+        });
+        let b = ctx.fresh_var();
+        assert!(ctx.get_provenance(b).is_none());
+        ctx.propagate_provenance(a, b);
+        assert!(ctx.get_provenance(b).is_some());
+        assert_eq!(ctx.get_provenance(b).unwrap().type_param_name, "T");
+    }
+
+    #[test]
+    fn propagate_provenance_does_not_overwrite() {
+        let mut ctx = InferenceContext::new();
+        let a = ctx.fresh_var_with_provenance(VarProvenance {
+            type_param_name: "T".into(),
+            def_name: "f".into(),
+            arg_name: None,
+            span: Span { start: 0, end: 0 },
+        });
+        let b = ctx.fresh_var_with_provenance(VarProvenance {
+            type_param_name: "U".into(),
+            def_name: "g".into(),
+            arg_name: None,
+            span: Span { start: 0, end: 0 },
+        });
+        ctx.propagate_provenance(a, b);
+        assert_eq!(ctx.get_provenance(b).unwrap().type_param_name, "U");
+    }
+
+    #[test]
+    fn reset_clears_provenance() {
+        let mut ctx = InferenceContext::new();
+        ctx.fresh_var_with_provenance(VarProvenance {
+            type_param_name: "T".into(),
+            def_name: "f".into(),
+            arg_name: None,
+            span: Span { start: 0, end: 0 },
+        });
+        ctx.reset();
+        let id = ctx.fresh_var();
+        assert!(ctx.get_provenance(id).is_none());
     }
 }
