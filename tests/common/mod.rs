@@ -42,7 +42,7 @@ pub fn compile_and_run(source: &str) -> i32 {
 
 /// Compile to native object, link, run, and return the exit code.
 pub fn compile_to_native_and_run(source: &str) -> i32 {
-    let obj_bytes = bengal::compile_source(source).unwrap();
+    let obj_bytes = bengal::compile_source_to_objects(source).unwrap();
 
     let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("bengal_test_{}_{}", std::process::id(), id));
@@ -95,7 +95,7 @@ pub fn compile_should_fail(source: &str) -> String {
 /// Run the full compilation pipeline and return the error string.
 /// Use when the error phase is unimportant or for non-semantic errors.
 pub fn compile_source_should_fail(source: &str) -> String {
-    match bengal::compile_source(source) {
+    match bengal::compile_source_to_objects(source) {
         Err(e) => e.to_string(),
         Ok(_) => panic!("expected compilation error but compilation succeeded"),
     }
@@ -118,7 +118,9 @@ pub fn compile_and_run_package(files: &[(&str, &str)]) -> i32 {
 
     let entry_path = dir.path().join(files[0].0);
     let exe_path = dir.path().join("test_exe");
-    bengal::compile_package_to_executable(&entry_path, &exe_path).unwrap();
+    bengal::compile_to_executable(&entry_path, &exe_path)
+        .map_err(|e| e.source_error)
+        .unwrap();
 
     let output = std::process::Command::new(&exe_path)
         .output()
@@ -143,6 +145,8 @@ pub fn compile_package_should_fail(files: &[(&str, &str)]) -> String {
 
     let entry_path = dir.path().join(files[0].0);
     let exe_path = dir.path().join("test_exe");
-    let err = bengal::compile_package_to_executable(&entry_path, &exe_path).unwrap_err();
+    let err = bengal::compile_to_executable(&entry_path, &exe_path)
+        .map_err(|e| e.source_error)
+        .unwrap_err();
     err.to_string()
 }
