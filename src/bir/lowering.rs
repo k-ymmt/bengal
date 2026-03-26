@@ -1149,6 +1149,13 @@ impl Lowering {
                 let obj_val = self.lower_expr(object);
                 let struct_name = match self.value_types.get(&obj_val) {
                     Some(BirType::Struct { name: n, .. }) => n.clone(),
+                    Some(BirType::TypeParam(_type_param_name)) => {
+                        // Protocol method call on constrained type parameter.
+                        // Completed in Phase 5 when SemanticInfo has protocol data.
+                        todo!(
+                            "TypeParam method call lowering requires protocol info in SemanticInfo"
+                        )
+                    }
                     _ => return self.record_error("method call on non-struct value"),
                 };
                 let local_mangled = format!("{}_{}", struct_name, method);
