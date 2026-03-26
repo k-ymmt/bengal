@@ -218,6 +218,7 @@ impl Lowering {
             result,
             struct_name: struct_name.to_string(),
             fields: field_values.to_vec(),
+            type_args: vec![],
             ty: bir_ty.clone(),
         });
         self.value_types.insert(result, bir_ty);
@@ -594,6 +595,7 @@ impl Lowering {
 
         BirFunction {
             name: self.resolve_name(&func.name),
+            type_params: vec![],
             params,
             return_type: self.convert_type_with_structs(&func.return_type),
             blocks,
@@ -997,6 +999,7 @@ impl Lowering {
                     result,
                     func_name: resolved,
                     args: arg_vals,
+                    type_args: vec![],
                     ty: ty.clone(),
                 });
                 self.value_types.insert(result, ty);
@@ -1159,6 +1162,7 @@ impl Lowering {
                     result,
                     func_name: resolved,
                     args: call_args,
+                    type_args: vec![],
                     ty: ret_ty.clone(),
                 });
                 self.value_types.insert(result, ret_ty);
@@ -1972,6 +1976,7 @@ pub fn lower_program(
     Ok(BirModule {
         struct_layouts,
         functions,
+        conformance_map: HashMap::new(),
     })
 }
 
@@ -2096,6 +2101,7 @@ pub fn lower_module(
     Ok(BirModule {
         struct_layouts,
         functions,
+        conformance_map: HashMap::new(),
     })
 }
 

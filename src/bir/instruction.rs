@@ -71,6 +71,7 @@ pub enum Instruction {
         result: Value,
         func_name: String,
         args: Vec<Value>,
+        type_args: Vec<BirType>,
         ty: BirType,
     },
     /// %result = compare <op> %lhs, %rhs : <type>
@@ -95,6 +96,7 @@ pub enum Instruction {
         result: Value,
         struct_name: String,
         fields: Vec<(String, Value)>,
+        type_args: Vec<BirType>,
         ty: BirType,
     },
     /// %result = field_get %object, "field_name" : FieldType
@@ -213,6 +215,7 @@ pub enum CfgRegion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BirFunction {
     pub name: String,
+    pub type_params: Vec<String>,
     pub params: Vec<(Value, BirType)>,
     pub return_type: BirType,
     pub blocks: Vec<BasicBlock>,
@@ -223,4 +226,5 @@ pub struct BirFunction {
 pub struct BirModule {
     pub struct_layouts: HashMap<String, Vec<(String, BirType)>>,
     pub functions: Vec<BirFunction>,
+    pub conformance_map: HashMap<(String, BirType), String>,
 }

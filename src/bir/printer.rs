@@ -125,6 +125,7 @@ fn print_instruction(inst: &Instruction, out: &mut String) {
             func_name,
             args,
             ty,
+            ..
         } => {
             let args_str: Vec<String> = args.iter().map(format_value).collect();
             out.push_str(&format!(
@@ -177,6 +178,7 @@ fn print_instruction(inst: &Instruction, out: &mut String) {
             struct_name,
             fields,
             ty,
+            ..
         } => {
             let fields_str: Vec<String> = fields
                 .iter()
@@ -417,8 +419,10 @@ bb0:
                     ("y".to_string(), BirType::I32),
                 ],
             )]),
+            conformance_map: HashMap::new(),
             functions: vec![BirFunction {
                 name: "test".to_string(),
+                type_params: vec![],
                 params: vec![],
                 return_type: BirType::Unit,
                 blocks: vec![BasicBlock {
@@ -439,6 +443,7 @@ bb0:
                             result: Value(2),
                             struct_name: "Point".to_string(),
                             fields: vec![("x".to_string(), Value(0)), ("y".to_string(), Value(1))],
+                            type_args: vec![],
                             ty: BirType::struct_simple("Point".to_string()),
                         },
                         Instruction::FieldGet {

@@ -374,6 +374,7 @@ fn emit_instruction<'ctx>(
             func_name,
             args,
             ty,
+            ..
         } => {
             let callee = func_map
                 .get(func_name.as_str())
