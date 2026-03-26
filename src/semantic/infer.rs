@@ -1,5 +1,13 @@
+use crate::error::{BengalError, Span};
 use crate::parser::ast::NodeId;
 use crate::semantic::types::Type;
+
+fn unify_err(message: impl Into<String>) -> BengalError {
+    BengalError::SemanticError {
+        message: message.into(),
+        span: Span { start: 0, end: 0 },
+    }
+}
 
 pub type InferVarId = u32;
 
@@ -75,6 +83,145 @@ impl InferenceContext {
         self.pending_type_args.clear();
     }
 
+    /// Deeply resolve a type by following all inference variable chains and
+    /// recursively resolving structural types (Array, Generic).
+    pub fn deep_resolve(&mut self, ty: Type) -> Type {
+        match ty {
+            Type::InferVar(id) => {
+                let resolved = self.resolve(id);
+                match &resolved {
+                    Type::InferVar(rid) if *rid == id => resolved,
+                    _ => self.deep_resolve(resolved),
+                }
+            }
+            Type::IntegerLiteral(id) => {
+                let resolved = self.resolve(id);
+                match &resolved {
+                    // Unbound: preserve IntegerLiteral wrapper
+                    Type::InferVar(rid) if *rid == id => Type::IntegerLiteral(id),
+                    _ => self.deep_resolve(resolved),
+                }
+            }
+            Type::FloatLiteral(id) => {
+                let resolved = self.resolve(id);
+                match &resolved {
+                    // Unbound: preserve FloatLiteral wrapper
+                    Type::InferVar(rid) if *rid == id => Type::FloatLiteral(id),
+                    _ => self.deep_resolve(resolved),
+                }
+            }
+            Type::Array { element, size } => {
+                let resolved_elem = self.deep_resolve(*element);
+                Type::Array {
+                    element: Box::new(resolved_elem),
+                    size,
+                }
+            }
+            Type::Generic { name, args } => {
+                let resolved_args = args.into_iter().map(|a| self.deep_resolve(a)).collect();
+                Type::Generic {
+                    name,
+                    args: resolved_args,
+                }
+            }
+            _ => ty,
+        }
+    }
+
+    /// Unify two types, updating inference variable bindings as needed.
+    /// Returns `Ok(())` on success, or an error if the types are incompatible.
+    pub fn unify(&mut self, ty1: Type, ty2: Type) -> Result<(), BengalError> {
+        let ty1 = self.deep_resolve(ty1);
+        let ty2 = self.deep_resolve(ty2);
+
+        if ty1 == ty2 {
+            return Ok(());
+        }
+
+        match (ty1, ty2) {
+            // InferVar binds to anything
+            (Type::InferVar(a), other) | (other, Type::InferVar(a)) => {
+                self.set_resolved(a, other);
+                Ok(())
+            }
+
+            // IntegerLiteral with integer concrete types
+            (Type::IntegerLiteral(a), ref concrete @ Type::I32)
+            | (Type::IntegerLiteral(a), ref concrete @ Type::I64)
+            | (ref concrete @ Type::I32, Type::IntegerLiteral(a))
+            | (ref concrete @ Type::I64, Type::IntegerLiteral(a)) => {
+                self.set_resolved(a, concrete.clone());
+                Ok(())
+            }
+
+            // IntegerLiteral with IntegerLiteral
+            (Type::IntegerLiteral(a), Type::IntegerLiteral(b)) => {
+                self.link(a, b);
+                Ok(())
+            }
+
+            // FloatLiteral with float concrete types
+            (Type::FloatLiteral(a), ref concrete @ Type::F32)
+            | (Type::FloatLiteral(a), ref concrete @ Type::F64)
+            | (ref concrete @ Type::F32, Type::FloatLiteral(a))
+            | (ref concrete @ Type::F64, Type::FloatLiteral(a)) => {
+                self.set_resolved(a, concrete.clone());
+                Ok(())
+            }
+
+            // FloatLiteral with FloatLiteral
+            (Type::FloatLiteral(a), Type::FloatLiteral(b)) => {
+                self.link(a, b);
+                Ok(())
+            }
+
+            // Array: recursive unification
+            (
+                Type::Array {
+                    element: e1,
+                    size: s1,
+                },
+                Type::Array {
+                    element: e2,
+                    size: s2,
+                },
+            ) => {
+                if s1 != s2 {
+                    return Err(unify_err(format!(
+                        "array size mismatch: expected {}, found {}",
+                        s1, s2
+                    )));
+                }
+                self.unify(*e1, *e2)
+            }
+
+            // Generic: pairwise unification
+            (Type::Generic { name: n1, args: a1 }, Type::Generic { name: n2, args: a2 }) => {
+                if n1 != n2 {
+                    return Err(unify_err(format!(
+                        "cannot unify generic types: {} and {}",
+                        n1, n2
+                    )));
+                }
+                if a1.len() != a2.len() {
+                    return Err(unify_err(format!(
+                        "generic arity mismatch for {}: expected {}, found {}",
+                        n1,
+                        a1.len(),
+                        a2.len()
+                    )));
+                }
+                for (arg1, arg2) in a1.into_iter().zip(a2) {
+                    self.unify(arg1, arg2)?;
+                }
+                Ok(())
+            }
+
+            // Everything else is an error
+            (t1, t2) => Err(unify_err(format!("cannot unify {} with {}", t1, t2))),
+        }
+    }
+
     /// Find the root of the Union-Find chain for `id`, with path compression.
     fn find(&mut self, id: InferVarId) -> InferVarId {
         let state = self.var_states[id as usize].clone();
@@ -143,5 +290,212 @@ mod tests {
         ctx.fresh_var();
         ctx.reset();
         assert_eq!(ctx.fresh_var(), 0);
+    }
+
+    #[test]
+    fn unify_same_concrete() {
+        let mut ctx = InferenceContext::new();
+        assert!(ctx.unify(Type::I32, Type::I32).is_ok());
+        assert!(ctx.unify(Type::Bool, Type::Bool).is_ok());
+    }
+
+    #[test]
+    fn unify_infer_var_with_concrete() {
+        let mut ctx = InferenceContext::new();
+        let a = ctx.fresh_var();
+        assert!(ctx.unify(Type::InferVar(a), Type::I32).is_ok());
+        assert_eq!(ctx.resolve(a), Type::I32);
+    }
+
+    #[test]
+    fn unify_integer_literal_with_i32() {
+        let mut ctx = InferenceContext::new();
+        let a = ctx.fresh_integer();
+        assert!(ctx.unify(Type::IntegerLiteral(a), Type::I32).is_ok());
+        assert_eq!(ctx.resolve(a), Type::I32);
+    }
+
+    #[test]
+    fn unify_integer_literal_with_i64() {
+        let mut ctx = InferenceContext::new();
+        let a = ctx.fresh_integer();
+        assert!(ctx.unify(Type::IntegerLiteral(a), Type::I64).is_ok());
+        assert_eq!(ctx.resolve(a), Type::I64);
+    }
+
+    #[test]
+    fn unify_integer_literal_with_infer_var() {
+        let mut ctx = InferenceContext::new();
+        let a = ctx.fresh_integer();
+        let b = ctx.fresh_var();
+        assert!(
+            ctx.unify(Type::IntegerLiteral(a), Type::InferVar(b))
+                .is_ok()
+        );
+        // b should resolve to IntegerLiteral(a)
+        assert_eq!(ctx.resolve(b), Type::IntegerLiteral(a));
+    }
+
+    #[test]
+    fn unify_two_integer_literals() {
+        let mut ctx = InferenceContext::new();
+        let a = ctx.fresh_integer();
+        let b = ctx.fresh_integer();
+        assert!(
+            ctx.unify(Type::IntegerLiteral(a), Type::IntegerLiteral(b))
+                .is_ok()
+        );
+        // Resolving b to I32 should also resolve a
+        ctx.set_resolved(b, Type::I32);
+        assert_eq!(ctx.resolve(a), Type::I32);
+    }
+
+    #[test]
+    fn unify_integer_literal_with_float_literal_error() {
+        let mut ctx = InferenceContext::new();
+        let a = ctx.fresh_integer();
+        let b = ctx.fresh_float();
+        assert!(
+            ctx.unify(Type::IntegerLiteral(a), Type::FloatLiteral(b))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn unify_integer_literal_with_bool_error() {
+        let mut ctx = InferenceContext::new();
+        let a = ctx.fresh_integer();
+        assert!(ctx.unify(Type::IntegerLiteral(a), Type::Bool).is_err());
+    }
+
+    #[test]
+    fn unify_float_literal_with_f64() {
+        let mut ctx = InferenceContext::new();
+        let a = ctx.fresh_float();
+        assert!(ctx.unify(Type::FloatLiteral(a), Type::F64).is_ok());
+        assert_eq!(ctx.resolve(a), Type::F64);
+    }
+
+    #[test]
+    fn unify_array_recursive() {
+        let mut ctx = InferenceContext::new();
+        let a = ctx.fresh_var();
+        let arr1 = Type::Array {
+            element: Box::new(Type::InferVar(a)),
+            size: 3,
+        };
+        let arr2 = Type::Array {
+            element: Box::new(Type::I32),
+            size: 3,
+        };
+        assert!(ctx.unify(arr1, arr2).is_ok());
+        assert_eq!(ctx.resolve(a), Type::I32);
+    }
+
+    #[test]
+    fn unify_array_size_mismatch_error() {
+        let mut ctx = InferenceContext::new();
+        let arr1 = Type::Array {
+            element: Box::new(Type::I32),
+            size: 3,
+        };
+        let arr2 = Type::Array {
+            element: Box::new(Type::I32),
+            size: 5,
+        };
+        assert!(ctx.unify(arr1, arr2).is_err());
+    }
+
+    #[test]
+    fn unify_generic_pairwise() {
+        let mut ctx = InferenceContext::new();
+        let a = ctx.fresh_var();
+        let g1 = Type::Generic {
+            name: "Box".to_string(),
+            args: vec![Type::InferVar(a)],
+        };
+        let g2 = Type::Generic {
+            name: "Box".to_string(),
+            args: vec![Type::I64],
+        };
+        assert!(ctx.unify(g1, g2).is_ok());
+        assert_eq!(ctx.resolve(a), Type::I64);
+    }
+
+    #[test]
+    fn unify_generic_name_mismatch_error() {
+        let mut ctx = InferenceContext::new();
+        let g1 = Type::Generic {
+            name: "Box".to_string(),
+            args: vec![Type::I32],
+        };
+        let g2 = Type::Generic {
+            name: "Pair".to_string(),
+            args: vec![Type::I32],
+        };
+        assert!(ctx.unify(g1, g2).is_err());
+    }
+
+    #[test]
+    fn unify_type_param_same() {
+        let mut ctx = InferenceContext::new();
+        let t1 = Type::TypeParam {
+            name: "T".to_string(),
+            bound: None,
+        };
+        let t2 = Type::TypeParam {
+            name: "T".to_string(),
+            bound: None,
+        };
+        assert!(ctx.unify(t1, t2).is_ok());
+    }
+
+    #[test]
+    fn unify_type_param_different_error() {
+        let mut ctx = InferenceContext::new();
+        let t = Type::TypeParam {
+            name: "T".to_string(),
+            bound: None,
+        };
+        assert!(ctx.unify(t, Type::I32).is_err());
+    }
+
+    #[test]
+    fn unify_symmetry() {
+        // unify(A, B) should give same result as unify(B, A)
+        let mut ctx1 = InferenceContext::new();
+        let a1 = ctx1.fresh_integer();
+        assert!(ctx1.unify(Type::IntegerLiteral(a1), Type::I64).is_ok());
+        assert_eq!(ctx1.resolve(a1), Type::I64);
+
+        let mut ctx2 = InferenceContext::new();
+        let a2 = ctx2.fresh_integer();
+        assert!(ctx2.unify(Type::I64, Type::IntegerLiteral(a2)).is_ok());
+        assert_eq!(ctx2.resolve(a2), Type::I64);
+    }
+
+    #[test]
+    fn unify_different_concrete_error() {
+        let mut ctx = InferenceContext::new();
+        assert!(ctx.unify(Type::I32, Type::Bool).is_err());
+        assert!(ctx.unify(Type::I32, Type::I64).is_err());
+    }
+
+    #[test]
+    fn unify_struct_same() {
+        let mut ctx = InferenceContext::new();
+        assert!(
+            ctx.unify(Type::Struct("Foo".into()), Type::Struct("Foo".into()))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn unify_struct_different_error() {
+        let mut ctx = InferenceContext::new();
+        assert!(
+            ctx.unify(Type::Struct("Foo".into()), Type::Struct("Bar".into()))
+                .is_err()
+        );
     }
 }
