@@ -14,7 +14,7 @@ pub struct VarInfo {
 #[derive(Debug, Clone)]
 pub struct FuncSig {
     pub type_params: Vec<TypeParam>,
-    pub params: Vec<Type>,
+    pub params: Vec<(String, Type)>,
     pub return_type: Type,
 }
 

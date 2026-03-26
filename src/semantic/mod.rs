@@ -142,10 +142,10 @@ fn collect_global_symbols(graph: &ModuleGraph) -> Result<GlobalSymbolTable> {
         // Register function signatures (need types already registered)
         for func in &ast.functions {
             tmp_resolver.push_type_params(&func.type_params);
-            let params: Vec<Type> = func
+            let params: Vec<(String, Type)> = func
                 .params
                 .iter()
-                .map(|p| resolve_type_checked(&p.ty, &tmp_resolver))
+                .map(|p| Ok((p.name.clone(), resolve_type_checked(&p.ty, &tmp_resolver)?)))
                 .collect::<Result<Vec<_>>>()?;
             let return_type = resolve_type_checked(&func.return_type, &tmp_resolver)?;
             tmp_resolver.pop_type_params(func.type_params.len());
@@ -422,10 +422,10 @@ fn analyze_single_module(
         }
         // Push type params into scope so that parameter/return types can reference them
         resolver.push_type_params(&func.type_params);
-        let params: Vec<Type> = func
+        let params: Vec<(String, Type)> = func
             .params
             .iter()
-            .map(|p| resolve_type_checked(&p.ty, resolver))
+            .map(|p| Ok((p.name.clone(), resolve_type_checked(&p.ty, resolver)?)))
             .collect::<Result<Vec<_>>>()?;
         let return_type = resolve_type_checked(&func.return_type, resolver)?;
         resolver.pop_type_params(func.type_params.len());
@@ -966,10 +966,10 @@ pub fn analyze_pre_mono(program: &Program) -> Result<infer::InferredTypeArgs> {
             return Err(sem_err(format!("duplicate definition `{}`", func.name)));
         }
         resolver.push_type_params(&func.type_params);
-        let params: Vec<Type> = func
+        let params: Vec<(String, Type)> = func
             .params
             .iter()
-            .map(|p| resolve_type_checked(&p.ty, &resolver))
+            .map(|p| Ok((p.name.clone(), resolve_type_checked(&p.ty, &resolver)?)))
             .collect::<Result<Vec<_>>>()?;
         let return_type = resolve_type_checked(&func.return_type, &resolver)?;
         resolver.pop_type_params(func.type_params.len());
@@ -1213,10 +1213,10 @@ pub fn analyze_post_mono(program: &Program) -> Result<SemanticInfo> {
             return Err(sem_err(format!("duplicate definition `{}`", func.name)));
         }
         resolver.push_type_params(&func.type_params);
-        let params: Vec<Type> = func
+        let params: Vec<(String, Type)> = func
             .params
             .iter()
-            .map(|p| resolve_type_checked(&p.ty, &resolver))
+            .map(|p| Ok((p.name.clone(), resolve_type_checked(&p.ty, &resolver)?)))
             .collect::<Result<Vec<_>>>()?;
         let return_type = resolve_type_checked(&func.return_type, &resolver)?;
         resolver.pop_type_params(func.type_params.len());
@@ -2286,7 +2286,7 @@ fn analyze_expr(
                 HashMap::new()
             };
 
-            for (arg, expected_ty) in args.iter().zip(sig.params.iter()) {
+            for (arg, (_param_name, expected_ty)) in args.iter().zip(sig.params.iter()) {
                 let arg_ty = analyze_expr(arg, resolver, ctx.as_deref_mut())?;
                 let effective_ty = substitute_type(expected_ty, &subst);
                 if let Some(ref mut c) = ctx {
