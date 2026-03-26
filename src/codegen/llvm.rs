@@ -1184,7 +1184,12 @@ pub fn link_objects(obj_files: &[std::path::PathBuf], output: &std::path::Path) 
 // ---------------------------------------------------------------------------
 
 /// Resolve all BirTypes in an instruction through the substitution map.
-fn resolve_instruction(inst: &Instruction, subst: &HashMap<String, BirType>) -> Instruction {
+/// Also resolves protocol method calls via the conformance map.
+fn resolve_instruction(
+    inst: &Instruction,
+    subst: &HashMap<String, BirType>,
+    conformance_map: &HashMap<(String, BirType), String>,
+) -> Instruction {
     match inst {
         Instruction::Literal { result, value, ty } => Instruction::Literal {
             result: *result,
@@ -1215,6 +1220,23 @@ fn resolve_instruction(inst: &Instruction, subst: &HashMap<String, BirType>) -> 
                 .iter()
                 .map(|t| resolve_bir_type(t, subst))
                 .collect();
+
+            // Check if this is a protocol method call that can be resolved
+            // via the conformance map.
+            if let Some(first_type_arg) = resolved_type_args.first() {
+                let key = (func_name.clone(), first_type_arg.clone());
+                if let Some(concrete_name) = conformance_map.get(&key) {
+                    // Resolved to a concrete implementation — direct call.
+                    return Instruction::Call {
+                        result: *result,
+                        func_name: concrete_name.clone(),
+                        args: args.clone(),
+                        type_args: vec![],
+                        ty: resolve_bir_type(ty, subst),
+                    };
+                }
+            }
+
             // If the call has type_args, mangle the function name.
             let resolved_func_name = if resolved_type_args.is_empty() {
                 func_name.clone()
@@ -1394,7 +1416,12 @@ fn resolve_terminator(term: &Terminator, subst: &HashMap<String, BirType>) -> Te
 }
 
 /// Resolve all BirTypes in a basic block through the substitution map.
-fn resolve_basic_block(block: &BasicBlock, subst: &HashMap<String, BirType>) -> BasicBlock {
+/// Also resolves protocol method calls via the conformance map.
+fn resolve_basic_block(
+    block: &BasicBlock,
+    subst: &HashMap<String, BirType>,
+    conformance_map: &HashMap<(String, BirType), String>,
+) -> BasicBlock {
     BasicBlock {
         label: block.label,
         params: block
@@ -1405,15 +1432,19 @@ fn resolve_basic_block(block: &BasicBlock, subst: &HashMap<String, BirType>) -> 
         instructions: block
             .instructions
             .iter()
-            .map(|inst| resolve_instruction(inst, subst))
+            .map(|inst| resolve_instruction(inst, subst, conformance_map))
             .collect(),
         terminator: resolve_terminator(&block.terminator, subst),
     }
 }
 
 /// Create a fully resolved (monomorphized) BirFunction from a generic function
-/// and a concrete Instance.
-fn resolve_function(generic_func: &BirFunction, instance: &Instance) -> BirFunction {
+/// and a concrete Instance, resolving protocol method calls via the conformance map.
+fn resolve_function(
+    generic_func: &BirFunction,
+    instance: &Instance,
+    conformance_map: &HashMap<(String, BirType), String>,
+) -> BirFunction {
     let subst = instance.substitution_map(&generic_func.type_params);
     BirFunction {
         name: instance.mangled_name(),
@@ -1427,7 +1458,7 @@ fn resolve_function(generic_func: &BirFunction, instance: &Instance) -> BirFunct
         blocks: generic_func
             .blocks
             .iter()
-            .map(|b| resolve_basic_block(b, &subst))
+            .map(|b| resolve_basic_block(b, &subst, conformance_map))
             .collect(),
         body: vec![],
     }
@@ -1484,7 +1515,11 @@ pub fn compile_with_mono(
         .iter()
         .filter_map(|instance| {
             let generic_func = func_map_bir.get(instance.func_name.as_str())?;
-            Some(resolve_function(generic_func, instance))
+            Some(resolve_function(
+                generic_func,
+                instance,
+                &bir_module.conformance_map,
+            ))
         })
         .collect();
 
