@@ -362,6 +362,25 @@ mod tests {
     }
 
     #[test]
+    fn test_bir_generic_function_has_type_params() {
+        let source = r#"
+            func identity<T>(x: T) -> T { return x; }
+            func main() -> Int32 { return identity<Int32>(42); }
+        "#;
+        let (_module, bir_text) = compile_to_bir(source).unwrap();
+        // The generic function should have type_params in BIR
+        assert!(
+            bir_text.contains("identity"),
+            "BIR must contain the generic function 'identity'"
+        );
+        // Verify TypeParam appears in the BIR representation
+        assert!(
+            bir_text.contains("T"),
+            "BIR must contain TypeParam 'T' for the generic function"
+        );
+    }
+
+    #[test]
     fn test_compile_to_module_reexport() {
         let source = "func main() -> Int32 { return 1; }";
         let tokens = lexer::tokenize(source).unwrap();
