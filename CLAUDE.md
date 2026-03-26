@@ -37,3 +37,4 @@ Generics with monomorphization, protocols, structs (value-type), module system, 
 ## Important
 
 - Always commit when work is done (only tracked files — if `git diff` or `git status` shows changes to tracked files, commit them)
+- When planning changes, prioritize future extensibility and performance over change scope or backward compatibility.
