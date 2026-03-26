@@ -2093,7 +2093,7 @@ pub fn lower_program(
 }
 
 /// Lower program with inferred type args for call sites with omitted type arguments.
-pub fn lower_program_with_inferred(
+pub(crate) fn lower_program_with_inferred(
     program: &Program,
     sem_info: &crate::semantic::SemanticInfo,
     inferred_type_args: &HashMap<NodeId, Vec<TypeAnnotation>>,
@@ -2280,7 +2280,7 @@ pub fn lower_module(
 ///
 /// Like `lower_module`, but also accepts `inferred_type_args` for call sites with
 /// omitted type arguments (needed for BIR-level monomorphization).
-pub fn lower_module_with_inferred(
+pub(crate) fn lower_module_with_inferred(
     program: &Program,
     sem_info: &crate::semantic::SemanticInfo,
     name_map: &HashMap<String, String>,
@@ -2421,6 +2421,7 @@ pub fn lower_module_with_inferred(
     }
 
     // Build conformance_map: (protocol_method, concrete_type) -> impl_name
+    // Use resolve_name so the impl_name matches the mangled BIR function name.
     let mut conformance_map: HashMap<(String, BirType), String> = HashMap::new();
     for struct_def in &program.structs {
         for proto_name in &struct_def.conformances {
@@ -2430,7 +2431,8 @@ pub fn lower_module_with_inferred(
                         format!("{}_{}", proto_name, method.name),
                         BirType::struct_simple(struct_def.name.clone()),
                     );
-                    let impl_name = format!("{}_{}", struct_def.name, method.name);
+                    let local_impl_name = format!("{}_{}", struct_def.name, method.name);
+                    let impl_name = lowering.resolve_name(&local_impl_name);
                     conformance_map.insert(key, impl_name);
                 }
             }
