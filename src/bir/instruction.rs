@@ -245,7 +245,7 @@ mod conformance_map_serde {
     where
         S: Serializer,
     {
-        let entries: Vec<_> = map.iter().map(|(k, v)| (k, v)).collect();
+        let entries: Vec<_> = map.iter().collect();
         entries.serialize(serializer)
     }
 
