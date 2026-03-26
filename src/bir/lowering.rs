@@ -2273,6 +2273,19 @@ pub fn lower_module(
     sem_info: &crate::semantic::SemanticInfo,
     name_map: &HashMap<String, String>,
 ) -> Result<BirModule> {
+    lower_module_with_inferred(program, sem_info, name_map, &HashMap::new())
+}
+
+/// Lower a single module's AST to BIR with name mangling and inferred type args.
+///
+/// Like `lower_module`, but also accepts `inferred_type_args` for call sites with
+/// omitted type arguments (needed for BIR-level monomorphization).
+pub fn lower_module_with_inferred(
+    program: &Program,
+    sem_info: &crate::semantic::SemanticInfo,
+    name_map: &HashMap<String, String>,
+    inferred_type_args: &HashMap<NodeId, Vec<TypeAnnotation>>,
+) -> Result<BirModule> {
     // Build struct_layouts from semantic StructInfo
     let mut struct_layouts: HashMap<String, Vec<(String, BirType)>> = HashMap::new();
     for (name, info) in &sem_info.struct_defs {
@@ -2308,6 +2321,7 @@ pub fn lower_module(
     };
     let mut lowering = Lowering::new(HashMap::new(), sem_info_ref);
     lowering.name_map = Some(name_map.clone());
+    lowering.inferred_type_args = inferred_type_args.clone();
 
     // Build func_sigs using mangled names
     for func in &program.functions {
@@ -2316,6 +2330,12 @@ pub fn lower_module(
         let bir_ty = lowering.convert_type_with_structs(&func.return_type);
         lowering.current_type_params.clear();
         let resolved = lowering.resolve_name(&func.name);
+        if !func.type_params.is_empty() {
+            lowering.func_type_param_names.insert(
+                resolved.clone(),
+                func.type_params.iter().map(|tp| tp.name.clone()).collect(),
+            );
+        }
         lowering.func_sigs.insert(resolved, bir_ty);
     }
 
@@ -2325,6 +2345,12 @@ pub fn lower_module(
             let local_mangled = format!("{}_{}", struct_name, method.name);
             let resolved = lowering.resolve_name(&local_mangled);
             let bir_ret = semantic_type_to_bir(&method.return_type);
+            if !info.type_params.is_empty() {
+                lowering.func_type_param_names.insert(
+                    resolved.clone(),
+                    info.type_params.iter().map(|tp| tp.name.clone()).collect(),
+                );
+            }
             lowering.func_sigs.insert(resolved, bir_ret);
         }
     }

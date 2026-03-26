@@ -57,10 +57,10 @@ pub fn compile_to_bir(source: &str) -> Result<(bir::instruction::BirModule, Stri
 ///
 /// 1. Find the package root (Bengal.toml) starting from `entry_path`'s parent.
 /// 2. Build the module graph from the entry file.
-/// 3. For each module: validate generics (relaxed), run pre-mono type inference,
-///    and monomorphize with inferred type arguments.
-/// 4. Run `analyze_package()` for cross-module post-mono semantic analysis.
-/// 5. For each module: build name maps, lower to BIR, optimize, compile to .o.
+/// 3. For each module: validate generics, run pre-mono type inference (no AST mono).
+/// 4. Run `analyze_package()` for cross-module semantic analysis.
+/// 5. For each module: lower the ORIGINAL AST (with generics) to BIR, optimize,
+///    run BIR-level mono_collect, compile with compile_module_with_mono.
 /// 6. Link all .o files into the final executable at `output_path`.
 /// 7. Clean up temporary .o files.
 pub fn compile_package_to_executable(entry_path: &Path, output_path: &Path) -> Result<()> {
@@ -91,27 +91,32 @@ pub fn compile_package_to_executable(entry_path: &Path, output_path: &Path) -> R
     };
 
     // 2. Build module graph
-    let mut graph = package::build_module_graph(entry_path)?;
+    let graph = package::build_module_graph(entry_path)?;
 
-    // 2.5. Validate generics, run pre-mono analysis, and monomorphize each module's AST
+    // 2.5. Validate generics and run pre-mono analysis per module.
+    //       No AST monomorphization — generics are preserved for BIR-level mono.
     for mod_info in graph.modules.values() {
         semantic::validate_generics(&mod_info.ast)?;
     }
-    // Collect pre-mono SemanticInfo per module for future use in BIR-level mono.
-    // For now we still use the post-mono package sem_info for lowering because
-    // it includes cross-module imported symbol definitions needed for name resolution.
-    let mut pre_mono_sem_infos: HashMap<package::ModulePath, semantic::SemanticInfo> =
-        HashMap::new();
-    for (mod_path, mod_info) in graph.modules.iter_mut() {
-        let (inferred, pre_mono_sem_info) = semantic::analyze_pre_mono_lenient(&mod_info.ast)?;
-        pre_mono_sem_infos.insert(mod_path.clone(), pre_mono_sem_info);
-        mod_info.ast = monomorphize::monomorphize(&mod_info.ast, &inferred);
+    let mut inferred_maps: HashMap<
+        package::ModulePath,
+        HashMap<parser::ast::NodeId, Vec<parser::ast::TypeAnnotation>>,
+    > = HashMap::new();
+    for (mod_path, mod_info) in &graph.modules {
+        let (inferred, _pre_mono_sem_info) = semantic::analyze_pre_mono_lenient(&mod_info.ast)?;
+        let inferred_map: HashMap<parser::ast::NodeId, Vec<parser::ast::TypeAnnotation>> = inferred
+            .map
+            .into_iter()
+            .map(|(id, site)| (id, site.type_args))
+            .collect();
+        inferred_maps.insert(mod_path.clone(), inferred_map);
     }
 
-    // 3. Run cross-module semantic analysis
+    // 3. Run cross-module semantic analysis on the original (un-monomorphized) AST
     let pkg_sem_info = semantic::analyze_package(&graph, &package_name)?;
 
-    // 4. For each module: build name map, lower, optimize, compile
+    // 4. For each module: build name map, lower with inferred type args, optimize,
+    //    run BIR mono_collect, compile with compile_module_with_mono
     let mut obj_files = Vec::new();
     let build_id = BUILD_COUNTER.fetch_add(1, Ordering::Relaxed);
     let temp_dir =
@@ -209,15 +214,35 @@ pub fn compile_package_to_executable(entry_path: &Path, output_path: &Path) -> R
             name_map.insert(imp_name.clone(), mangled);
         }
 
-        // Lower module to BIR
-        let mut bir_module = bir::lower_module(&mod_info.ast, sem_info, &name_map)?;
+        // Get the inferred type args for this module
+        let empty_inferred = HashMap::new();
+        let inferred_map = inferred_maps.get(mod_path).unwrap_or(&empty_inferred);
+
+        // Lower the original AST (with generics) to BIR
+        let mut bir_module = bir::lowering::lower_module_with_inferred(
+            &mod_info.ast,
+            sem_info,
+            &name_map,
+            inferred_map,
+        )?;
         bir::optimize_module(&mut bir_module);
 
-        // Collect external functions (functions called but not defined in this module)
+        // Run BIR-level monomorphization collection
+        let mono_result = bir::mono::mono_collect(&bir_module, "main");
+
+        // Collect external functions (functions called but not defined in this module).
+        // For BIR mono, we also need to account for calls from resolved generic instances.
         let defined_funcs: std::collections::HashSet<String> = bir_module
             .functions
             .iter()
             .map(|f| f.name.clone())
+            .collect();
+        // Also consider resolved generic instance names as "defined"
+        let resolved_instance_names: std::collections::HashSet<String> = mono_result
+            .func_instances
+            .iter()
+            .filter(|inst| defined_funcs.contains(&inst.func_name))
+            .map(|inst| inst.mangled_name())
             .collect();
         let mut external_functions = Vec::new();
         let mut seen_externals = std::collections::HashSet::new();
@@ -232,6 +257,7 @@ pub fn compile_package_to_executable(entry_path: &Path, output_path: &Path) -> R
                         ..
                     } = inst
                         && !defined_funcs.contains(func_name)
+                        && !resolved_instance_names.contains(func_name)
                         && !seen_externals.contains(func_name)
                     {
                         external_functions.push((
@@ -245,8 +271,9 @@ pub fn compile_package_to_executable(entry_path: &Path, output_path: &Path) -> R
             }
         }
 
-        // Compile to object file
-        let obj_bytes = codegen::compile_module(&bir_module, &external_functions)?;
+        // Compile to object file with BIR mono support
+        let obj_bytes =
+            codegen::compile_module_with_mono(&bir_module, &mono_result, &external_functions)?;
 
         let obj_name = if mod_path.0.is_empty() {
             "root.o".to_string()
