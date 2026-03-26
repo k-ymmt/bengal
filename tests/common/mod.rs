@@ -1,43 +1,13 @@
-use bengal::bir;
-use bengal::codegen;
 use bengal::lexer::tokenize;
 use bengal::parser::parse;
 use bengal::semantic;
-use inkwell::OptimizationLevel;
-use inkwell::context::Context;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// JIT-compile and run a single-file Bengal program, returning the exit code.
+/// Compile and run a single-file Bengal program, returning the exit code.
 pub fn compile_and_run(source: &str) -> i32 {
-    let tokens = tokenize(source).unwrap();
-    let program = parse(tokens).unwrap();
-    semantic::validate_generics(&program).unwrap();
-    let (inferred, sem_info) = semantic::analyze_pre_mono(&program).unwrap();
-    let inferred_map: std::collections::HashMap<
-        bengal::parser::ast::NodeId,
-        Vec<bengal::parser::ast::TypeAnnotation>,
-    > = inferred
-        .map
-        .into_iter()
-        .map(|(id, site)| (id, site.type_args))
-        .collect();
-    let mut bir_module =
-        bir::lowering::lower_program_with_inferred(&program, &sem_info, &inferred_map).unwrap();
-    bir::optimize_module(&mut bir_module);
-    let mono_result = bir::mono::mono_collect(&bir_module, "main");
-
-    let context = Context::create();
-    let module = codegen::compile_to_module_with_mono(&context, &bir_module, &mono_result).unwrap();
-    let ee = module
-        .create_jit_execution_engine(OptimizationLevel::None)
-        .unwrap();
-    let main_fn = unsafe {
-        ee.get_function::<unsafe extern "C" fn() -> i32>("main")
-            .unwrap()
-    };
-    unsafe { main_fn.call() }
+    compile_to_native_and_run(source)
 }
 
 /// Compile to native object, link, run, and return the exit code.
