@@ -1700,6 +1700,42 @@ fn analyze_stmt(stmt: &Stmt, resolver: &mut Resolver) -> Result<()> {
                     }
                     check_assignment_target_mutable(object, resolver)?;
                 }
+                Type::Generic { name, args } => {
+                    let struct_info = resolver
+                        .lookup_struct(name)
+                        .ok_or_else(|| sem_err(format!("undefined struct `{}`", name)))?
+                        .clone();
+                    let subst: HashMap<String, Type> = struct_info
+                        .type_params
+                        .iter()
+                        .zip(args.iter())
+                        .map(|(tp, arg)| (tp.name.clone(), arg.clone()))
+                        .collect();
+                    let field_ty = if let Some(&idx) = struct_info.field_index.get(field.as_str()) {
+                        substitute_type(&struct_info.fields[idx].1, &subst)
+                    } else if let Some(&idx) = struct_info.computed_index.get(field.as_str()) {
+                        let prop = &struct_info.computed[idx];
+                        if !prop.has_setter {
+                            return Err(sem_err(format!(
+                                "computed property `{}` is read-only (no setter)",
+                                field
+                            )));
+                        }
+                        substitute_type(&prop.ty, &subst)
+                    } else {
+                        return Err(sem_err(format!(
+                            "struct `{}` has no field `{}`",
+                            name, field
+                        )));
+                    };
+                    if val_ty != field_ty {
+                        return Err(sem_err(format!(
+                            "type mismatch in field assignment: expected `{}`, found `{}`",
+                            field_ty, val_ty
+                        )));
+                    }
+                    check_assignment_target_mutable(object, resolver)?;
+                }
                 _ => {
                     return Err(sem_err(format!(
                         "field assignment on non-struct type `{}`",
@@ -2024,6 +2060,28 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                         )))
                     }
                 }
+                Type::Generic { name, args } => {
+                    let struct_info = resolver
+                        .lookup_struct(name)
+                        .ok_or_else(|| sem_err(format!("undefined struct `{}`", name)))?
+                        .clone();
+                    let subst: HashMap<String, Type> = struct_info
+                        .type_params
+                        .iter()
+                        .zip(args.iter())
+                        .map(|(tp, arg)| (tp.name.clone(), arg.clone()))
+                        .collect();
+                    if let Some(&idx) = struct_info.field_index.get(field.as_str()) {
+                        Ok(substitute_type(&struct_info.fields[idx].1, &subst))
+                    } else if let Some(&idx) = struct_info.computed_index.get(field.as_str()) {
+                        Ok(substitute_type(&struct_info.computed[idx].ty, &subst))
+                    } else {
+                        Err(sem_err(format!(
+                            "struct `{}` has no field `{}`",
+                            name, field
+                        )))
+                    }
+                }
                 _ => Err(sem_err(format!(
                     "field access on non-struct type `{}`",
                     obj_ty
@@ -2088,6 +2146,90 @@ fn analyze_expr(expr: &Expr, resolver: &mut Resolver) -> Result<Type> {
                     }
                     Ok(method_info.return_type)
                 }
+                Type::Generic {
+                    name,
+                    args: type_args,
+                } => {
+                    let struct_info = resolver
+                        .lookup_struct(name)
+                        .ok_or_else(|| sem_err(format!("undefined struct `{}`", name)))?
+                        .clone();
+                    // Build substitution map: type_param_name → actual type arg
+                    let subst: HashMap<String, Type> = struct_info
+                        .type_params
+                        .iter()
+                        .zip(type_args.iter())
+                        .map(|(tp, arg)| (tp.name.clone(), arg.clone()))
+                        .collect();
+                    let method_info = match struct_info.method_index.get(method.as_str()) {
+                        Some(&idx) => struct_info.methods[idx].clone(),
+                        None => {
+                            return Err(sem_err(format!(
+                                "type `{}` has no method `{}`",
+                                name, method
+                            )));
+                        }
+                    };
+                    if args.len() != method_info.params.len() {
+                        return Err(sem_err(format!(
+                            "method `{}` expects {} argument(s) but {} were given",
+                            method,
+                            method_info.params.len(),
+                            args.len()
+                        )));
+                    }
+                    for (arg, (param_name, param_ty)) in args.iter().zip(method_info.params.iter())
+                    {
+                        let arg_ty = analyze_expr(arg, resolver)?;
+                        let expected_ty = substitute_type(param_ty, &subst);
+                        if arg_ty != expected_ty {
+                            return Err(sem_err(format!(
+                                "expected `{}` but got `{}` in argument `{}` of method `{}`",
+                                expected_ty, arg_ty, param_name, method
+                            )));
+                        }
+                    }
+                    Ok(substitute_type(&method_info.return_type, &subst))
+                }
+                Type::TypeParam {
+                    name: _,
+                    bound: Some(proto),
+                } => {
+                    let proto_info = resolver
+                        .lookup_protocol(proto)
+                        .ok_or_else(|| sem_err(format!("undefined protocol `{}`", proto)))?
+                        .clone();
+                    let method_sig = proto_info
+                        .methods
+                        .iter()
+                        .find(|m| m.name == *method)
+                        .ok_or_else(|| {
+                            sem_err(format!("protocol `{}` has no method `{}`", proto, method))
+                        })?
+                        .clone();
+                    if args.len() != method_sig.params.len() {
+                        return Err(sem_err(format!(
+                            "method `{}` expects {} argument(s) but {} were given",
+                            method,
+                            method_sig.params.len(),
+                            args.len()
+                        )));
+                    }
+                    for (arg, param) in args.iter().zip(method_sig.params.iter()) {
+                        let arg_ty = analyze_expr(arg, resolver)?;
+                        if arg_ty != param.1 {
+                            return Err(sem_err(format!(
+                                "expected `{}` but got `{}` in argument `{}` of method `{}`",
+                                param.1, arg_ty, param.0, method
+                            )));
+                        }
+                    }
+                    Ok(method_sig.return_type.clone())
+                }
+                Type::TypeParam { name, bound: None } => Err(sem_err(format!(
+                    "method call on unconstrained type parameter `{}`",
+                    name
+                ))),
                 _ => Err(sem_err(format!(
                     "method call on non-struct type `{}`",
                     obj_ty
