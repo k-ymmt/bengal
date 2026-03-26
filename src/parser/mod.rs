@@ -296,6 +296,7 @@ impl Parser {
     }
 
     fn parse_function(&mut self) -> Result<Function> {
+        let start = self.current_span_start();
         self.expect(Token::Func)?;
         let name_tok = self.expect(Token::Ident(String::new()))?;
         let name = match &name_tok.node {
@@ -315,6 +316,7 @@ impl Parser {
             TypeAnnotation::Unit
         };
         let body = self.parse_block()?;
+        let span = self.span_from(start);
         Ok(Function {
             visibility: Visibility::Internal,
             name,
@@ -322,10 +324,12 @@ impl Parser {
             params,
             return_type,
             body,
+            span,
         })
     }
 
     fn parse_struct_def(&mut self) -> Result<StructDef> {
+        let start = self.current_span_start();
         self.expect(Token::Struct)?;
         let name = self.expect_ident()?;
         let type_params = if self.peek().node == Token::Lt {
@@ -350,12 +354,14 @@ impl Parser {
             members.push(self.parse_struct_member()?);
         }
         self.expect(Token::RBrace)?;
+        let span = self.span_from(start);
         Ok(StructDef {
             visibility: Visibility::Internal,
             name,
             type_params,
             conformances,
             members,
+            span,
         })
     }
 
@@ -1306,6 +1312,7 @@ pub fn parse(tokens: Vec<SpannedToken>) -> Result<Program> {
                 span: next.span,
             });
         }
+        let expr_span = expr.span;
         Ok(Program {
             module_decls: vec![],
             import_decls: vec![],
@@ -1320,6 +1327,7 @@ pub fn parse(tokens: Vec<SpannedToken>) -> Result<Program> {
                 body: Block {
                     stmts: vec![Stmt::Return(Some(expr))],
                 },
+                span: expr_span,
             }],
         })
     }

@@ -57,6 +57,7 @@ pub struct StructDef {
     pub type_params: Vec<TypeParam>,
     pub conformances: Vec<String>,
     pub members: Vec<StructMember>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -116,6 +117,7 @@ pub struct Function {
     pub params: Vec<Param>,
     pub return_type: TypeAnnotation,
     pub body: Block,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
