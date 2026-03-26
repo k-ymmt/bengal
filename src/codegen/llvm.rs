@@ -36,7 +36,19 @@ fn bir_type_to_llvm_type<'ctx>(
         BirType::F64 => Some(context.f64_type().into()),
         BirType::Bool => Some(context.bool_type().into()),
         BirType::Unit => None,
-        BirType::Struct { name, .. } => Some(struct_types.get(name)?.as_basic_type_enum()),
+        BirType::Struct { name, type_args } => {
+            // For generic struct instances, look up by mangled name.
+            let lookup_name = if type_args.is_empty() {
+                name.clone()
+            } else {
+                let inst = Instance {
+                    func_name: name.clone(),
+                    type_args: type_args.clone(),
+                };
+                inst.mangled_name()
+            };
+            Some(struct_types.get(&lookup_name)?.as_basic_type_enum())
+        }
         BirType::Array { element, size } => {
             let elem_ty = bir_type_to_llvm_type(context, element, struct_types)?;
             Some(elem_ty.array_type(*size as u32).into())
@@ -416,12 +428,24 @@ fn emit_instruction<'ctx>(
             result,
             struct_name,
             fields,
+            type_args,
             ..
         } => {
+            // For generic struct instances, look up LLVM type by mangled name.
+            let llvm_lookup_name = if type_args.is_empty() {
+                struct_name.clone()
+            } else {
+                let inst = Instance {
+                    func_name: struct_name.clone(),
+                    type_args: type_args.clone(),
+                };
+                inst.mangled_name()
+            };
             let llvm_struct_ty = ctx
                 .struct_types
-                .get(struct_name.as_str())
-                .ok_or_else(|| codegen_err(format!("unknown struct: {}", struct_name)))?;
+                .get(llvm_lookup_name.as_str())
+                .ok_or_else(|| codegen_err(format!("unknown struct: {}", llvm_lookup_name)))?;
+            // Layout is always keyed by base struct name.
             let layout = bir_module
                 .struct_layouts
                 .get(struct_name.as_str())
@@ -855,6 +879,98 @@ fn build_struct_types<'ctx>(
     }
 
     struct_types
+}
+
+/// Build LLVM struct types for generic struct instances.
+///
+/// For each `(struct_name, concrete_type_args)` in the mono result, looks up the
+/// generic layout, extracts TypeParam names in order of first appearance, builds
+/// a substitution map, resolves field types, and creates an LLVM struct under the
+/// mangled name (e.g., `Pair_Int32_Bool`).
+fn build_generic_struct_types<'ctx>(
+    context: &'ctx Context,
+    bir_module: &BirModule,
+    mono_result: &MonoCollectResult,
+    struct_types: &mut HashMap<String, inkwell::types::StructType<'ctx>>,
+) {
+    // Pass 1: Create opaque structs for all generic instances.
+    let mut instance_infos: Vec<(String, Vec<(String, BirType)>)> = Vec::new();
+
+    for (struct_name, concrete_type_args) in &mono_result.struct_instances {
+        let layout = match bir_module.struct_layouts.get(struct_name) {
+            Some(layout) => layout,
+            None => continue,
+        };
+
+        // Extract unique TypeParam names from layout fields in order of first appearance.
+        let mut type_param_names: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (_, ty) in layout {
+            collect_type_params(ty, &mut type_param_names, &mut seen);
+        }
+
+        // Build substitution map.
+        let subst: HashMap<String, BirType> = type_param_names
+            .iter()
+            .zip(concrete_type_args.iter())
+            .map(|(name, ty)| (name.clone(), ty.clone()))
+            .collect();
+
+        // Resolve field types.
+        let resolved_fields: Vec<(String, BirType)> = layout
+            .iter()
+            .map(|(name, ty)| (name.clone(), resolve_bir_type(ty, &subst)))
+            .collect();
+
+        // Compute mangled name.
+        let mangled_name = {
+            let inst = Instance {
+                func_name: struct_name.clone(),
+                type_args: concrete_type_args.clone(),
+            };
+            inst.mangled_name()
+        };
+
+        let llvm_struct = context.opaque_struct_type(&mangled_name);
+        struct_types.insert(mangled_name.clone(), llvm_struct);
+        instance_infos.push((mangled_name, resolved_fields));
+    }
+
+    // Pass 2: Set struct bodies (after all are created, to allow mutual references).
+    for (mangled_name, resolved_fields) in &instance_infos {
+        let field_types: Vec<BasicTypeEnum<'ctx>> = resolved_fields
+            .iter()
+            .map(|(_, ty)| {
+                bir_type_to_llvm_type(context, ty, struct_types)
+                    .expect("generic struct field must have a valid LLVM type")
+            })
+            .collect();
+        struct_types[mangled_name].set_body(&field_types, false);
+    }
+}
+
+/// Recursively collect TypeParam names from a BirType in order of first appearance.
+fn collect_type_params(
+    ty: &BirType,
+    names: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    match ty {
+        BirType::TypeParam(name) => {
+            if seen.insert(name.clone()) {
+                names.push(name.clone());
+            }
+        }
+        BirType::Array { element, .. } => {
+            collect_type_params(element, names, seen);
+        }
+        BirType::Struct { type_args, .. } => {
+            for arg in type_args {
+                collect_type_params(arg, names, seen);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Compile BIR module to LLVM Module.
@@ -1352,7 +1468,8 @@ pub fn compile_with_mono(
     module.set_data_layout(&target_machine.get_target_data().get_data_layout());
     module.set_triple(&triple);
 
-    let struct_types = build_struct_types(&context, bir_module);
+    let mut struct_types = build_struct_types(&context, bir_module);
+    build_generic_struct_types(&context, bir_module, mono_result, &mut struct_types);
 
     // Build function lookup map for resolving generic instances.
     let func_map_bir: HashMap<&str, &BirFunction> = bir_module
