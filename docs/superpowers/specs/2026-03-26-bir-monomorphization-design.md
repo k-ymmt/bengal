@@ -150,18 +150,26 @@ pub fn mono_collect(bir: &BirModule, entry: &str) -> MonoCollectResult
 
 1. Add entry point functions (non-generic) to worklist.
 2. Pop an `Instance` from worklist.
-3. Walk the BIR function's instructions, applying the current substitution map.
+3. Build the substitution map from the instance's type args.
 4. For each `Call` with non-empty `type_args`, resolve `TypeParam` references
-   using the current instance's substitution map, creating a new concrete
-   `Instance`. Add to worklist if not already seen.
-5. Apply `resolve_bir_type` to all `BirType` fields in every instruction,
-   terminator, and block parameter. For each resolved `BirType::Struct` with
-   non-empty `type_args`, record the concrete struct instance in
-   `struct_instances`. This exhaustive scan covers `StructInit`, `FieldGet`,
-   `FieldSet`, `Call.ty`, `Cast`, and nested types like
-   `Array { element: Struct { ... } }`.
-7. Repeat until worklist is empty.
-8. Return all discovered function and struct instances.
+   using the substitution map, creating a new concrete `Instance`. Add to
+   worklist if not already seen.
+5. Scan **all** `BirType` occurrences in the function for struct instances:
+   - `BirFunction.params` and `BirFunction.return_type` (function signature)
+   - All `BirType` fields in every instruction (`Literal.ty`, `BinaryOp.ty`,
+     `Call.ty`, `Cast.from_ty`/`to_ty`, `FieldGet.ty`/`object_ty`,
+     `FieldSet.ty`, `StructInit.ty`, `ArrayInit.ty`, `ArrayGet.ty`,
+     `ArraySet.ty`)
+   - Terminator argument types (`Br.args`, `BrBreak.args`/`value`,
+     `BrContinue.args`)
+   - Basic block parameter types (`BasicBlock.params`)
+   Apply `resolve_bir_type` to each, and for every resolved `BirType::Struct`
+   with non-empty `type_args`, record in `struct_instances`. This covers
+   nested types like `Array { element: Struct { ... } }` as well as structs
+   that appear **only** in function signatures (e.g.,
+   `func idPair<T, U>(p: Pair<T, U>) -> Pair<T, U> { return p; }`).
+6. Repeat until worklist is empty.
+7. Return all discovered function and struct instances.
 
 ### Generic Struct Layout Resolution
 
@@ -241,14 +249,47 @@ This function is applied to:
 - Basic block parameter types (`BasicBlock.params`)
 - Struct layouts (for concrete layout computation)
 
-### Protocol Method Resolution
+### Protocol Method Call Lowering
 
-For generic functions with protocol constraints (e.g., `T: Summable`), method
-calls are represented in BIR as:
+Current BIR lowering (`lowering.rs`) only handles `ExprKind::MethodCall` when
+the receiver is `BirType::Struct`. For BIR mono, lowering must also handle
+method calls on constrained type parameters (`T: Summable`).
+
+#### Cases to Handle
+
+1. **Direct call on type param**: `item.sum()` where `item: T` and `T: Summable`
+2. **Chained field + method**: `self.value.sum()` where `self.value: T` and
+   `T: Summable` (as in `Wrapper<T: Summable>`)
+
+#### Lowering Strategy
+
+When `ExprKind::MethodCall` encounters a receiver with `BirType::TypeParam`:
+
+1. Look up the type parameter's protocol constraint from `SemanticInfo`
+   (derived from `Type::TypeParam { bound: Some(proto) }` in semantic analysis).
+2. Look up the method signature in the protocol definition to determine the
+   return type.
+3. Emit a **protocol method call** in BIR:
 
 ```
-Call { func: "Summable.add", type_args: [TypeParam("T")], ... }
+Call {
+    func: "{Protocol}_{method}",  // e.g., "Summable_sum"
+    args: [receiver, ...],
+    type_args: [TypeParam("T")],  // the receiver's type param
+    ty: <return type>,
+}
 ```
+
+The `func_name` format `{Protocol}_{method}` is a placeholder name that does
+not correspond to any real function. It is resolved at codegen time via the
+conformance map.
+
+For case 2 (`self.value.sum()`), `self.value` is lowered via `FieldGet` which
+produces a value of `BirType::TypeParam("T")`. The subsequent `.sum()` call
+sees `TypeParam("T")` as the receiver and follows the same protocol method
+call path above.
+
+#### Conformance Map and Codegen Resolution
 
 During codegen with `T = Int32`, protocol method resolution proceeds as:
 
@@ -260,16 +301,56 @@ During codegen with `T = Int32`, protocol method resolution proceeds as:
 // BirModule addition
 pub conformance_map: HashMap<(String, BirType), String>,
 // (protocol_method, concrete_type) -> implementation_name
-// e.g., ("Summable.add", BirType::I32) -> "Int32_add"
+// e.g., ("Summable_sum", BirType::Struct { name: "Point", type_args: [] }) -> "Point_sum"
 // Using BirType (which derives Hash+Eq) as key handles generic struct types
 // like Pair<Int32, Bool> without ambiguous string serialization.
 ```
 
-3. Replace the `Call` target with the concrete function name `Int32_add`.
+3. Replace the `Call` target with the concrete function name (e.g., `Point_sum`).
 
 The conformance map is populated during BIR lowering from the semantic analysis
 results (protocol conformance declarations). Implementation names follow the
 existing BIR lowering convention (`StructName_methodName`).
+
+#### Example: Protocol Method on Constrained TypeParam
+
+```bengal
+protocol Summable { func sum() -> Int32; }
+struct Point: Summable {
+    var x: Int32; var y: Int32;
+    func sum() -> Int32 { return self.x + self.y; }
+}
+struct Wrapper<T: Summable> {
+    var value: T;
+    func getSum() -> Int32 { return self.value.sum(); }
+}
+func main() -> Int32 {
+    let w = Wrapper<Point>(value: Point(x: 3, y: 4));
+    return w.getSum();
+}
+```
+
+Generic BIR for `Wrapper_getSum` (after mono of `Wrapper` struct but with
+`T` still generic in the method):
+
+```
+@Wrapper_getSum<T>(%0: Struct("Wrapper", [TypeParam("T")])) -> I32 {
+  bb0:
+    %1 = field_get %0, "value" : Struct("Wrapper", [TypeParam("T")]) -> TypeParam("T")
+    %2 = call @Summable_sum(%1) type_args=[TypeParam("T")] : I32
+    return %2
+}
+```
+
+Conformance map entries:
+```
+("Summable_sum", Struct("Point", [])) -> "Point_sum"
+```
+
+Codegen with `T = Point`:
+- `%1` resolves to `BirType::Struct { name: "Point", type_args: [] }`
+- `Call @Summable_sum type_args=[Point]` -> conformance map lookup ->
+  `Call @Point_sum`
 
 ## Example
 
@@ -370,18 +451,89 @@ struct_layouts: { "Pair" => [("first", TypeParam("T")), ("second", TypeParam("U"
 
 ## Multi-Module Considerations
 
-The multi-module pipeline (`compile_package`) currently runs `analyze_pre_mono`
-+ `monomorphize` per module, then `analyze_package` for cross-module analysis.
+### Current Pipeline
 
-For this migration, the mono collector runs on the **entire package's BIR** (all
-modules combined), so cross-module generic instantiations are naturally
-discovered. Module A calling a generic function from module B is handled by the
-collector finding the `Call` in A's BIR and adding the `Instance` for B's
-function.
+`compile_package` runs per-module: `analyze_pre_mono` + `monomorphize` per
+module, then `analyze_package` for cross-module post-mono analysis, then
+per-module `lower_module` + `compile_module`, and finally `link_objects`.
 
-Full cross-module separate compilation (where module B's BIR is loaded from an
-interface file rather than compiled in the same session) is out of scope and
-tracked in TODO.md §1.6.2.
+Each module currently monomorphizes independently — if module A imports generic
+`foo` from B and calls `foo<Int32>`, the AST mono creates a specialized
+`foo_Int32` in A's AST. This is instantiation-site ownership.
+
+### New Pipeline: Per-Module with Instantiation-Site Ownership
+
+The BIR mono migration preserves the per-module compilation model using
+**instantiation-site ownership** with **`linkonce_odr` LLVM linkage**. This
+matches how C++ templates and Rust generics handle cross-module instantiation.
+
+#### How It Works
+
+1. **BIR lowering** runs per-module as before. Each module's BIR contains its
+   own function definitions. Generic functions imported from other modules are
+   accessible via a **package-wide BIR registry** (all modules' BIR is retained
+   in memory after lowering).
+
+2. **Mono collector** runs per-module, but has read access to the package-wide
+   BIR registry. When module A's collector finds `Call @B_foo type_args=[I32]`,
+   it looks up `B_foo`'s generic BIR from B's module and continues recursive
+   discovery. The resulting `Instance("B_foo", [I32])` is owned by module A.
+
+3. **Codegen** runs per-module. Each module emits LLVM IR for:
+   - Its own non-generic functions (with `external` linkage as before)
+   - All generic instances discovered by its mono collector, using
+     **`linkonce_odr` linkage** for generic instantiations
+
+4. **Linking**: If both module A and C instantiate `B_foo<Int32>`, both object
+   files contain `B_foo_Int32` with `linkonce_odr` linkage. The linker
+   deduplicates, keeping only one copy in the final binary.
+
+#### Symbol Ownership Rules
+
+| Symbol type | Linkage | Emitted by |
+|------------|---------|------------|
+| Non-generic function | `external` | Defining module only |
+| Generic instantiation | `linkonce_odr` | Each module that needs it |
+| Non-generic struct | N/A (type only) | Defining module's codegen |
+| Generic struct instantiation | N/A (type only) | Each module that needs it |
+
+#### Extern Declarations
+
+The existing extern declaration collection (`lib.rs:198`) continues to work for
+non-generic cross-module calls. For generic instantiations, no extern
+declaration is needed — each module emits its own copy with `linkonce_odr`.
+
+#### Name Mangling for Cross-Module Instances
+
+Generic instantiation names are mangled using the **defining module's path**
+(not the calling module's), ensuring all copies of the same instance have the
+same symbol name for linker deduplication:
+
+```
+B::foo<Int32>  ->  pkgname_B_foo_Int32  (same name whether emitted from A or C)
+```
+
+#### Why This Approach
+
+- **Preserves per-module compilation**: Each module compiles independently,
+  enabling future parallel codegen.
+- **Future-compatible with separate compilation** (§1.6.2): When `.bengalmod`
+  files provide generic BIR, consuming modules instantiate locally with
+  `linkonce_odr` — the exact same model.
+- **Matches industry practice**: C++ uses `linkonce_odr` for template
+  instantiations; Rust uses a similar scheme across codegen units.
+- **No whole-package codegen bottleneck**: Avoids single-threaded codegen for
+  the entire package.
+
+#### Changes to `compile_package_to_executable`
+
+- After all modules are lowered to BIR, build a package-wide BIR registry
+  (read-only lookup of generic functions by mangled name).
+- Mono collector per module receives a reference to this registry.
+- Codegen emits `linkonce_odr` linkage for all generic instantiation functions.
+- Struct type construction: generic struct layouts are available from the
+  package-wide registry; each module's codegen builds concrete LLVM struct
+  types for the struct instances its collector discovered.
 
 ## Incremental Migration Strategy
 
@@ -404,7 +556,15 @@ tracked in TODO.md §1.6.2.
 - Map AST `TypeAnnotation` with type params to `BirType::TypeParam`.
 - Set `BirFunction.type_params` for generic functions.
 - Set `Call.type_args` for generic call sites.
+- **Extend `ExprKind::MethodCall` lowering** to handle receivers with
+  `BirType::TypeParam`: look up the protocol constraint, emit
+  `Call { func: "{Protocol}_{method}", type_args: [TypeParam(...)], ... }`.
+  This covers `item.sum()` (direct call on type param) and `self.value.sum()`
+  (field access producing TypeParam, then method call).
+- Populate `conformance_map` during lowering from semantic analysis results.
 - **Validate via dedicated test helpers (main pipeline still uses AST mono).**
+- **Key test cases**: `generic_constraint_violation`, `generic_struct_with_constraint`
+  (`tests/generics.rs`) must be reproducible with the new lowering path.
 
 ### Phase 3: Codegen On-The-Fly Substitution
 
@@ -413,8 +573,11 @@ tracked in TODO.md §1.6.2.
   `Instance.type_args`.
 - Handle `BirType -> LLVM type` conversion for `TypeParam`.
 - Name mangling: `func_name` + `type_args` -> mangled name.
+- Implement **protocol method resolution** in codegen: for `Call` targets
+  matching `{Protocol}_{method}` pattern, look up conformance map with the
+  resolved concrete type to find the real function name.
 - **Unit tests: manually construct `Instance`, verify correct LLVM IR from
-  generic BIR.**
+  generic BIR, including protocol method calls.**
 
 ### Phase 4: Mono Collector
 
@@ -438,6 +601,12 @@ tracked in TODO.md §1.6.2.
 - Remove all `monomorphize()` call sites.
 - Clean up `InferredTypeArgs` (keep type inference results, remove mono-specific
   parts).
+- Update `compile_package_to_executable`:
+  - Build package-wide BIR registry after all modules are lowered.
+  - Run mono collector per-module with registry access.
+  - Emit generic instantiations with `linkonce_odr` LLVM linkage.
+  - Adjust extern declaration collection (generic instantiations don't need
+    extern declarations — each module emits its own copy).
 - **All existing tests pass on the new BIR mono pipeline.**
 
 ### Phase Dependencies
