@@ -1,6 +1,6 @@
 pub mod ast;
 
-use crate::error::{BengalError, Result};
+use crate::error::{BengalError, Result, Span};
 use crate::lexer::token::{SpannedToken, Token};
 use ast::*;
 
@@ -19,10 +19,29 @@ impl Parser {
         }
     }
 
-    fn expr(&mut self, kind: ExprKind) -> Expr {
+    fn expr(&mut self, kind: ExprKind, span: Span) -> Expr {
         let id = NodeId(self.next_id);
         self.next_id += 1;
-        Expr { id, kind }
+        Expr { id, kind, span }
+    }
+
+    fn current_span_start(&self) -> usize {
+        self.tokens[self.pos].span.start
+    }
+
+    fn prev_span_end(&self) -> usize {
+        if self.pos == 0 {
+            0
+        } else {
+            self.tokens[self.pos - 1].span.end
+        }
+    }
+
+    fn span_from(&self, start: usize) -> Span {
+        Span {
+            start,
+            end: self.prev_span_end(),
+        }
     }
 
     fn peek(&self) -> &SpannedToken {
@@ -710,11 +729,18 @@ impl Parser {
             }
             self.advance();
             let right = self.parse_and()?;
-            left = self.expr(ExprKind::BinaryOp {
-                op: BinOp::Or,
-                left: Box::new(left),
-                right: Box::new(right),
-            });
+            let span = Span {
+                start: left.span.start,
+                end: right.span.end,
+            };
+            left = self.expr(
+                ExprKind::BinaryOp {
+                    op: BinOp::Or,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                span,
+            );
         }
         Ok(left)
     }
@@ -728,11 +754,18 @@ impl Parser {
             }
             self.advance();
             let right = self.parse_equality()?;
-            left = self.expr(ExprKind::BinaryOp {
-                op: BinOp::And,
-                left: Box::new(left),
-                right: Box::new(right),
-            });
+            let span = Span {
+                start: left.span.start,
+                end: right.span.end,
+            };
+            left = self.expr(
+                ExprKind::BinaryOp {
+                    op: BinOp::And,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                span,
+            );
         }
         Ok(left)
     }
@@ -748,11 +781,18 @@ impl Parser {
             };
             self.advance();
             let right = self.parse_comparison()?;
-            left = self.expr(ExprKind::BinaryOp {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
-            });
+            let span = Span {
+                start: left.span.start,
+                end: right.span.end,
+            };
+            left = self.expr(
+                ExprKind::BinaryOp {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                span,
+            );
         }
         Ok(left)
     }
@@ -770,11 +810,18 @@ impl Parser {
             };
             self.advance();
             let right = self.parse_additive()?;
-            left = self.expr(ExprKind::BinaryOp {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
-            });
+            let span = Span {
+                start: left.span.start,
+                end: right.span.end,
+            };
+            left = self.expr(
+                ExprKind::BinaryOp {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                span,
+            );
         }
         Ok(left)
     }
@@ -790,11 +837,18 @@ impl Parser {
             };
             self.advance();
             let right = self.parse_term()?;
-            left = self.expr(ExprKind::BinaryOp {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
-            });
+            let span = Span {
+                start: left.span.start,
+                end: right.span.end,
+            };
+            left = self.expr(
+                ExprKind::BinaryOp {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                span,
+            );
         }
         Ok(left)
     }
@@ -810,11 +864,18 @@ impl Parser {
             };
             self.advance();
             let right = self.parse_cast()?;
-            left = self.expr(ExprKind::BinaryOp {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
-            });
+            let span = Span {
+                start: left.span.start,
+                end: right.span.end,
+            };
+            left = self.expr(
+                ExprKind::BinaryOp {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                span,
+            );
         }
         Ok(left)
     }
@@ -823,12 +884,17 @@ impl Parser {
     fn parse_cast(&mut self) -> Result<Expr> {
         let mut expr = self.parse_unary()?;
         while self.peek().node == Token::As {
+            let start = expr.span.start;
             self.advance();
             let target_type = self.parse_type()?;
-            expr = self.expr(ExprKind::Cast {
-                expr: Box::new(expr),
-                target_type,
-            });
+            let span = self.span_from(start);
+            expr = self.expr(
+                ExprKind::Cast {
+                    expr: Box::new(expr),
+                    target_type,
+                },
+                span,
+            );
         }
         Ok(expr)
     }
@@ -836,12 +902,17 @@ impl Parser {
     // Level 8 (highest): ! (prefix)
     fn parse_unary(&mut self) -> Result<Expr> {
         if self.peek().node == Token::Bang {
+            let start = self.current_span_start();
             self.advance();
             let operand = self.parse_unary()?;
-            let e = self.expr(ExprKind::UnaryOp {
-                op: UnaryOp::Not,
-                operand: Box::new(operand),
-            });
+            let span = self.span_from(start);
+            let e = self.expr(
+                ExprKind::UnaryOp {
+                    op: UnaryOp::Not,
+                    operand: Box::new(operand),
+                },
+                span,
+            );
             return Ok(e);
         }
         self.parse_factor()
@@ -856,6 +927,7 @@ impl Parser {
         loop {
             match &self.peek().node {
                 Token::Dot => {
+                    let start = expr.span.start;
                     self.advance();
                     let field = self.expect_ident()?;
                     // Check if this is a method call: field followed by `(`
@@ -870,19 +942,28 @@ impl Parser {
                             }
                         }
                         self.expect(Token::RParen)?;
-                        expr = self.expr(ExprKind::MethodCall {
-                            object: Box::new(expr),
-                            method: field,
-                            args,
-                        });
+                        let span = self.span_from(start);
+                        expr = self.expr(
+                            ExprKind::MethodCall {
+                                object: Box::new(expr),
+                                method: field,
+                                args,
+                            },
+                            span,
+                        );
                     } else {
-                        expr = self.expr(ExprKind::FieldAccess {
-                            object: Box::new(expr),
-                            field,
-                        });
+                        let span = self.span_from(start);
+                        expr = self.expr(
+                            ExprKind::FieldAccess {
+                                object: Box::new(expr),
+                                field,
+                            },
+                            span,
+                        );
                     }
                 }
                 Token::Lt if self.no_space_before_current() => {
+                    let start = expr.span.start;
                     let name = match &expr.kind {
                         ExprKind::Ident(name) => name.clone(),
                         _ => break,
@@ -894,16 +975,21 @@ impl Parser {
                             span: self.peek().span,
                         });
                     }
-                    expr = self.parse_postfix_call_with_type_args(name, type_args)?;
+                    expr = self.parse_postfix_call_with_type_args(name, type_args, start)?;
                 }
                 Token::LBracket => {
+                    let start = expr.span.start;
                     self.advance();
                     let index = self.parse_expr()?;
                     self.expect(Token::RBracket)?;
-                    expr = self.expr(ExprKind::IndexAccess {
-                        object: Box::new(expr),
-                        index: Box::new(index),
-                    });
+                    let span = self.span_from(start);
+                    expr = self.expr(
+                        ExprKind::IndexAccess {
+                            object: Box::new(expr),
+                            index: Box::new(index),
+                        },
+                        span,
+                    );
                 }
                 Token::LParen => {
                     expr = self.parse_postfix_call(expr)?;
@@ -919,21 +1005,25 @@ impl Parser {
         match &tok.node {
             Token::Number(n) => {
                 let n = *n;
+                let span = tok.span;
                 self.advance();
-                Ok(self.expr(ExprKind::Number(n)))
+                Ok(self.expr(ExprKind::Number(n), span))
             }
             Token::Float(f) => {
                 let f = *f;
+                let span = tok.span;
                 self.advance();
-                Ok(self.expr(ExprKind::Float(f)))
+                Ok(self.expr(ExprKind::Float(f), span))
             }
             Token::True => {
+                let span = tok.span;
                 self.advance();
-                Ok(self.expr(ExprKind::Bool(true)))
+                Ok(self.expr(ExprKind::Bool(true), span))
             }
             Token::False => {
+                let span = tok.span;
                 self.advance();
-                Ok(self.expr(ExprKind::Bool(false)))
+                Ok(self.expr(ExprKind::Bool(false), span))
             }
             Token::LParen => {
                 self.advance();
@@ -942,10 +1032,12 @@ impl Parser {
                 Ok(expr)
             }
             Token::Ident(_) => {
+                let span = tok.span;
                 let name = self.expect_ident()?;
-                Ok(self.expr(ExprKind::Ident(name)))
+                Ok(self.expr(ExprKind::Ident(name), span))
             }
             Token::LBracket => {
+                let start = tok.span.start;
                 self.advance();
                 let mut elements = Vec::new();
                 if self.peek().node != Token::RBracket {
@@ -956,17 +1048,21 @@ impl Parser {
                     }
                 }
                 self.expect(Token::RBracket)?;
-                Ok(self.expr(ExprKind::ArrayLiteral { elements }))
+                let span = self.span_from(start);
+                Ok(self.expr(ExprKind::ArrayLiteral { elements }, span))
             }
             Token::LBrace => {
+                let start = tok.span.start;
                 let block = self.parse_block()?;
-                Ok(self.expr(ExprKind::Block(block)))
+                let span = self.span_from(start);
+                Ok(self.expr(ExprKind::Block(block), span))
             }
             Token::If => self.parse_if_expr(),
             Token::While => self.parse_while_expr(),
             Token::SelfKw => {
+                let span = tok.span;
                 self.advance();
-                Ok(self.expr(ExprKind::SelfRef))
+                Ok(self.expr(ExprKind::SelfRef, span))
             }
             _ => Err(BengalError::ParseError {
                 message: format!("unexpected token `{}`", tok.node),
@@ -976,6 +1072,7 @@ impl Parser {
     }
 
     fn parse_postfix_call(&mut self, callee: Expr) -> Result<Expr> {
+        let start = callee.span.start;
         self.expect(Token::LParen)?;
 
         let name = match &callee.kind {
@@ -991,11 +1088,15 @@ impl Parser {
         // Empty args → Call (semantic layer resolves if it's a struct init)
         if self.peek().node == Token::RParen {
             self.advance();
-            return Ok(self.expr(ExprKind::Call {
-                name,
-                type_args: vec![],
-                args: vec![],
-            }));
+            let span = self.span_from(start);
+            return Ok(self.expr(
+                ExprKind::Call {
+                    name,
+                    type_args: vec![],
+                    args: vec![],
+                },
+                span,
+            ));
         }
 
         // Lookahead: IDENT followed by `:` → named args → StructInit
@@ -1016,11 +1117,15 @@ impl Parser {
                 args.push((label, value));
             }
             self.expect(Token::RParen)?;
-            Ok(self.expr(ExprKind::StructInit {
-                name,
-                type_args: vec![],
-                args,
-            }))
+            let span = self.span_from(start);
+            Ok(self.expr(
+                ExprKind::StructInit {
+                    name,
+                    type_args: vec![],
+                    args,
+                },
+                span,
+            ))
         } else {
             let mut args = Vec::new();
             args.push(self.parse_expr()?);
@@ -1029,11 +1134,15 @@ impl Parser {
                 args.push(self.parse_expr()?);
             }
             self.expect(Token::RParen)?;
-            Ok(self.expr(ExprKind::Call {
-                name,
-                type_args: vec![],
-                args,
-            }))
+            let span = self.span_from(start);
+            Ok(self.expr(
+                ExprKind::Call {
+                    name,
+                    type_args: vec![],
+                    args,
+                },
+                span,
+            ))
         }
     }
 
@@ -1052,17 +1161,22 @@ impl Parser {
         &mut self,
         name: String,
         type_args: Vec<TypeAnnotation>,
+        start: usize,
     ) -> Result<Expr> {
         self.expect(Token::LParen)?;
 
         // Empty args → Call
         if self.peek().node == Token::RParen {
             self.advance();
-            return Ok(self.expr(ExprKind::Call {
-                name,
-                type_args,
-                args: vec![],
-            }));
+            let span = self.span_from(start);
+            return Ok(self.expr(
+                ExprKind::Call {
+                    name,
+                    type_args,
+                    args: vec![],
+                },
+                span,
+            ));
         }
 
         // Lookahead: IDENT followed by `:` → named args → StructInit
@@ -1083,11 +1197,15 @@ impl Parser {
                 args.push((label, value));
             }
             self.expect(Token::RParen)?;
-            Ok(self.expr(ExprKind::StructInit {
-                name,
-                type_args,
-                args,
-            }))
+            let span = self.span_from(start);
+            Ok(self.expr(
+                ExprKind::StructInit {
+                    name,
+                    type_args,
+                    args,
+                },
+                span,
+            ))
         } else {
             let mut args = Vec::new();
             args.push(self.parse_expr()?);
@@ -1096,15 +1214,20 @@ impl Parser {
                 args.push(self.parse_expr()?);
             }
             self.expect(Token::RParen)?;
-            Ok(self.expr(ExprKind::Call {
-                name,
-                type_args,
-                args,
-            }))
+            let span = self.span_from(start);
+            Ok(self.expr(
+                ExprKind::Call {
+                    name,
+                    type_args,
+                    args,
+                },
+                span,
+            ))
         }
     }
 
     fn parse_if_expr(&mut self) -> Result<Expr> {
+        let start = self.current_span_start();
         self.expect(Token::If)?;
         let condition = self.parse_expr()?;
         let then_block = self.parse_block()?;
@@ -1114,14 +1237,19 @@ impl Parser {
         } else {
             None
         };
-        Ok(self.expr(ExprKind::If {
-            condition: Box::new(condition),
-            then_block,
-            else_block,
-        }))
+        let span = self.span_from(start);
+        Ok(self.expr(
+            ExprKind::If {
+                condition: Box::new(condition),
+                then_block,
+                else_block,
+            },
+            span,
+        ))
     }
 
     fn parse_while_expr(&mut self) -> Result<Expr> {
+        let start = self.current_span_start();
         self.expect(Token::While)?;
         let condition = self.parse_expr()?;
         let body = self.parse_block()?;
@@ -1131,11 +1259,15 @@ impl Parser {
         } else {
             None
         };
-        Ok(self.expr(ExprKind::While {
-            condition: Box::new(condition),
-            body,
-            nobreak,
-        }))
+        let span = self.span_from(start);
+        Ok(self.expr(
+            ExprKind::While {
+                condition: Box::new(condition),
+                body,
+                nobreak,
+            },
+            span,
+        ))
     }
 }
 
@@ -1207,6 +1339,7 @@ mod tests {
         Expr {
             id: NodeId(0),
             kind,
+            span: Span { start: 0, end: 0 },
         }
     }
 
@@ -1294,6 +1427,7 @@ mod tests {
         Expr {
             id: NodeId(0),
             kind,
+            span: Span { start: 0, end: 0 },
         }
     }
 

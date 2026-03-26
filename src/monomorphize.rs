@@ -524,6 +524,7 @@ fn substitute_expr(
                                 type_args: vec![],
                                 args: new_args,
                             },
+                            span: expr.span,
                         };
                     }
                 }
@@ -561,6 +562,7 @@ fn substitute_expr(
                                 type_args: vec![],
                                 args: new_args,
                             },
+                            span: expr.span,
                         };
                     }
                 }
@@ -642,7 +644,11 @@ fn substitute_expr(
         | ExprKind::Ident(_)
         | ExprKind::SelfRef => expr.kind.clone(),
     };
-    Expr { id: expr.id, kind }
+    Expr {
+        id: expr.id,
+        kind,
+        span: expr.span,
+    }
 }
 
 /// Create a specialized function from a generic one.
@@ -931,6 +937,7 @@ fn rewrite_expr(expr: &Expr, rename_map: &RenameMap) -> Expr {
                             type_args: vec![],
                             args: new_args,
                         },
+                        span: expr.span,
                     };
                 }
                 // Check struct rename (parser may emit Call for struct constructors)
@@ -942,6 +949,7 @@ fn rewrite_expr(expr: &Expr, rename_map: &RenameMap) -> Expr {
                             type_args: vec![],
                             args: new_args,
                         },
+                        span: expr.span,
                     };
                 }
             }
@@ -981,6 +989,7 @@ fn rewrite_expr(expr: &Expr, rename_map: &RenameMap) -> Expr {
                             type_args: vec![],
                             args: new_args,
                         },
+                        span: expr.span,
                     };
                 }
             }
@@ -1052,5 +1061,9 @@ fn rewrite_expr(expr: &Expr, rename_map: &RenameMap) -> Expr {
         | ExprKind::Ident(_)
         | ExprKind::SelfRef => expr.kind.clone(),
     };
-    Expr { id: expr.id, kind }
+    Expr {
+        id: expr.id,
+        kind,
+        span: expr.span,
+    }
 }
