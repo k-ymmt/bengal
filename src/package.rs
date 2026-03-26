@@ -210,6 +210,26 @@ fn build_module_recursive(
     Ok(())
 }
 
+impl ModuleGraph {
+    /// Create a single-module graph from in-memory source code.
+    /// Lexes, parses, and wraps the AST in a root module.
+    pub fn from_source(name: &str, source: &str) -> Result<ModuleGraph> {
+        let tokens = crate::lexer::tokenize(source)?;
+        let ast = crate::parser::parse(tokens)?;
+        let mut modules = HashMap::new();
+        modules.insert(
+            ModulePath::root(),
+            ModuleInfo {
+                path: ModulePath::root(),
+                file_path: std::path::PathBuf::from(format!("{}.bengal", name)),
+                source: source.to_string(),
+                ast,
+            },
+        );
+        Ok(ModuleGraph { modules })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +329,24 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn module_graph_from_source() {
+        let source = "func main() -> Int32 { return 42; }";
+        let graph = ModuleGraph::from_source("test", source).unwrap();
+        assert_eq!(graph.modules.len(), 1);
+        let root = graph.modules.get(&ModulePath::root()).unwrap();
+        assert_eq!(root.source, source);
+        assert!(root.path.is_root());
+        assert_eq!(root.ast.functions.len(), 1);
+        assert_eq!(root.ast.functions[0].name, "main");
+    }
+
+    #[test]
+    fn module_graph_from_source_lex_error() {
+        let result = ModuleGraph::from_source("test", "func @@@");
+        assert!(result.is_err());
     }
 
     #[test]
