@@ -8,6 +8,7 @@ pub mod package;
 pub mod parser;
 pub mod pipeline;
 pub mod semantic;
+pub mod suggest;
 
 use std::collections::HashMap;
 use std::path::Path;

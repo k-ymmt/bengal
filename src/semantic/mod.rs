@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use crate::error::{BengalError, Result, Span};
 use crate::package::{ModuleGraph, ModulePath};
 use crate::parser::ast::*;
+use crate::suggest::find_suggestion;
 use infer::{InferVarId, InferenceContext};
 use resolver::{FuncSig, ProtocolInfo, Resolver, StructInfo, VarInfo, is_accessible};
 use types::{Type, resolve_type};
@@ -30,6 +31,15 @@ fn sem_err(message: impl Into<String>) -> BengalError {
     BengalError::SemanticError {
         message: message.into(),
         span: Span { start: 0, end: 0 },
+        help: None,
+    }
+}
+
+fn sem_err_with_help(message: impl Into<String>, span: Span, help: Option<String>) -> BengalError {
+    BengalError::SemanticError {
+        message: message.into(),
+        span,
+        help,
     }
 }
 
@@ -540,11 +550,27 @@ fn analyze_single_module(
         for proto_name in &struct_def.conformances {
             let proto_info = resolver
                 .lookup_protocol(proto_name)
-                .ok_or_else(|| sem_err(format!("unknown protocol `{}`", proto_name)))?
+                .ok_or_else(|| {
+                    let help = find_suggestion(proto_name, resolver.all_protocol_names())
+                        .map(|s| format!("did you mean '{s}'?"));
+                    sem_err_with_help(
+                        format!("unknown protocol `{}`", proto_name),
+                        Span { start: 0, end: 0 },
+                        help,
+                    )
+                })?
                 .clone();
             let struct_info = resolver
                 .lookup_struct(&struct_def.name)
-                .ok_or_else(|| sem_err(format!("undefined struct `{}`", struct_def.name)))?
+                .ok_or_else(|| {
+                    let help = find_suggestion(&struct_def.name, resolver.all_struct_names())
+                        .map(|s| format!("did you mean '{s}'?"));
+                    sem_err_with_help(
+                        format!("undefined struct `{}`", struct_def.name),
+                        Span { start: 0, end: 0 },
+                        help,
+                    )
+                })?
                 .clone();
 
             // Check methods
@@ -1116,11 +1142,27 @@ fn analyze_pre_mono_inner(
         for proto_name in &struct_def.conformances {
             let proto_info = resolver
                 .lookup_protocol(proto_name)
-                .ok_or_else(|| sem_err(format!("unknown protocol `{}`", proto_name)))?
+                .ok_or_else(|| {
+                    let help = find_suggestion(proto_name, resolver.all_protocol_names())
+                        .map(|s| format!("did you mean '{s}'?"));
+                    sem_err_with_help(
+                        format!("unknown protocol `{}`", proto_name),
+                        Span { start: 0, end: 0 },
+                        help,
+                    )
+                })?
                 .clone();
             let struct_info = resolver
                 .lookup_struct(&struct_def.name)
-                .ok_or_else(|| sem_err(format!("undefined struct `{}`", struct_def.name)))?
+                .ok_or_else(|| {
+                    let help = find_suggestion(&struct_def.name, resolver.all_struct_names())
+                        .map(|s| format!("did you mean '{s}'?"));
+                    sem_err_with_help(
+                        format!("undefined struct `{}`", struct_def.name),
+                        Span { start: 0, end: 0 },
+                        help,
+                    )
+                })?
                 .clone();
 
             // Check methods
@@ -1513,11 +1555,27 @@ pub fn analyze_post_mono(program: &Program) -> Result<SemanticInfo> {
         for proto_name in &struct_def.conformances {
             let proto_info = resolver
                 .lookup_protocol(proto_name)
-                .ok_or_else(|| sem_err(format!("unknown protocol `{}`", proto_name)))?
+                .ok_or_else(|| {
+                    let help = find_suggestion(proto_name, resolver.all_protocol_names())
+                        .map(|s| format!("did you mean '{s}'?"));
+                    sem_err_with_help(
+                        format!("unknown protocol `{}`", proto_name),
+                        Span { start: 0, end: 0 },
+                        help,
+                    )
+                })?
                 .clone();
             let struct_info = resolver
                 .lookup_struct(&struct_def.name)
-                .ok_or_else(|| sem_err(format!("undefined struct `{}`", struct_def.name)))?
+                .ok_or_else(|| {
+                    let help = find_suggestion(&struct_def.name, resolver.all_struct_names())
+                        .map(|s| format!("did you mean '{s}'?"));
+                    sem_err_with_help(
+                        format!("undefined struct `{}`", struct_def.name),
+                        Span { start: 0, end: 0 },
+                        help,
+                    )
+                })?
                 .clone();
 
             // Check methods
@@ -1638,7 +1696,13 @@ fn resolve_type_checked(ty: &TypeAnnotation, resolver: &Resolver) -> Result<Type
                 });
             }
             if resolver.lookup_struct(name).is_none() {
-                return Err(sem_err(format!("undefined type `{}`", name)));
+                let help = find_suggestion(name, resolver.all_struct_names())
+                    .map(|s| format!("did you mean '{s}'?"));
+                return Err(sem_err_with_help(
+                    format!("undefined type `{}`", name),
+                    Span { start: 0, end: 0 },
+                    help,
+                ));
             }
             Ok(Type::Struct(name.clone()))
         }
@@ -2108,7 +2172,13 @@ fn analyze_stmt(
             let val_ty = analyze_expr(value, resolver, ctx.as_deref_mut())?;
             match resolver.lookup_var(name) {
                 None => {
-                    return Err(sem_err(format!("undefined variable `{}`", name)));
+                    let help = find_suggestion(name, resolver.all_variable_names())
+                        .map(|s| format!("did you mean '{s}'?"));
+                    return Err(sem_err_with_help(
+                        format!("undefined variable `{}`", name),
+                        Span { start: 0, end: 0 },
+                        help,
+                    ));
                 }
                 Some(info) => {
                     if !info.mutable {
@@ -2193,7 +2263,15 @@ fn analyze_stmt(
                 Type::Struct(struct_name) => {
                     let struct_info = resolver
                         .lookup_struct(struct_name)
-                        .ok_or_else(|| sem_err(format!("undefined struct `{}`", struct_name)))?
+                        .ok_or_else(|| {
+                            let help = find_suggestion(struct_name, resolver.all_struct_names())
+                                .map(|s| format!("did you mean '{s}'?"));
+                            sem_err_with_help(
+                                format!("undefined struct `{}`", struct_name),
+                                Span { start: 0, end: 0 },
+                                help,
+                            )
+                        })?
                         .clone();
                     let field_ty = if let Some(&idx) = struct_info.field_index.get(field.as_str()) {
                         struct_info.fields[idx].1.clone()
@@ -2207,10 +2285,20 @@ fn analyze_stmt(
                         }
                         prop.ty.clone()
                     } else {
-                        return Err(sem_err(format!(
-                            "struct `{}` has no field `{}`",
-                            struct_name, field
-                        )));
+                        let help = find_suggestion(
+                            field,
+                            struct_info
+                                .field_index
+                                .keys()
+                                .chain(struct_info.computed_index.keys())
+                                .map(|s| s.as_str()),
+                        )
+                        .map(|s| format!("did you mean '{s}'?"));
+                        return Err(sem_err_with_help(
+                            format!("struct `{}` has no field `{}`", struct_name, field),
+                            Span { start: 0, end: 0 },
+                            help,
+                        ));
                     };
                     if let Some(ref mut c) = ctx {
                         c.unify(val_ty.clone(), field_ty)?;
@@ -2225,7 +2313,15 @@ fn analyze_stmt(
                 Type::Generic { name, args } => {
                     let struct_info = resolver
                         .lookup_struct(name)
-                        .ok_or_else(|| sem_err(format!("undefined struct `{}`", name)))?
+                        .ok_or_else(|| {
+                            let help = find_suggestion(name, resolver.all_struct_names())
+                                .map(|s| format!("did you mean '{s}'?"));
+                            sem_err_with_help(
+                                format!("undefined struct `{}`", name),
+                                Span { start: 0, end: 0 },
+                                help,
+                            )
+                        })?
                         .clone();
                     let subst: HashMap<String, Type> = struct_info
                         .type_params
@@ -2245,10 +2341,20 @@ fn analyze_stmt(
                         }
                         substitute_type(&prop.ty, &subst)
                     } else {
-                        return Err(sem_err(format!(
-                            "struct `{}` has no field `{}`",
-                            name, field
-                        )));
+                        let help = find_suggestion(
+                            field,
+                            struct_info
+                                .field_index
+                                .keys()
+                                .chain(struct_info.computed_index.keys())
+                                .map(|s| s.as_str()),
+                        )
+                        .map(|s| format!("did you mean '{s}'?"));
+                        return Err(sem_err_with_help(
+                            format!("struct `{}` has no field `{}`", name, field),
+                            Span { start: 0, end: 0 },
+                            help,
+                        ));
                     };
                     if let Some(ref mut c) = ctx {
                         c.unify(val_ty.clone(), field_ty)?;
@@ -2313,7 +2419,13 @@ fn analyze_stmt(
                             }
                             Some(_) => {}
                             None => {
-                                return Err(sem_err(format!("undefined variable '{}'", name)));
+                                let help = find_suggestion(name, resolver.all_variable_names())
+                                    .map(|s| format!("did you mean '{s}'?"));
+                                return Err(sem_err_with_help(
+                                    format!("undefined variable '{}'", name),
+                                    Span { start: 0, end: 0 },
+                                    help,
+                                ));
                             }
                         },
                         _ => {
@@ -2358,7 +2470,15 @@ fn analyze_expr(
         ExprKind::Bool(_) => Ok(Type::Bool),
         ExprKind::Ident(name) => match resolver.lookup_var(name) {
             Some(info) => Ok(info.ty.clone()),
-            None => Err(sem_err(format!("undefined variable `{}`", name))),
+            None => {
+                let help = find_suggestion(name, resolver.all_variable_names())
+                    .map(|s| format!("did you mean '{s}'?"));
+                Err(sem_err_with_help(
+                    format!("undefined variable `{}`", name),
+                    expr.span,
+                    help,
+                ))
+            }
         },
         ExprKind::UnaryOp { op, operand } => {
             let operand_ty = analyze_expr(operand, resolver, ctx.as_deref_mut())?;
@@ -2436,7 +2556,11 @@ fn analyze_expr(
             }
             let sig = resolver
                 .lookup_func(name)
-                .ok_or_else(|| sem_err(format!("undefined function `{}`", name)))?
+                .ok_or_else(|| {
+                    let help = find_suggestion(name, resolver.all_function_names())
+                        .map(|s| format!("did you mean '{s}'?"));
+                    sem_err_with_help(format!("undefined function `{}`", name), expr.span, help)
+                })?
                 .clone();
             if args.len() != sig.params.len() {
                 return Err(sem_err(format!(
@@ -2626,7 +2750,15 @@ fn analyze_expr(
         } => {
             let struct_info = resolver
                 .lookup_struct(name)
-                .ok_or_else(|| sem_err(format!("undefined struct `{}`", name)))?
+                .ok_or_else(|| {
+                    let help = find_suggestion(name, resolver.all_struct_names())
+                        .map(|s| format!("did you mean '{s}'?"));
+                    sem_err_with_help(
+                        format!("undefined struct `{}`", name),
+                        Span { start: 0, end: 0 },
+                        help,
+                    )
+                })?
                 .clone();
             let init = &struct_info.init;
             if args.len() != init.params.len() {
@@ -2745,23 +2877,49 @@ fn analyze_expr(
                 Type::Struct(struct_name) => {
                     let struct_info = resolver
                         .lookup_struct(struct_name)
-                        .ok_or_else(|| sem_err(format!("undefined struct `{}`", struct_name)))?
+                        .ok_or_else(|| {
+                            let help = find_suggestion(struct_name, resolver.all_struct_names())
+                                .map(|s| format!("did you mean '{s}'?"));
+                            sem_err_with_help(
+                                format!("undefined struct `{}`", struct_name),
+                                Span { start: 0, end: 0 },
+                                help,
+                            )
+                        })?
                         .clone();
                     if let Some(&idx) = struct_info.field_index.get(field.as_str()) {
                         Ok(struct_info.fields[idx].1.clone())
                     } else if let Some(&idx) = struct_info.computed_index.get(field.as_str()) {
                         Ok(struct_info.computed[idx].ty.clone())
                     } else {
-                        Err(sem_err(format!(
-                            "struct `{}` has no field `{}`",
-                            struct_name, field
-                        )))
+                        let help = find_suggestion(
+                            field,
+                            struct_info
+                                .field_index
+                                .keys()
+                                .chain(struct_info.computed_index.keys())
+                                .map(|s| s.as_str()),
+                        )
+                        .map(|s| format!("did you mean '{s}'?"));
+                        Err(sem_err_with_help(
+                            format!("struct `{}` has no field `{}`", struct_name, field),
+                            expr.span,
+                            help,
+                        ))
                     }
                 }
                 Type::Generic { name, args } => {
                     let struct_info = resolver
                         .lookup_struct(name)
-                        .ok_or_else(|| sem_err(format!("undefined struct `{}`", name)))?
+                        .ok_or_else(|| {
+                            let help = find_suggestion(name, resolver.all_struct_names())
+                                .map(|s| format!("did you mean '{s}'?"));
+                            sem_err_with_help(
+                                format!("undefined struct `{}`", name),
+                                Span { start: 0, end: 0 },
+                                help,
+                            )
+                        })?
                         .clone();
                     let subst: HashMap<String, Type> = struct_info
                         .type_params
@@ -2774,10 +2932,20 @@ fn analyze_expr(
                     } else if let Some(&idx) = struct_info.computed_index.get(field.as_str()) {
                         Ok(substitute_type(&struct_info.computed[idx].ty, &subst))
                     } else {
-                        Err(sem_err(format!(
-                            "struct `{}` has no field `{}`",
-                            name, field
-                        )))
+                        let help = find_suggestion(
+                            field,
+                            struct_info
+                                .field_index
+                                .keys()
+                                .chain(struct_info.computed_index.keys())
+                                .map(|s| s.as_str()),
+                        )
+                        .map(|s| format!("did you mean '{s}'?"));
+                        Err(sem_err_with_help(
+                            format!("struct `{}` has no field `{}`", name, field),
+                            expr.span,
+                            help,
+                        ))
                     }
                 }
                 _ => Err(sem_err(format!(
@@ -2813,15 +2981,29 @@ fn analyze_expr(
                 Type::Struct(struct_name) => {
                     let struct_info = resolver
                         .lookup_struct(struct_name)
-                        .ok_or_else(|| sem_err(format!("undefined struct `{}`", struct_name)))?
+                        .ok_or_else(|| {
+                            let help = find_suggestion(struct_name, resolver.all_struct_names())
+                                .map(|s| format!("did you mean '{s}'?"));
+                            sem_err_with_help(
+                                format!("undefined struct `{}`", struct_name),
+                                Span { start: 0, end: 0 },
+                                help,
+                            )
+                        })?
                         .clone();
                     let method_info = match struct_info.method_index.get(method.as_str()) {
                         Some(&idx) => struct_info.methods[idx].clone(),
                         None => {
-                            return Err(sem_err(format!(
-                                "type `{}` has no method `{}`",
-                                struct_name, method
-                            )));
+                            let help = find_suggestion(
+                                method,
+                                struct_info.method_index.keys().map(|s| s.as_str()),
+                            )
+                            .map(|s| format!("did you mean '{s}'?"));
+                            return Err(sem_err_with_help(
+                                format!("type `{}` has no method `{}`", struct_name, method),
+                                expr.span,
+                                help,
+                            ));
                         }
                     };
                     if args.len() != method_info.params.len() {
@@ -2854,7 +3036,15 @@ fn analyze_expr(
                 } => {
                     let struct_info = resolver
                         .lookup_struct(name)
-                        .ok_or_else(|| sem_err(format!("undefined struct `{}`", name)))?
+                        .ok_or_else(|| {
+                            let help = find_suggestion(name, resolver.all_struct_names())
+                                .map(|s| format!("did you mean '{s}'?"));
+                            sem_err_with_help(
+                                format!("undefined struct `{}`", name),
+                                Span { start: 0, end: 0 },
+                                help,
+                            )
+                        })?
                         .clone();
                     // Build substitution map: type_param_name → actual type arg
                     let subst: HashMap<String, Type> = struct_info
@@ -2866,10 +3056,16 @@ fn analyze_expr(
                     let method_info = match struct_info.method_index.get(method.as_str()) {
                         Some(&idx) => struct_info.methods[idx].clone(),
                         None => {
-                            return Err(sem_err(format!(
-                                "type `{}` has no method `{}`",
-                                name, method
-                            )));
+                            let help = find_suggestion(
+                                method,
+                                struct_info.method_index.keys().map(|s| s.as_str()),
+                            )
+                            .map(|s| format!("did you mean '{s}'?"));
+                            return Err(sem_err_with_help(
+                                format!("type `{}` has no method `{}`", name, method),
+                                expr.span,
+                                help,
+                            ));
                         }
                     };
                     if args.len() != method_info.params.len() {
@@ -2903,14 +3099,31 @@ fn analyze_expr(
                 } => {
                     let proto_info = resolver
                         .lookup_protocol(proto)
-                        .ok_or_else(|| sem_err(format!("undefined protocol `{}`", proto)))?
+                        .ok_or_else(|| {
+                            let help = find_suggestion(proto, resolver.all_protocol_names())
+                                .map(|s| format!("did you mean '{s}'?"));
+                            sem_err_with_help(
+                                format!("undefined protocol `{}`", proto),
+                                expr.span,
+                                help,
+                            )
+                        })?
                         .clone();
                     let method_sig = proto_info
                         .methods
                         .iter()
                         .find(|m| m.name == *method)
                         .ok_or_else(|| {
-                            sem_err(format!("protocol `{}` has no method `{}`", proto, method))
+                            let help = find_suggestion(
+                                method,
+                                proto_info.methods.iter().map(|m| m.name.as_str()),
+                            )
+                            .map(|s| format!("did you mean '{s}'?"));
+                            sem_err_with_help(
+                                format!("protocol `{}` has no method `{}`", proto, method),
+                                expr.span,
+                                help,
+                            )
                         })?
                         .clone();
                     if args.len() != method_sig.params.len() {
@@ -3153,7 +3366,15 @@ fn check_all_fields_initialized(
 ) -> Result<()> {
     let struct_info = resolver
         .lookup_struct(struct_name)
-        .ok_or_else(|| sem_err(format!("undefined struct `{}`", struct_name)))?
+        .ok_or_else(|| {
+            let help = find_suggestion(struct_name, resolver.all_struct_names())
+                .map(|s| format!("did you mean '{s}'?"));
+            sem_err_with_help(
+                format!("undefined struct `{}`", struct_name),
+                Span { start: 0, end: 0 },
+                help,
+            )
+        })?
         .clone();
 
     let mut initialized: HashSet<String> = HashSet::new();
@@ -3202,7 +3423,15 @@ fn check_assignment_target_mutable(expr: &Expr, resolver: &Resolver) -> Result<(
                 name
             ))),
             Some(_) => Ok(()),
-            None => Err(sem_err(format!("undefined variable `{}`", name))),
+            None => {
+                let help = find_suggestion(name, resolver.all_variable_names())
+                    .map(|s| format!("did you mean '{s}'?"));
+                Err(sem_err_with_help(
+                    format!("undefined variable `{}`", name),
+                    expr.span,
+                    help,
+                ))
+            }
         },
         ExprKind::FieldAccess { object, .. } => check_assignment_target_mutable(object, resolver),
         ExprKind::SelfRef => match &resolver.self_context {

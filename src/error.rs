@@ -18,7 +18,11 @@ pub enum BengalError {
     ParseError { message: String, span: Span },
 
     #[error("Semantic error: {message}")]
-    SemanticError { message: String, span: Span },
+    SemanticError {
+        message: String,
+        span: Span,
+        help: Option<String>,
+    },
 
     #[error("Lowering error: {message}")]
     LoweringError { message: String, span: Option<Span> },
@@ -74,6 +78,8 @@ pub struct BengalDiagnostic {
     #[label("{label}")]
     pub span: Option<SourceSpan>,
     pub label: String,
+    #[help]
+    pub help: Option<String>,
 }
 
 impl BengalError {
@@ -85,18 +91,25 @@ impl BengalError {
                 src_code: source,
                 span: Some(SourceSpan::new(span.start.into(), span.end - span.start)),
                 label: "here".to_string(),
+                help: None,
             },
             BengalError::ParseError { message, span } => BengalDiagnostic {
                 message,
                 src_code: source,
                 span: Some(SourceSpan::new(span.start.into(), span.end - span.start)),
                 label: "here".to_string(),
+                help: None,
             },
-            BengalError::SemanticError { message, span } => BengalDiagnostic {
+            BengalError::SemanticError {
+                message,
+                span,
+                help,
+            } => BengalDiagnostic {
                 message,
                 src_code: source,
                 span: Some(SourceSpan::new(span.start.into(), span.end - span.start)),
                 label: "here".to_string(),
+                help,
             },
             BengalError::LoweringError { message, span } => BengalDiagnostic {
                 message,
@@ -107,24 +120,28 @@ impl BengalError {
                 } else {
                     String::new()
                 },
+                help: None,
             },
             BengalError::CodegenError { message } => BengalDiagnostic {
                 message,
                 src_code: source,
                 span: None,
                 label: String::new(),
+                help: None,
             },
             BengalError::PackageError { message } => BengalDiagnostic {
                 message,
                 src_code: source,
                 span: None,
                 label: String::new(),
+                help: None,
             },
             BengalError::InterfaceError { message } => BengalDiagnostic {
                 message,
                 src_code: source,
                 span: None,
                 label: String::new(),
+                help: None,
             },
         }
     }

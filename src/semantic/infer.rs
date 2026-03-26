@@ -8,6 +8,7 @@ fn unify_err(message: impl Into<String>) -> BengalError {
     BengalError::SemanticError {
         message: message.into(),
         span: Span { start: 0, end: 0 },
+        help: None,
     }
 }
 
@@ -314,6 +315,7 @@ impl InferenceContext {
                                             prov.type_param_name, prov.def_name
                                         ),
                                         span: prov.span,
+                                        help: None,
                                     }
                                 } else {
                                     unify_err("cannot infer type; add explicit type annotation")
@@ -443,6 +445,7 @@ impl InferenceContext {
                             p2.arg_name.as_deref().unwrap_or("?"),
                         ),
                         span: tp_prov.span,
+                        help: None,
                     })
                 } else {
                     Err(unify_err("cannot unify integer literal with float literal"))

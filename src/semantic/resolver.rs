@@ -232,6 +232,7 @@ impl Resolver {
                     existing, ty
                 ),
                 span: Span { start: 0, end: 0 },
+                help: None,
             }),
             Some(_) => Ok(()),
             None => {
@@ -291,6 +292,37 @@ impl Resolver {
 
     pub fn import_protocol(&mut self, name: String, info: ProtocolInfo) {
         self.imported_protocols.insert(name, info);
+    }
+
+    /// Return all variable names currently in scope (all scope levels).
+    pub fn all_variable_names(&self) -> impl Iterator<Item = &str> {
+        self.scopes
+            .iter()
+            .flat_map(|scope| scope.keys().map(|s| s.as_str()))
+    }
+
+    /// Return all function names (local + imported).
+    pub fn all_function_names(&self) -> impl Iterator<Item = &str> {
+        self.functions
+            .keys()
+            .chain(self.imported_funcs.keys())
+            .map(|s| s.as_str())
+    }
+
+    /// Return all struct/type names (local + imported).
+    pub fn all_struct_names(&self) -> impl Iterator<Item = &str> {
+        self.struct_defs
+            .keys()
+            .chain(self.imported_structs.keys())
+            .map(|s| s.as_str())
+    }
+
+    /// Return all protocol names (local + imported).
+    pub fn all_protocol_names(&self) -> impl Iterator<Item = &str> {
+        self.protocol_defs
+            .keys()
+            .chain(self.imported_protocols.keys())
+            .map(|s| s.as_str())
     }
 }
 
