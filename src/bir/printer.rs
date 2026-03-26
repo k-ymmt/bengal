@@ -8,7 +8,14 @@ fn format_type(ty: &BirType) -> String {
         BirType::F32 => "Float32".to_string(),
         BirType::F64 => "Float64".to_string(),
         BirType::Bool => "Bool".to_string(),
-        BirType::Struct { name, .. } => name.clone(),
+        BirType::Struct { name, type_args } => {
+            if type_args.is_empty() {
+                name.clone()
+            } else {
+                let args: Vec<String> = type_args.iter().map(format_type).collect();
+                format!("{}<{}>", name, args.join(", "))
+            }
+        }
         BirType::Array { element, size } => {
             format!("[{}; {}]", format_type(element), size)
         }
@@ -51,6 +58,11 @@ pub fn print_module(module: &BirModule) -> String {
 fn print_function(func: &BirFunction, out: &mut String) {
     out.push_str("bir @");
     out.push_str(&func.name);
+    if !func.type_params.is_empty() {
+        out.push('<');
+        out.push_str(&func.type_params.join(", "));
+        out.push('>');
+    }
     out.push('(');
     for (i, (val, ty)) in func.params.iter().enumerate() {
         if i > 0 {
@@ -124,17 +136,29 @@ fn print_instruction(inst: &Instruction, out: &mut String) {
             result,
             func_name,
             args,
+            type_args,
             ty,
-            ..
         } => {
             let args_str: Vec<String> = args.iter().map(format_value).collect();
-            out.push_str(&format!(
-                "{} = call @{}({}) : {}",
-                format_value(result),
-                func_name,
-                args_str.join(", "),
-                format_type(ty)
-            ));
+            if type_args.is_empty() {
+                out.push_str(&format!(
+                    "{} = call @{}({}) : {}",
+                    format_value(result),
+                    func_name,
+                    args_str.join(", "),
+                    format_type(ty)
+                ));
+            } else {
+                let type_args_str: Vec<String> = type_args.iter().map(format_type).collect();
+                out.push_str(&format!(
+                    "{} = call @{}({}) type_args=[{}] : {}",
+                    format_value(result),
+                    func_name,
+                    args_str.join(", "),
+                    type_args_str.join(", "),
+                    format_type(ty)
+                ));
+            }
         }
         Instruction::Compare {
             result,
@@ -177,20 +201,32 @@ fn print_instruction(inst: &Instruction, out: &mut String) {
             result,
             struct_name,
             fields,
+            type_args,
             ty,
-            ..
         } => {
             let fields_str: Vec<String> = fields
                 .iter()
                 .map(|(name, val)| format!("{}: {}", name, format_value(val)))
                 .collect();
-            out.push_str(&format!(
-                "{} = struct_init @{} {{ {} }} : {}",
-                format_value(result),
-                struct_name,
-                fields_str.join(", "),
-                format_type(ty),
-            ));
+            if type_args.is_empty() {
+                out.push_str(&format!(
+                    "{} = struct_init @{} {{ {} }} : {}",
+                    format_value(result),
+                    struct_name,
+                    fields_str.join(", "),
+                    format_type(ty),
+                ));
+            } else {
+                let type_args_str: Vec<String> = type_args.iter().map(format_type).collect();
+                out.push_str(&format!(
+                    "{} = struct_init @{} {{ {} }} type_args=[{}] : {}",
+                    format_value(result),
+                    struct_name,
+                    fields_str.join(", "),
+                    type_args_str.join(", "),
+                    format_type(ty),
+                ));
+            }
         }
         Instruction::FieldGet {
             result,
