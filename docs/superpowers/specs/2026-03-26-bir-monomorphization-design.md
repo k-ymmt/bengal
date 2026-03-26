@@ -73,6 +73,15 @@ Call {
 }
 ```
 
+**`Call.ty` semantics**: The `ty` field stores the **resolved return type at the
+call site**, not the callee's raw generic return type. During lowering, when the
+call site provides concrete `type_args`, the callee's generic return type is
+substituted immediately. For example, calling `identity<Int32>(42)` produces
+`Call { ty: I32, ... }` not `Call { ty: TypeParam("T"), ... }`. When the caller
+is itself generic and the type args contain `TypeParam`, the `ty` field uses the
+**caller's** type parameter names. This ensures codegen only needs the current
+function's substitution map.
+
 ### StructInit Instruction
 
 ```rust
@@ -145,11 +154,12 @@ pub fn mono_collect(bir: &BirModule, entry: &str) -> MonoCollectResult
 4. For each `Call` with non-empty `type_args`, resolve `TypeParam` references
    using the current instance's substitution map, creating a new concrete
    `Instance`. Add to worklist if not already seen.
-5. For each `StructInit` with non-empty `type_args`, resolve and record the
-   concrete struct instance in `struct_instances`.
-6. For each `BirType::Struct` with non-empty `type_args` encountered in any
-   instruction (FieldGet, FieldSet, etc.), also record the concrete struct
-   instance.
+5. Apply `resolve_bir_type` to all `BirType` fields in every instruction,
+   terminator, and block parameter. For each resolved `BirType::Struct` with
+   non-empty `type_args`, record the concrete struct instance in
+   `struct_instances`. This exhaustive scan covers `StructInit`, `FieldGet`,
+   `FieldSet`, `Call.ty`, `Cast`, and nested types like
+   `Array { element: Struct { ... } }`.
 7. Repeat until worklist is empty.
 8. Return all discovered function and struct instances.
 
@@ -174,8 +184,11 @@ layout:
 [("first", I32), ("second", Bool)]
 ```
 
-This concrete layout is used to create the LLVM struct type and compute field
-indices for GEP instructions.
+Codegen's `build_struct_types` is extended to iterate `struct_instances` from
+the mono collector result. For each `(name, concrete_type_args)`, it applies
+the substitution to the generic layout, creates an LLVM struct type under the
+mangled name (e.g., `Pair_Int32_Bool`), and registers it for field index
+computation (GEP instructions).
 
 ## Codegen Substitution
 
@@ -245,15 +258,18 @@ During codegen with `T = Int32`, protocol method resolution proceeds as:
 
 ```rust
 // BirModule addition
-pub conformance_map: HashMap<(String, String), String>,
+pub conformance_map: HashMap<(String, BirType), String>,
 // (protocol_method, concrete_type) -> implementation_name
-// e.g., ("Summable.add", "Int32") -> "Int32_add"
+// e.g., ("Summable.add", BirType::I32) -> "Int32_add"
+// Using BirType (which derives Hash+Eq) as key handles generic struct types
+// like Pair<Int32, Bool> without ambiguous string serialization.
 ```
 
 3. Replace the `Call` target with the concrete function name `Int32_add`.
 
 The conformance map is populated during BIR lowering from the semantic analysis
-results (protocol conformance declarations).
+results (protocol conformance declarations). Implementation names follow the
+existing BIR lowering convention (`StructName_methodName`).
 
 ## Example
 
@@ -279,7 +295,7 @@ func main() -> Int32 {
 @main() -> I32 {
   bb0:
     %0 = literal 42 : I32
-    %1 = call @identity(%0) type_args=[I32] : TypeParam("T")  // resolved at codegen
+    %1 = call @identity(%0) type_args=[I32] : I32  // resolved at lowering time
     return %1
 }
 ```
@@ -334,7 +350,7 @@ struct_layouts: { "Pair" => [("first", TypeParam("T")), ("second", TypeParam("U"
     %0 = literal 10 : I32
     %1 = literal 1 : Bool
     %2 = struct_init @Pair { first: %0, second: %1 } type_args=[I32, Bool] : Struct("Pair", [I32, Bool])
-    %3 = call @getFirst(%2) type_args=[I32, Bool] : TypeParam("T")
+    %3 = call @getFirst(%2) type_args=[I32, Bool] : I32  // resolved at lowering
     return %3
 }
 ```
