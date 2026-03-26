@@ -31,11 +31,10 @@ pub fn compile_and_run(source: &str) -> i32 {
 Remove JIT-only imports that become unused:
 - `bengal::bir`
 - `bengal::codegen`
-- `bengal::lexer::tokenize`
-- `bengal::parser::parse`
-- `bengal::semantic`
 - `inkwell::OptimizationLevel`
 - `inkwell::context::Context`
+
+Note: `bengal::lexer::tokenize`, `bengal::parser::parse`, and `bengal::semantic` are still used by `compile_should_fail` and must be kept.
 
 ### 2. Visibility Restriction
 
