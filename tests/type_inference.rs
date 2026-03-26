@@ -411,15 +411,13 @@ fn field_assign_on_generic_struct() {
 
 #[test]
 fn error_unresolvable_type() {
-    // When T cannot be inferred at all (no args, no expected type), the compiler
-    // surfaces a clean diagnostic.
     let result = compile_should_fail(
         "func default_value<T>() -> T { return 0; }
          func main() -> Int32 { let x = default_value(); return 0; }",
     );
     assert!(
-        result.contains("cannot infer") || result.contains("type"),
-        "Expected type inference error, got: {}",
+        result.contains("cannot infer type parameter 'T'") && result.contains("default_value"),
+        "Expected detailed inference error, got: {}",
         result
     );
 }
@@ -439,19 +437,58 @@ fn error_partial_type_args() {
 
 #[test]
 fn error_integer_float_mismatch() {
-    // When an integer literal and a float literal are unified for the same T,
-    // the compiler currently reports "undefined function" because the monomorphizer
-    // cannot instantiate the generic function. A future improvement should surface
-    // a unification error during pre-mono analysis instead.
     let result = compile_should_fail(
         "func choose<T>(a: T, b: T) -> T { return a; }
          func main() -> Int32 { choose(42, 3.14); return 0; }",
     );
     assert!(
-        result.contains("mismatch")
-            || result.contains("cannot unify")
-            || result.contains("undefined function"),
-        "Expected type error, got: {}",
+        result.contains("conflicting constraints") || result.contains("cannot unify"),
+        "Expected type conflict error, got: {}",
+        result
+    );
+}
+
+#[test]
+fn error_partial_inference_failure() {
+    let result = compile_should_fail(
+        "func make<A, B>(a: A) -> B { return a; }
+         func main() -> Int32 { let x = make(42); return 0; }",
+    );
+    assert!(
+        result.contains("cannot infer type parameter 'B'"),
+        "Expected inference error for B, got: {}",
+        result
+    );
+}
+
+#[test]
+fn error_multiple_inference_failures() {
+    let result = compile_should_fail(
+        "func default_a<T>() -> T { return 0; }
+         func default_b<U>() -> U { return 0; }
+         func main() -> Int32 {
+             let x = default_a();
+             let y = default_b();
+             return 0;
+         }",
+    );
+    assert!(
+        result.contains("cannot infer type parameter"),
+        "Expected inference error, got: {}",
+        result
+    );
+}
+
+#[test]
+fn error_struct_init_inference_failure() {
+    let result = compile_should_fail(
+        "struct Holder<T> { var value: T; }
+         func get_holder<T>() -> Holder<T> { return Holder(value: 0); }
+         func main() -> Int32 { let h = get_holder(); return 0; }",
+    );
+    assert!(
+        result.contains("cannot infer type parameter"),
+        "Expected inference error, got: {}",
         result
     );
 }

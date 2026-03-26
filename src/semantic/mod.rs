@@ -1074,6 +1074,8 @@ pub fn analyze_pre_mono(program: &Program) -> Result<infer::InferredTypeArgs> {
         // Body analysis is best-effort: if a function references symbols that
         // are not yet available (e.g. cross-module imports), we skip it and let
         // analyze_post_mono handle the full type checking later.
+        // However, type-inference errors (conflicting constraints, unification
+        // failures) are genuine diagnostics and must be surfaced immediately.
         match analyze_function(func, &mut resolver, Some(&mut ctx)) {
             Ok(()) => {
                 let default_errors = ctx.apply_defaults();
@@ -1083,9 +1085,17 @@ pub fn analyze_pre_mono(program: &Program) -> Result<infer::InferredTypeArgs> {
                     all_errors.extend(default_errors);
                 }
             }
-            Err(_) => {
-                // Skip: symbol may not yet be available (e.g. cross-module import).
-                // analyze_post_mono will catch genuine errors after monomorphization.
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("conflicting constraints")
+                    || msg.contains("cannot unify")
+                    || msg.contains("cannot infer type parameter")
+                {
+                    // Genuine type-inference error — surface it immediately.
+                    all_errors.push(e);
+                }
+                // Otherwise skip: symbol may not yet be available (e.g.
+                // cross-module import). analyze_post_mono will catch the error.
             }
         }
         ctx.reset();
