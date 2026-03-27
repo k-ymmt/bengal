@@ -8,10 +8,14 @@ use crate::bir::instruction::BirModule;
 use crate::error::{BengalError, Result};
 use crate::package::ModulePath;
 use crate::parser::ast::{
-    Program, ProtocolMember, StructMember, TypeAnnotation, TypeParam, Visibility,
+    Block, Program, ProtocolMember, StructMember, TypeAnnotation, TypeParam, Visibility,
 };
 use crate::pipeline::LoweredPackage;
 use crate::semantic::SemanticInfo;
+use crate::semantic::resolver::{
+    ComputedPropInfo, FuncSig, InitializerInfo, MethodInfo, ProtocolInfo, ProtocolMethodSig,
+    ProtocolPropertyReq, StructInfo,
+};
 use crate::semantic::types::Type;
 
 pub const MAGIC: &[u8; 4] = b"BGMD";
@@ -139,6 +143,13 @@ impl InterfaceTypeParam {
             bound: tp.bound.clone(),
         }
     }
+
+    pub fn to_type_param(&self) -> TypeParam {
+        TypeParam {
+            name: self.name.clone(),
+            bound: self.bound.clone(),
+        }
+    }
 }
 
 fn is_exported(vis: Visibility) -> bool {
@@ -205,6 +216,128 @@ pub struct InterfacePropertyReq {
     pub name: String,
     pub ty: InterfaceType,
     pub has_setter: bool,
+}
+
+impl InterfaceFuncEntry {
+    pub fn to_func_sig(&self) -> FuncSig {
+        FuncSig {
+            type_params: self
+                .sig
+                .type_params
+                .iter()
+                .map(|tp| tp.to_type_param())
+                .collect(),
+            params: self
+                .sig
+                .params
+                .iter()
+                .map(|(n, t)| (n.clone(), t.to_type()))
+                .collect(),
+            return_type: self.sig.return_type.to_type(),
+        }
+    }
+}
+
+impl InterfaceStructEntry {
+    pub fn to_struct_info(&self) -> StructInfo {
+        StructInfo {
+            type_params: self
+                .type_params
+                .iter()
+                .map(|tp| tp.to_type_param())
+                .collect(),
+            conformances: self.conformances.clone(),
+            fields: self
+                .fields
+                .iter()
+                .map(|(n, t)| (n.clone(), t.to_type()))
+                .collect(),
+            field_index: self
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(i, (n, _))| (n.clone(), i))
+                .collect(),
+            computed: self
+                .computed
+                .iter()
+                .map(|c| ComputedPropInfo {
+                    name: c.name.clone(),
+                    ty: c.ty.to_type(),
+                    has_setter: c.has_setter,
+                    getter: Block { stmts: vec![] },
+                    setter: if c.has_setter {
+                        Some(Block { stmts: vec![] })
+                    } else {
+                        None
+                    },
+                })
+                .collect(),
+            computed_index: self
+                .computed
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c.name.clone(), i))
+                .collect(),
+            init: InitializerInfo {
+                params: self
+                    .init_params
+                    .iter()
+                    .map(|(n, t)| (n.clone(), t.to_type()))
+                    .collect(),
+                body: None,
+            },
+            methods: self
+                .methods
+                .iter()
+                .map(|m| MethodInfo {
+                    name: m.name.clone(),
+                    params: m
+                        .params
+                        .iter()
+                        .map(|(n, t)| (n.clone(), t.to_type()))
+                        .collect(),
+                    return_type: m.return_type.to_type(),
+                })
+                .collect(),
+            method_index: self
+                .methods
+                .iter()
+                .enumerate()
+                .map(|(i, m)| (m.name.clone(), i))
+                .collect(),
+        }
+    }
+}
+
+impl InterfaceProtocolEntry {
+    pub fn to_protocol_info(&self) -> ProtocolInfo {
+        ProtocolInfo {
+            name: self.name.clone(),
+            methods: self
+                .methods
+                .iter()
+                .map(|m| ProtocolMethodSig {
+                    name: m.name.clone(),
+                    params: m
+                        .params
+                        .iter()
+                        .map(|(n, t)| (n.clone(), t.to_type()))
+                        .collect(),
+                    return_type: m.return_type.to_type(),
+                })
+                .collect(),
+            properties: self
+                .properties
+                .iter()
+                .map(|p| ProtocolPropertyReq {
+                    name: p.name.clone(),
+                    ty: p.ty.to_type(),
+                    has_setter: p.has_setter,
+                })
+                .collect(),
+        }
+    }
 }
 
 impl ModuleInterface {
@@ -1176,5 +1309,142 @@ mod tests {
             size: 4,
         };
         assert_eq!(InterfaceType::from_type(&ty).to_type(), ty);
+    }
+
+    #[test]
+    fn interface_type_param_to_type_param_round_trip() {
+        let tp = TypeParam {
+            name: "T".to_string(),
+            bound: Some("Summable".to_string()),
+        };
+        let iface_tp = InterfaceTypeParam::from_type_param(&tp);
+        let restored = iface_tp.to_type_param();
+        assert_eq!(restored.name, tp.name);
+        assert_eq!(restored.bound, tp.bound);
+    }
+
+    #[test]
+    fn interface_func_entry_to_func_sig() {
+        let entry = InterfaceFuncEntry {
+            visibility: Visibility::Public,
+            name: "add".to_string(),
+            sig: InterfaceFuncSig {
+                type_params: vec![],
+                params: vec![
+                    ("a".to_string(), InterfaceType::I32),
+                    ("b".to_string(), InterfaceType::I32),
+                ],
+                return_type: InterfaceType::I32,
+            },
+        };
+        let sig = entry.to_func_sig();
+        assert_eq!(sig.params.len(), 2);
+        assert_eq!(sig.params[0], ("a".to_string(), Type::I32));
+        assert_eq!(sig.return_type, Type::I32);
+        assert!(sig.type_params.is_empty());
+    }
+
+    #[test]
+    fn interface_func_entry_to_func_sig_generic() {
+        let entry = InterfaceFuncEntry {
+            visibility: Visibility::Public,
+            name: "identity".to_string(),
+            sig: InterfaceFuncSig {
+                type_params: vec![InterfaceTypeParam {
+                    name: "T".to_string(),
+                    bound: None,
+                }],
+                params: vec![(
+                    "x".to_string(),
+                    InterfaceType::TypeParam {
+                        name: "T".to_string(),
+                        bound: None,
+                    },
+                )],
+                return_type: InterfaceType::TypeParam {
+                    name: "T".to_string(),
+                    bound: None,
+                },
+            },
+        };
+        let sig = entry.to_func_sig();
+        assert_eq!(sig.type_params.len(), 1);
+        assert_eq!(sig.type_params[0].name, "T");
+        assert_eq!(
+            sig.return_type,
+            Type::TypeParam {
+                name: "T".to_string(),
+                bound: None
+            }
+        );
+    }
+
+    #[test]
+    fn interface_struct_entry_to_struct_info() {
+        let entry = InterfaceStructEntry {
+            visibility: Visibility::Public,
+            name: "Point".to_string(),
+            type_params: vec![],
+            conformances: vec!["Summable".to_string()],
+            fields: vec![
+                ("x".to_string(), InterfaceType::I32),
+                ("y".to_string(), InterfaceType::I32),
+            ],
+            methods: vec![InterfaceMethodSig {
+                name: "sum".to_string(),
+                params: vec![],
+                return_type: InterfaceType::I32,
+            }],
+            computed: vec![InterfaceComputedProp {
+                name: "total".to_string(),
+                ty: InterfaceType::I32,
+                has_setter: false,
+            }],
+            init_params: vec![
+                ("x".to_string(), InterfaceType::I32),
+                ("y".to_string(), InterfaceType::I32),
+            ],
+        };
+        let info = entry.to_struct_info();
+        assert_eq!(info.fields.len(), 2);
+        assert_eq!(info.fields[0], ("x".to_string(), Type::I32));
+        assert_eq!(*info.field_index.get("x").unwrap(), 0);
+        assert_eq!(*info.field_index.get("y").unwrap(), 1);
+        assert_eq!(info.methods.len(), 1);
+        assert_eq!(info.methods[0].name, "sum");
+        assert_eq!(*info.method_index.get("sum").unwrap(), 0);
+        assert_eq!(info.computed.len(), 1);
+        assert_eq!(info.computed[0].name, "total");
+        assert!(!info.computed[0].has_setter);
+        assert_eq!(*info.computed_index.get("total").unwrap(), 0);
+        assert_eq!(info.init.params.len(), 2);
+        assert!(info.init.body.is_none());
+        assert_eq!(info.conformances, vec!["Summable".to_string()]);
+    }
+
+    #[test]
+    fn interface_protocol_entry_to_protocol_info() {
+        let entry = InterfaceProtocolEntry {
+            visibility: Visibility::Public,
+            name: "Summable".to_string(),
+            methods: vec![InterfaceMethodSig {
+                name: "sum".to_string(),
+                params: vec![],
+                return_type: InterfaceType::I32,
+            }],
+            properties: vec![InterfacePropertyReq {
+                name: "value".to_string(),
+                ty: InterfaceType::I32,
+                has_setter: true,
+            }],
+        };
+        let info = entry.to_protocol_info();
+        assert_eq!(info.name, "Summable");
+        assert_eq!(info.methods.len(), 1);
+        assert_eq!(info.methods[0].name, "sum");
+        assert_eq!(info.methods[0].return_type, Type::I32);
+        assert_eq!(info.properties.len(), 1);
+        assert_eq!(info.properties[0].name, "value");
+        assert!(info.properties[0].has_setter);
     }
 }
