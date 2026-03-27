@@ -74,9 +74,9 @@ fn parse_phase1_compat() {
     assert_eq!(f.name, "main");
     assert_eq!(f.params, vec![]);
     assert_eq!(f.return_type, TypeAnnotation::I32);
-    assert_eq!(f.body.stmts.len(), 1);
+    assert_eq!(f.body.as_ref().unwrap().stmts.len(), 1);
     assert!(matches!(
-        &f.body.stmts[0],
+        &f.body.as_ref().unwrap().stmts[0],
         Stmt::Return(Some(Expr {
             kind: ExprKind::BinaryOp { .. },
             ..
@@ -122,7 +122,7 @@ fn parse_logical_precedence() {
 #[test]
 fn parse_let_type_inference() {
     let program = parse_str("func main() -> Int32 { let x = 42; return x; }").unwrap();
-    let stmts = &program.functions[0].body.stmts;
+    let stmts = &program.functions[0].body.as_ref().unwrap().stmts;
     assert_eq!(
         normalize_stmt(&stmts[0]),
         Stmt::Let {
@@ -136,7 +136,7 @@ fn parse_let_type_inference() {
 #[test]
 fn parse_let_with_i64() {
     let program = parse_str("func main() -> Int32 { let x: Int64 = 42; return 0; }").unwrap();
-    let stmts = &program.functions[0].body.stmts;
+    let stmts = &program.functions[0].body.as_ref().unwrap().stmts;
     assert_eq!(
         normalize_stmt(&stmts[0]),
         Stmt::Let {
@@ -162,7 +162,7 @@ fn parse_cast_expr() {
 #[test]
 fn parse_break_no_value() {
     let program = parse_str("func main() -> Int32 { while true { break; }; return 0; }").unwrap();
-    let stmts = &program.functions[0].body.stmts;
+    let stmts = &program.functions[0].body.as_ref().unwrap().stmts;
     if let Stmt::Expr(Expr {
         kind: ExprKind::While { body, .. },
         ..
@@ -178,7 +178,7 @@ fn parse_break_no_value() {
 fn parse_break_with_value() {
     let program =
         parse_str("func main() -> Int32 { while true { break 10; }; return 0; }").unwrap();
-    let stmts = &program.functions[0].body.stmts;
+    let stmts = &program.functions[0].body.as_ref().unwrap().stmts;
     if let Stmt::Expr(Expr {
         kind: ExprKind::While { body, .. },
         ..
@@ -197,7 +197,7 @@ fn parse_break_with_value() {
 fn parse_continue() {
     let program =
         parse_str("func main() -> Int32 { while true { continue; }; return 0; }").unwrap();
-    let stmts = &program.functions[0].body.stmts;
+    let stmts = &program.functions[0].body.as_ref().unwrap().stmts;
     if let Stmt::Expr(Expr {
         kind: ExprKind::While { body, .. },
         ..
@@ -238,7 +238,7 @@ fn parse_while_nobreak() {
         "func main() -> Int32 { while true { break 1; } nobreak { yield 2; }; return 0; }",
     )
     .unwrap();
-    let stmts = &program.functions[0].body.stmts;
+    let stmts = &program.functions[0].body.as_ref().unwrap().stmts;
     if let Stmt::Expr(Expr {
         kind: ExprKind::While { nobreak, .. },
         ..
@@ -260,7 +260,7 @@ fn parse_while_nobreak() {
 #[test]
 fn node_ids_are_unique() {
     let program = parse_str("func main() -> Int32 { return 1 + 2 * 3; }").unwrap();
-    if let Stmt::Return(Some(expr)) = &program.functions[0].body.stmts[0] {
+    if let Stmt::Return(Some(expr)) = &program.functions[0].body.as_ref().unwrap().stmts[0] {
         let mut ids = Vec::new();
         collect_expr_ids(expr, &mut ids);
         assert_eq!(ids.len(), 5);
@@ -274,7 +274,7 @@ fn node_ids_are_unique() {
 #[test]
 fn node_ids_are_sequential() {
     let program = parse_str("func main() -> Int32 { return a + b; }").unwrap();
-    if let Stmt::Return(Some(expr)) = &program.functions[0].body.stmts[0] {
+    if let Stmt::Return(Some(expr)) = &program.functions[0].body.as_ref().unwrap().stmts[0] {
         let mut ids = Vec::new();
         collect_expr_ids(expr, &mut ids);
         let mut sorted: Vec<u32> = ids.iter().map(|id| id.0).collect();
@@ -291,7 +291,7 @@ fn node_ids_are_sequential() {
 fn parse_block_expr_yield() {
     let program =
         parse_str("func main() -> Int32 { let x: Int32 = { yield 10; }; return x; }").unwrap();
-    let stmts = &program.functions[0].body.stmts;
+    let stmts = &program.functions[0].body.as_ref().unwrap().stmts;
     assert_eq!(stmts.len(), 2);
     assert_eq!(
         normalize_stmt(&stmts[0]),
@@ -314,7 +314,7 @@ fn parse_if_else() {
     let program =
         parse_str("func main() -> Int32 { if true { yield 1; } else { yield 2; }; return 0; }")
             .unwrap();
-    let stmts = &program.functions[0].body.stmts;
+    let stmts = &program.functions[0].body.as_ref().unwrap().stmts;
     assert_eq!(stmts.len(), 2);
     assert!(matches!(
         &stmts[0],
@@ -331,7 +331,7 @@ fn parse_if_else() {
 #[test]
 fn parse_while() {
     let program = parse_str("func main() -> Int32 { while false { }; return 0; }").unwrap();
-    let stmts = &program.functions[0].body.stmts;
+    let stmts = &program.functions[0].body.as_ref().unwrap().stmts;
     assert_eq!(stmts.len(), 2);
     assert!(matches!(
         &stmts[0],
@@ -414,7 +414,7 @@ fn parse_empty_call_remains_call() {
 fn parse_field_assign() {
     let program =
         parse_str("func main() -> Int32 { var f: Int32 = 0; f.x = 10; return 0; }").unwrap();
-    let stmts = &program.functions[0].body.stmts;
+    let stmts = &program.functions[0].body.as_ref().unwrap().stmts;
     assert!(matches!(
         normalize_stmt(&stmts[1]),
         Stmt::FieldAssign { field, .. } if field == "x"
@@ -424,7 +424,7 @@ fn parse_field_assign() {
 #[test]
 fn parse_self_field_assign() {
     let program = parse_str("func main() -> Int32 { self.foo = 42; return 0; }").unwrap();
-    let stmts = &program.functions[0].body.stmts;
+    let stmts = &program.functions[0].body.as_ref().unwrap().stmts;
     let s = normalize_stmt(&stmts[0]);
     if let Stmt::FieldAssign {
         object,
@@ -443,7 +443,7 @@ fn parse_self_field_assign() {
 #[test]
 fn parse_named_type_annotation() {
     let program = parse_str("func main() -> Int32 { var f: Foo = Foo(x: 1); return 0; }").unwrap();
-    let stmts = &program.functions[0].body.stmts;
+    let stmts = &program.functions[0].body.as_ref().unwrap().stmts;
     if let Stmt::Var { ty: Some(ty), .. } = &stmts[0] {
         assert_eq!(*ty, TypeAnnotation::Named("Foo".to_string()));
     } else {

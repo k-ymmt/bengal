@@ -204,9 +204,9 @@ pub fn parse(tokens: Vec<SpannedToken>) -> Result<Program> {
                 type_params: vec![],
                 params: vec![],
                 return_type: TypeAnnotation::I32,
-                body: Block {
+                body: Some(Block {
                     stmts: vec![Stmt::Return(Some(expr))],
-                },
+                }),
                 span: expr_span,
             }],
         })

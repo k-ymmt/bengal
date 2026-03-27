@@ -253,7 +253,7 @@ fn resolve_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
                     name: pname.clone(),
                     ty: resolved_ty,
                     has_setter,
-                    getter: getter.clone(),
+                    getter: getter.clone().unwrap(),
                     setter: setter.clone(),
                 });
                 computed_index.insert(pname.clone(), idx);
@@ -310,7 +310,7 @@ fn resolve_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
                 .collect::<Result<Vec<_>>>()?;
             resolver::InitializerInfo {
                 params: resolved_params,
-                body: Some(body.clone()),
+                body: body.clone(),
             }
         }
         _ => {

@@ -45,7 +45,7 @@ pub fn validate_generics(program: &Program) -> Result<()> {
 
     // Walk all function bodies
     for func in &program.functions {
-        validate_generics_block(&func.body, &func_map, &struct_map)?;
+        validate_generics_block(func.body.as_ref().unwrap(), &func_map, &struct_map)?;
     }
 
     // Walk all struct member bodies
@@ -53,13 +53,13 @@ pub fn validate_generics(program: &Program) -> Result<()> {
         for member in &struct_def.members {
             match member {
                 StructMember::Initializer { body, .. } => {
-                    validate_generics_block(body, &func_map, &struct_map)?;
+                    validate_generics_block(body.as_ref().unwrap(), &func_map, &struct_map)?;
                 }
                 StructMember::Method { body, .. } => {
-                    validate_generics_block(body, &func_map, &struct_map)?;
+                    validate_generics_block(body.as_ref().unwrap(), &func_map, &struct_map)?;
                 }
                 StructMember::ComputedProperty { getter, setter, .. } => {
-                    validate_generics_block(getter, &func_map, &struct_map)?;
+                    validate_generics_block(getter.as_ref().unwrap(), &func_map, &struct_map)?;
                     if let Some(setter_block) = setter {
                         validate_generics_block(setter_block, &func_map, &struct_map)?;
                     }

@@ -47,10 +47,11 @@ pub(super) fn analyze_function(
         );
     }
 
-    let stmts = &func.body.stmts;
+    let body = func.body.as_ref().unwrap();
+    let stmts = &body.stmts;
 
     // Check that all paths end with a return
-    if !block_always_returns(&func.body) {
+    if !block_always_returns(body) {
         diag.emit(sem_err(format!(
             "function `{}` must end with a `return` statement",
             func.name

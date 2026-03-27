@@ -94,20 +94,20 @@ pub enum StructMember {
         visibility: Visibility,
         name: String,
         ty: TypeAnnotation,
-        getter: Block,
+        getter: Option<Block>,
         setter: Option<Block>,
     },
     Initializer {
         visibility: Visibility,
         params: Vec<Param>,
-        body: Block,
+        body: Option<Block>,
     },
     Method {
         visibility: Visibility,
         name: String,
         params: Vec<Param>,
         return_type: TypeAnnotation,
-        body: Block,
+        body: Option<Block>,
     },
 }
 
@@ -118,7 +118,7 @@ pub struct Function {
     pub type_params: Vec<TypeParam>,
     pub params: Vec<Param>,
     pub return_type: TypeAnnotation,
-    pub body: Block,
+    pub body: Option<Block>,
     pub span: Span,
 }
 

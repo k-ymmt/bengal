@@ -156,7 +156,14 @@ fn normalize_block(block: &Block) -> Block {
 
 fn parse_expr_str(input: &str) -> Expr {
     let program = parse_str(input).unwrap();
-    let expr = match program.functions[0].body.stmts.last().unwrap() {
+    let expr = match program.functions[0]
+        .body
+        .as_ref()
+        .unwrap()
+        .stmts
+        .last()
+        .unwrap()
+    {
         Stmt::Return(Some(expr)) => expr.clone(),
         _ => panic!("expected Return statement"),
     };

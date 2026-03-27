@@ -50,12 +50,14 @@ pub(super) fn analyze_struct_members(
                         },
                     );
                 }
-                for stmt in &body.stmts {
+                let body_block = body.as_ref().unwrap();
+                for stmt in &body_block.stmts {
                     analyze_stmt(stmt, resolver, Some(ctx), diag);
                 }
                 resolver.pop_scope();
 
-                if let Err(e) = check_all_fields_initialized(&struct_def.name, body, resolver) {
+                if let Err(e) = check_all_fields_initialized(&struct_def.name, body_block, resolver)
+                {
                     diag.emit(e);
                 }
 
@@ -84,7 +86,7 @@ pub(super) fn analyze_struct_members(
                     resolver.current_return_type = Some(resolved_ty.clone());
 
                     resolver.push_scope();
-                    analyze_getter_block(getter, resolver, ctx, diag);
+                    analyze_getter_block(getter.as_ref().unwrap(), resolver, ctx, diag);
                     resolver.pop_scope();
 
                     resolver.current_return_type = prev_return;
@@ -159,7 +161,8 @@ pub(super) fn analyze_struct_members(
                     );
                 }
 
-                if !block_always_returns(body) {
+                let body_block = body.as_ref().unwrap();
+                if !block_always_returns(body_block) {
                     diag.emit(sem_err(format!(
                         "method `{}` must end with a `return` statement",
                         mname
@@ -169,7 +172,7 @@ pub(super) fn analyze_struct_members(
                     resolver.self_context = prev_self;
                     continue;
                 }
-                let stmts = &body.stmts;
+                let stmts = &body_block.stmts;
                 for stmt in stmts {
                     if matches!(stmt, Stmt::Yield(_)) {
                         diag.emit(sem_err(

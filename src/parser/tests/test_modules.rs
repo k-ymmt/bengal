@@ -175,7 +175,7 @@ fn parse_generic_call_with_type_args() {
     assert_eq!(program.functions.len(), 2);
     // Verify the call in main's return actually has type_args
     let main_fn = &program.functions[1];
-    let ret_stmt = &main_fn.body.stmts[0];
+    let ret_stmt = &main_fn.body.as_ref().unwrap().stmts[0];
     match ret_stmt {
         Stmt::Return(Some(expr)) => match &expr.kind {
             ExprKind::Call {

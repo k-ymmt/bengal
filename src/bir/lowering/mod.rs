@@ -280,7 +280,7 @@ impl Lowering {
             self.define_var(param.name.clone(), val);
         }
 
-        let (result, body_regions) = self.lower_block_stmts(&func.body);
+        let (result, body_regions) = self.lower_block_stmts(func.body.as_ref().unwrap());
 
         self.pop_scope();
 

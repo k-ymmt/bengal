@@ -242,7 +242,7 @@ impl super::Parser {
         } else {
             TypeAnnotation::Unit
         };
-        let body = self.parse_block()?;
+        let body = Some(self.parse_block()?);
         let span = self.span_from(start);
         Ok(Function {
             visibility: Visibility::Internal,
@@ -303,7 +303,7 @@ impl super::Parser {
                 if self.peek().node == Token::LBrace {
                     // Computed property: var name: Type { get { ... } set { ... } };
                     self.advance(); // consume `{`
-                    let getter = self.parse_getter()?;
+                    let getter = Some(self.parse_getter()?);
                     let setter = if self.peek().node == Token::RBrace {
                         None
                     } else {
@@ -331,7 +331,7 @@ impl super::Parser {
             Token::Init => {
                 self.advance();
                 let params = self.parse_param_list()?;
-                let body = self.parse_block()?;
+                let body = Some(self.parse_block()?);
                 Ok(StructMember::Initializer {
                     visibility,
                     params,
@@ -348,7 +348,7 @@ impl super::Parser {
                 } else {
                     TypeAnnotation::Unit
                 };
-                let body = self.parse_block()?;
+                let body = Some(self.parse_block()?);
                 Ok(StructMember::Method {
                     visibility,
                     name,

@@ -13,7 +13,7 @@ fn parse_func_return() {
     assert_eq!(f.params, vec![]);
     assert_eq!(f.return_type, TypeAnnotation::I32);
     assert_eq!(
-        normalize_stmt(&f.body.stmts[0]),
+        normalize_stmt(&f.body.as_ref().unwrap().stmts[0]),
         Stmt::Return(Some(e(ExprKind::Number(42))))
     );
 }
@@ -21,7 +21,7 @@ fn parse_func_return() {
 #[test]
 fn parse_let_return() {
     let program = parse_str("func main() -> Int32 { let x: Int32 = 10; return x; }").unwrap();
-    let stmts = &program.functions[0].body.stmts;
+    let stmts = &program.functions[0].body.as_ref().unwrap().stmts;
     assert_eq!(stmts.len(), 2);
     assert_eq!(
         normalize_stmt(&stmts[0]),
@@ -56,7 +56,7 @@ fn parse_func_with_params() {
         ]
     );
     assert_eq!(
-        normalize_stmt(&f.body.stmts[0]),
+        normalize_stmt(&f.body.as_ref().unwrap().stmts[0]),
         Stmt::Return(Some(e(ExprKind::BinaryOp {
             op: BinOp::Add,
             left: Box::new(e(ExprKind::Ident("a".to_string()))),
@@ -71,7 +71,10 @@ fn parse_unit_return_function() {
     let f = &program.functions[0];
     assert_eq!(f.name, "foo");
     assert_eq!(f.return_type, TypeAnnotation::Unit);
-    assert_eq!(normalize_stmt(&f.body.stmts[0]), Stmt::Return(None));
+    assert_eq!(
+        normalize_stmt(&f.body.as_ref().unwrap().stmts[0]),
+        Stmt::Return(None)
+    );
 }
 
 #[test]
