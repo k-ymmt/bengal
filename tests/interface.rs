@@ -2,6 +2,7 @@ mod common;
 
 use std::io::Write;
 
+use bengal::error::DiagCtxt;
 use bengal::interface::{FORMAT_VERSION, MAGIC, read_interface, write_interface};
 use bengal::package::ModulePath;
 use bengal::pipeline::{self, LoweredPackage};
@@ -10,8 +11,8 @@ use tempfile::{NamedTempFile, TempDir};
 /// Helper: compile source to LoweredPackage (through optimize stage).
 fn source_to_lowered(source: &str) -> LoweredPackage {
     let parsed = pipeline::parse_source("test", source).unwrap();
-    let analyzed = pipeline::analyze(parsed).unwrap();
-    let lowered = pipeline::lower(analyzed).unwrap();
+    let analyzed = pipeline::analyze(parsed, &mut DiagCtxt::new()).unwrap();
+    let lowered = pipeline::lower(analyzed, &mut DiagCtxt::new()).unwrap();
     pipeline::optimize(lowered)
 }
 
@@ -213,8 +214,8 @@ fn round_trip_multi_module_package() {
 
     // Run pipeline through optimize
     let parsed = pipeline::parse(&dir.path().join("main.bengal")).unwrap();
-    let analyzed = pipeline::analyze(parsed).unwrap();
-    let lowered = pipeline::lower(analyzed).unwrap();
+    let analyzed = pipeline::analyze(parsed, &mut DiagCtxt::new()).unwrap();
+    let lowered = pipeline::lower(analyzed, &mut DiagCtxt::new()).unwrap();
     let optimized = pipeline::optimize(lowered);
 
     // Round-trip

@@ -13,7 +13,7 @@ pub mod suggest;
 use std::collections::HashMap;
 use std::path::Path;
 
-use error::Result;
+use error::{DiagCtxt, Result};
 use pipeline::BirOutput;
 
 /// Compile a Bengal source file (or package) to an executable.
@@ -21,20 +21,22 @@ pub fn compile_to_executable(
     entry_path: &Path,
     output_path: &Path,
 ) -> std::result::Result<(), error::PipelineError> {
+    let mut diag = DiagCtxt::new();
     let parsed = pipeline::parse(entry_path)?;
-    let analyzed = pipeline::analyze(parsed)?;
-    let lowered = pipeline::lower(analyzed)?;
+    let analyzed = pipeline::analyze(parsed, &mut diag)?;
+    let lowered = pipeline::lower(analyzed, &mut diag)?;
     let optimized = pipeline::optimize(lowered);
-    let mono = pipeline::monomorphize(optimized)?;
-    let compiled = pipeline::codegen(mono)?;
+    let mono = pipeline::monomorphize(optimized, &mut diag)?;
+    let compiled = pipeline::codegen(mono, &mut diag)?;
     pipeline::link(compiled, output_path)
 }
 
 /// Compile a Bengal source file (or package) to BIR output.
 pub fn compile_to_bir(entry_path: &Path) -> std::result::Result<BirOutput, error::PipelineError> {
+    let mut diag = DiagCtxt::new();
     let parsed = pipeline::parse(entry_path)?;
-    let analyzed = pipeline::analyze(parsed)?;
-    let lowered = pipeline::lower(analyzed)?;
+    let analyzed = pipeline::analyze(parsed, &mut diag)?;
+    let lowered = pipeline::lower(analyzed, &mut diag)?;
     let optimized = pipeline::optimize(lowered);
     let mut bir_texts = HashMap::new();
     let mut modules = HashMap::new();
@@ -47,9 +49,10 @@ pub fn compile_to_bir(entry_path: &Path) -> std::result::Result<BirOutput, error
 
 /// Compile BIR from an in-memory source string (for eval subcommand).
 pub fn compile_source_to_bir(source: &str) -> std::result::Result<BirOutput, error::PipelineError> {
+    let mut diag = DiagCtxt::new();
     let parsed = pipeline::parse_source("<eval>", source)?;
-    let analyzed = pipeline::analyze(parsed)?;
-    let lowered = pipeline::lower(analyzed)?;
+    let analyzed = pipeline::analyze(parsed, &mut diag)?;
+    let lowered = pipeline::lower(analyzed, &mut diag)?;
     let optimized = pipeline::optimize(lowered);
     let mut bir_texts = HashMap::new();
     let mut modules = HashMap::new();
@@ -64,22 +67,24 @@ pub fn compile_source_to_bir(source: &str) -> std::result::Result<BirOutput, err
 pub fn compile_to_objects(
     entry_path: &Path,
 ) -> std::result::Result<pipeline::CompiledPackage, error::PipelineError> {
+    let mut diag = DiagCtxt::new();
     let parsed = pipeline::parse(entry_path)?;
-    let analyzed = pipeline::analyze(parsed)?;
-    let lowered = pipeline::lower(analyzed)?;
+    let analyzed = pipeline::analyze(parsed, &mut diag)?;
+    let lowered = pipeline::lower(analyzed, &mut diag)?;
     let optimized = pipeline::optimize(lowered);
-    let mono = pipeline::monomorphize(optimized)?;
-    pipeline::codegen(mono)
+    let mono = pipeline::monomorphize(optimized, &mut diag)?;
+    pipeline::codegen(mono, &mut diag)
 }
 
 /// Compile from a source string to object bytes (for integration tests).
 pub fn compile_source_to_objects(source: &str) -> Result<Vec<u8>> {
+    let mut diag = DiagCtxt::new();
     let parsed = pipeline::parse_source("test", source).map_err(|e| e.source_error)?;
-    let analyzed = pipeline::analyze(parsed).map_err(|e| e.source_error)?;
-    let lowered = pipeline::lower(analyzed).map_err(|e| e.source_error)?;
+    let analyzed = pipeline::analyze(parsed, &mut diag).map_err(|e| e.source_error)?;
+    let lowered = pipeline::lower(analyzed, &mut diag).map_err(|e| e.source_error)?;
     let optimized = pipeline::optimize(lowered);
-    let mono = pipeline::monomorphize(optimized).map_err(|e| e.source_error)?;
-    let compiled = pipeline::codegen(mono).map_err(|e| e.source_error)?;
+    let mono = pipeline::monomorphize(optimized, &mut diag).map_err(|e| e.source_error)?;
+    let compiled = pipeline::codegen(mono, &mut diag).map_err(|e| e.source_error)?;
     compiled
         .object_bytes
         .into_values()

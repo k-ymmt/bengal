@@ -44,12 +44,13 @@ fn run() -> miette::Result<()> {
             }
 
             // Run pipeline once, optionally printing BIR
+            let mut diag = bengal::error::DiagCtxt::new();
             let parsed =
                 bengal::pipeline::parse(&file).map_err(|e| Report::new(e.into_diagnostic()))?;
-            let analyzed =
-                bengal::pipeline::analyze(parsed).map_err(|e| Report::new(e.into_diagnostic()))?;
-            let lowered =
-                bengal::pipeline::lower(analyzed).map_err(|e| Report::new(e.into_diagnostic()))?;
+            let analyzed = bengal::pipeline::analyze(parsed, &mut diag)
+                .map_err(|e| Report::new(e.into_diagnostic()))?;
+            let lowered = bengal::pipeline::lower(analyzed, &mut diag)
+                .map_err(|e| Report::new(e.into_diagnostic()))?;
             let optimized = bengal::pipeline::optimize(lowered);
 
             if emit_bir {
@@ -61,10 +62,10 @@ fn run() -> miette::Result<()> {
                 }
             }
 
-            let mono = bengal::pipeline::monomorphize(optimized)
+            let mono = bengal::pipeline::monomorphize(optimized, &mut diag)
                 .map_err(|e| Report::new(e.into_diagnostic()))?;
-            let compiled =
-                bengal::pipeline::codegen(mono).map_err(|e| Report::new(e.into_diagnostic()))?;
+            let compiled = bengal::pipeline::codegen(mono, &mut diag)
+                .map_err(|e| Report::new(e.into_diagnostic()))?;
             bengal::pipeline::link(compiled, &exe_path)
                 .map_err(|e| Report::new(e.into_diagnostic()))?;
             eprintln!("Wrote {}", exe_path.display());

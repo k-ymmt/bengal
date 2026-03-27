@@ -39,6 +39,138 @@ pub enum BengalError {
 
 pub type Result<T> = std::result::Result<T, BengalError>;
 
+/// Diagnostic context for accumulating multiple compilation errors.
+pub struct DiagCtxt {
+    errors: Vec<BengalError>,
+    limit: usize,
+}
+
+impl Default for DiagCtxt {
+    fn default() -> Self {
+        Self {
+            errors: Vec::new(),
+            limit: 128,
+        }
+    }
+}
+
+impl DiagCtxt {
+    /// Create a new diagnostic context with the default error limit (128).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Emit an error. Returns false if the limit has been reached.
+    pub fn emit(&mut self, err: BengalError) -> bool {
+        if self.errors.len() >= self.limit {
+            return false;
+        }
+        self.errors.push(err);
+        true
+    }
+
+    /// Number of errors emitted so far.
+    pub fn error_count(&self) -> usize {
+        self.errors.len()
+    }
+
+    /// Whether any errors have been emitted.
+    pub fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
+
+    /// Consume the context. Returns `Err` with all errors if any were emitted, `Ok(())` otherwise.
+    pub fn finish(self) -> std::result::Result<(), Vec<BengalError>> {
+        if self.errors.is_empty() {
+            Ok(())
+        } else {
+            Err(self.errors)
+        }
+    }
+
+    /// Take all collected errors, leaving the context empty.
+    pub fn take_errors(&mut self) -> Vec<BengalError> {
+        std::mem::take(&mut self.errors)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_error(msg: &str) -> BengalError {
+        BengalError::CodegenError {
+            message: msg.to_string(),
+        }
+    }
+
+    #[test]
+    fn diag_ctx_starts_empty() {
+        let diag = DiagCtxt::new();
+        assert_eq!(diag.error_count(), 0);
+        assert!(!diag.has_errors());
+    }
+
+    #[test]
+    fn diag_ctx_emit_increments_count() {
+        let mut diag = DiagCtxt::new();
+        diag.emit(make_error("e1"));
+        assert_eq!(diag.error_count(), 1);
+        assert!(diag.has_errors());
+        diag.emit(make_error("e2"));
+        assert_eq!(diag.error_count(), 2);
+    }
+
+    #[test]
+    fn diag_ctx_finish_ok_when_no_errors() {
+        let diag = DiagCtxt::new();
+        assert!(diag.finish().is_ok());
+    }
+
+    #[test]
+    fn diag_ctx_finish_err_when_has_errors() {
+        let mut diag = DiagCtxt::new();
+        diag.emit(make_error("boom"));
+        let result = diag.finish();
+        assert!(result.is_err());
+        let errs = result.unwrap_err();
+        assert_eq!(errs.len(), 1);
+    }
+
+    #[test]
+    fn diag_ctx_take_errors_leaves_empty() {
+        let mut diag = DiagCtxt::new();
+        diag.emit(make_error("a"));
+        diag.emit(make_error("b"));
+        let taken = diag.take_errors();
+        assert_eq!(taken.len(), 2);
+        assert_eq!(diag.error_count(), 0);
+        assert!(!diag.has_errors());
+    }
+
+    #[test]
+    fn diag_ctx_emit_respects_limit() {
+        let mut diag = DiagCtxt::new();
+        // Fill to the limit
+        for i in 0..128 {
+            assert!(diag.emit(make_error(&format!("e{}", i))));
+        }
+        assert_eq!(diag.error_count(), 128);
+        // Next emit should return false and not store
+        assert!(!diag.emit(make_error("overflow")));
+        assert_eq!(diag.error_count(), 128);
+    }
+
+    #[test]
+    fn diag_ctx_default_has_limit_128() {
+        let mut diag = DiagCtxt::default();
+        for i in 0..128 {
+            assert!(diag.emit(make_error(&format!("e{}", i))));
+        }
+        assert!(!diag.emit(make_error("overflow")));
+    }
+}
+
 #[derive(Debug, Error)]
 #[error("{phase} error in {module}: {source_error}")]
 pub struct PipelineError {

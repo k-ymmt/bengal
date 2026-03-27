@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::bir::instruction::{BirModule, BirType};
 use crate::bir::mono::MonoCollectResult;
-use crate::error::BengalError;
+use crate::error::{BengalError, DiagCtxt};
 use crate::package::{ModuleGraph, ModuleInfo, ModulePath};
 use crate::parser::ast::{NodeId, TypeAnnotation};
 use crate::semantic::{PackageSemanticInfo, SemanticInfo};
@@ -135,7 +135,10 @@ pub fn parse_source(
 }
 
 /// Semantic analysis: validate generics, run pre-mono inference, cross-module resolution.
-pub fn analyze(parsed: ParsedPackage) -> Result<AnalyzedPackage, crate::error::PipelineError> {
+pub fn analyze(
+    parsed: ParsedPackage,
+    _diag: &mut DiagCtxt,
+) -> Result<AnalyzedPackage, crate::error::PipelineError> {
     // Validate generics for all modules
     for (mod_path, mod_info) in &parsed.graph.modules {
         crate::semantic::validate_generics(&mod_info.ast).map_err(|e| {
@@ -270,7 +273,10 @@ fn build_name_map(
 }
 
 /// BIR lowering: build name maps, lower each module's AST to BIR.
-pub fn lower(analyzed: AnalyzedPackage) -> Result<LoweredPackage, crate::error::PipelineError> {
+pub fn lower(
+    analyzed: AnalyzedPackage,
+    _diag: &mut DiagCtxt,
+) -> Result<LoweredPackage, crate::error::PipelineError> {
     let mut modules = HashMap::new();
     let mut sources = HashMap::new();
 
@@ -425,6 +431,7 @@ fn collect_external_functions(
 /// Monomorphization collection: find all concrete instantiations needed.
 pub fn monomorphize(
     lowered: LoweredPackage,
+    _diag: &mut DiagCtxt,
 ) -> Result<MonomorphizedPackage, crate::error::PipelineError> {
     let mut modules = HashMap::new();
 
@@ -451,7 +458,10 @@ pub fn monomorphize(
 }
 
 /// Code generation: compile each module's BIR to native object code.
-pub fn codegen(mono: MonomorphizedPackage) -> Result<CompiledPackage, crate::error::PipelineError> {
+pub fn codegen(
+    mono: MonomorphizedPackage,
+    _diag: &mut DiagCtxt,
+) -> Result<CompiledPackage, crate::error::PipelineError> {
     let mut object_bytes = HashMap::new();
 
     for (mod_path, module) in &mono.modules {
@@ -541,7 +551,7 @@ mod tests {
     #[test]
     fn analyze_single_file() {
         let parsed = parse_source("test", "func main() -> Int32 { return 1; }").unwrap();
-        let analyzed = analyze(parsed).unwrap();
+        let analyzed = analyze(parsed, &mut DiagCtxt::new()).unwrap();
         assert_eq!(analyzed.inferred_maps.len(), 1);
     }
 
@@ -552,7 +562,7 @@ mod tests {
             func main() -> Int32 { return identity<Int32>(42); }
         "#;
         let parsed = parse_source("test", source).unwrap();
-        let analyzed = analyze(parsed).unwrap();
+        let analyzed = analyze(parsed, &mut DiagCtxt::new()).unwrap();
         // The inferred_maps contains one entry per module.
         // With explicit type args (identity<Int32>), no inference is needed,
         // so the root module's map may be empty — but the map itself must exist.
@@ -562,8 +572,8 @@ mod tests {
     #[test]
     fn lower_single_file() {
         let parsed = parse_source("test", "func main() -> Int32 { return 1; }").unwrap();
-        let analyzed = analyze(parsed).unwrap();
-        let lowered = lower(analyzed).unwrap();
+        let analyzed = analyze(parsed, &mut DiagCtxt::new()).unwrap();
+        let lowered = lower(analyzed, &mut DiagCtxt::new()).unwrap();
         assert_eq!(lowered.modules.len(), 1);
         let root = lowered.modules.get(&ModulePath::root()).unwrap();
         assert!(root.is_entry);
@@ -573,11 +583,11 @@ mod tests {
     #[test]
     fn full_pipeline_single_file() {
         let parsed = parse_source("test", "func main() -> Int32 { return 42; }").unwrap();
-        let analyzed = analyze(parsed).unwrap();
-        let lowered = lower(analyzed).unwrap();
+        let analyzed = analyze(parsed, &mut DiagCtxt::new()).unwrap();
+        let lowered = lower(analyzed, &mut DiagCtxt::new()).unwrap();
         let optimized = optimize(lowered);
-        let mono = monomorphize(optimized).unwrap();
-        let compiled = codegen(mono).unwrap();
+        let mono = monomorphize(optimized, &mut DiagCtxt::new()).unwrap();
+        let compiled = codegen(mono, &mut DiagCtxt::new()).unwrap();
         assert_eq!(compiled.object_bytes.len(), 1);
         let obj = compiled.object_bytes.get(&ModulePath::root()).unwrap();
         assert!(!obj.is_empty());
@@ -590,11 +600,11 @@ mod tests {
             func main() -> Int32 { return identity<Int32>(42); }
         "#;
         let parsed = parse_source("test", source).unwrap();
-        let analyzed = analyze(parsed).unwrap();
-        let lowered = lower(analyzed).unwrap();
+        let analyzed = analyze(parsed, &mut DiagCtxt::new()).unwrap();
+        let lowered = lower(analyzed, &mut DiagCtxt::new()).unwrap();
         let optimized = optimize(lowered);
-        let mono = monomorphize(optimized).unwrap();
-        let compiled = codegen(mono).unwrap();
+        let mono = monomorphize(optimized, &mut DiagCtxt::new()).unwrap();
+        let compiled = codegen(mono, &mut DiagCtxt::new()).unwrap();
         assert!(!compiled.object_bytes.is_empty());
     }
 }
