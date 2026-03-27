@@ -13,7 +13,7 @@ use crate::semantic::SemanticInfo;
 use crate::semantic::types::Type;
 
 pub const MAGIC: &[u8; 4] = b"BGMD";
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum InterfaceType {
@@ -95,6 +95,7 @@ pub struct ModuleInterface {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InterfaceFuncEntry {
+    pub visibility: Visibility,
     pub name: String,
     pub sig: InterfaceFuncSig,
 }
@@ -108,6 +109,7 @@ pub struct InterfaceFuncSig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InterfaceStructEntry {
+    pub visibility: Visibility,
     pub name: String,
     pub type_params: Vec<InterfaceTypeParam>,
     pub conformances: Vec<String>,
@@ -133,6 +135,7 @@ pub struct InterfaceComputedProp {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InterfaceProtocolEntry {
+    pub visibility: Visibility,
     pub name: String,
     pub methods: Vec<InterfaceMethodSig>,
     pub properties: Vec<InterfacePropertyReq>,
@@ -157,6 +160,7 @@ impl ModuleInterface {
                     .is_some_and(is_exported)
             })
             .map(|(name, sig)| InterfaceFuncEntry {
+                visibility: sem.visibilities.get(name).copied().unwrap_or_default(),
                 name: name.clone(),
                 sig: InterfaceFuncSig {
                     type_params: sig
@@ -184,6 +188,7 @@ impl ModuleInterface {
                     .is_some_and(is_exported)
             })
             .map(|(name, info)| InterfaceStructEntry {
+                visibility: sem.visibilities.get(name).copied().unwrap_or_default(),
                 name: name.clone(),
                 type_params: info
                     .type_params
@@ -237,6 +242,7 @@ impl ModuleInterface {
                     .is_some_and(is_exported)
             })
             .map(|(name, info)| InterfaceProtocolEntry {
+                visibility: sem.visibilities.get(name).copied().unwrap_or_default(),
                 name: name.clone(),
                 methods: info
                     .methods
@@ -436,6 +442,7 @@ mod tests {
     fn module_interface_round_trip() {
         let iface = ModuleInterface {
             functions: vec![InterfaceFuncEntry {
+                visibility: Visibility::Public,
                 name: "add".to_string(),
                 sig: InterfaceFuncSig {
                     type_params: vec![],
@@ -447,6 +454,7 @@ mod tests {
                 },
             }],
             structs: vec![InterfaceStructEntry {
+                visibility: Visibility::Public,
                 name: "Point".to_string(),
                 type_params: vec![],
                 conformances: vec!["Summable".to_string()],
@@ -470,6 +478,7 @@ mod tests {
                 ],
             }],
             protocols: vec![InterfaceProtocolEntry {
+                visibility: Visibility::Public,
                 name: "Summable".to_string(),
                 methods: vec![InterfaceMethodSig {
                     name: "sum".to_string(),
