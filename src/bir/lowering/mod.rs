@@ -3,6 +3,7 @@ mod lower_expr;
 mod lower_short_circuit;
 mod lower_stmt;
 mod lower_struct;
+mod lower_struct_field;
 
 mod lower_program;
 
