@@ -557,9 +557,7 @@ fn analyze_single_module(
         if !struct_def.type_params.is_empty() {
             continue;
         }
-        if let Err(e) = analyze_struct_members(struct_def, resolver, &mut infer_ctx) {
-            diag.emit(e);
-        }
+        analyze_struct_members(struct_def, resolver, &mut infer_ctx, diag);
         let _ = infer_ctx.apply_defaults();
         infer_ctx.reset();
     }
@@ -683,9 +681,7 @@ fn analyze_single_module(
     {
         let mut ctx = InferenceContext::new();
         for func in &program.functions {
-            if let Err(e) = analyze_function(func, resolver, Some(&mut ctx)) {
-                diag.emit(e);
-            }
+            analyze_function(func, resolver, Some(&mut ctx), diag);
             let errs = ctx.apply_defaults();
             for e in errs {
                 diag.emit(e);
@@ -1147,22 +1143,26 @@ fn analyze_pre_mono_inner(
         );
     }
 
+    let mut all_errors: Vec<BengalError> = Vec::new();
+
     // --- Phase 2b: analyze struct member bodies (init, methods, computed) ---
     // Skip generic structs — their member bodies contain unsubstituted type
     // parameters that would cause spurious errors.
     {
         let mut struct_ctx = InferenceContext::new();
+        let mut struct_diag = DiagCtxt::new();
         for struct_def in &program.structs {
             if !struct_def.type_params.is_empty() {
                 continue;
             }
-            analyze_struct_members(struct_def, &mut resolver, &mut struct_ctx)?;
+            analyze_struct_members(struct_def, &mut resolver, &mut struct_ctx, &mut struct_diag);
             let errs = struct_ctx.apply_defaults();
-            if let Some(e) = errs.into_iter().next() {
-                return Err(e);
+            for e in errs {
+                struct_diag.emit(e);
             }
             struct_ctx.reset();
         }
+        all_errors.extend(struct_diag.take_errors());
     }
 
     // --- Phase 2c: check protocol conformance ---
@@ -1286,39 +1286,38 @@ fn analyze_pre_mono_inner(
     // type parameters that would cause spurious errors; they are checked at the
     // BIR level after monomorphization resolves them to concrete types.
 
-    let mut all_errors: Vec<BengalError> = Vec::new();
-
     for func in &program.functions {
         // Skip generic functions — checked after BIR-level monomorphization
         if !func.type_params.is_empty() {
             continue;
         }
 
-        match analyze_function(func, &mut resolver, Some(&mut ctx)) {
-            Ok(()) => {
-                let default_errors = ctx.apply_defaults();
-                if default_errors.is_empty() {
-                    ctx.record_inferred_type_args(&mut inferred);
-                } else {
-                    all_errors.extend(default_errors);
-                }
+        let mut func_diag = DiagCtxt::new();
+        analyze_function(func, &mut resolver, Some(&mut ctx), &mut func_diag);
+        let func_errors = func_diag.take_errors();
+
+        if func_errors.is_empty() {
+            let default_errors = ctx.apply_defaults();
+            if default_errors.is_empty() {
+                ctx.record_inferred_type_args(&mut inferred);
+            } else {
+                all_errors.extend(default_errors);
             }
-            Err(e) => {
-                if lenient {
-                    // In lenient mode, only propagate type-inference errors.
-                    // Other errors (e.g. undefined symbols) may be caused by
-                    // cross-module imports that aren't yet available.
-                    let msg = e.to_string();
-                    if msg.contains("conflicting constraints")
-                        || msg.contains("cannot unify")
-                        || msg.contains("cannot infer type parameter")
-                    {
-                        all_errors.push(e);
-                    }
-                } else {
+        } else if lenient {
+            // In lenient mode, only propagate type-inference errors.
+            // Other errors (e.g. undefined symbols) may be caused by
+            // cross-module imports that aren't yet available.
+            for e in func_errors {
+                let msg = e.to_string();
+                if msg.contains("conflicting constraints")
+                    || msg.contains("cannot unify")
+                    || msg.contains("cannot infer type parameter")
+                {
                     all_errors.push(e);
                 }
             }
+        } else {
+            all_errors.extend(func_errors);
         }
         ctx.reset();
     }
@@ -1568,13 +1567,18 @@ pub fn analyze_post_mono(program: &Program) -> Result<SemanticInfo> {
     // Pass 3: analyze struct member bodies and function bodies
     {
         let mut struct_ctx = InferenceContext::new();
+        let mut struct_diag = DiagCtxt::new();
         for struct_def in &program.structs {
-            analyze_struct_members(struct_def, &mut resolver, &mut struct_ctx)?;
+            analyze_struct_members(struct_def, &mut resolver, &mut struct_ctx, &mut struct_diag);
             let errs = struct_ctx.apply_defaults();
-            if let Some(e) = errs.into_iter().next() {
-                return Err(e);
+            for e in errs {
+                struct_diag.emit(e);
             }
             struct_ctx.reset();
+        }
+        let struct_errors = struct_diag.take_errors();
+        if let Some(e) = struct_errors.into_iter().next() {
+            return Err(e);
         }
     }
 
@@ -1696,13 +1700,18 @@ pub fn analyze_post_mono(program: &Program) -> Result<SemanticInfo> {
 
     {
         let mut ctx = InferenceContext::new();
+        let mut func_diag = DiagCtxt::new();
         for func in &program.functions {
-            analyze_function(func, &mut resolver, Some(&mut ctx))?;
+            analyze_function(func, &mut resolver, Some(&mut ctx), &mut func_diag);
             let errs = ctx.apply_defaults();
-            if let Some(e) = errs.into_iter().next() {
-                return Err(e);
+            for e in errs {
+                func_diag.emit(e);
             }
             ctx.reset();
+        }
+        let func_errors = func_diag.take_errors();
+        if let Some(e) = func_errors.into_iter().next() {
+            return Err(e);
         }
     }
 
@@ -1977,20 +1986,35 @@ fn analyze_function(
     func: &Function,
     resolver: &mut Resolver,
     ctx: Option<&mut InferenceContext>,
-) -> Result<()> {
+    diag: &mut DiagCtxt,
+) {
     // Push type params into scope for the duration of this function analysis
     resolver.push_type_params(&func.type_params);
 
-    let return_type = resolve_type_checked(&func.return_type, resolver)?;
+    let return_type = match resolve_type_checked(&func.return_type, resolver) {
+        Ok(t) => t,
+        Err(e) => {
+            diag.emit(e);
+            resolver.pop_type_params(func.type_params.len());
+            return;
+        }
+    };
     resolver.current_return_type = Some(return_type.clone());
     resolver.push_scope();
 
     // Register function parameters as immutable variables
     for param in &func.params {
+        let param_ty = match resolve_type_checked(&param.ty, resolver) {
+            Ok(t) => t,
+            Err(e) => {
+                diag.emit(e);
+                Type::Error
+            }
+        };
         resolver.define_var(
             param.name.clone(),
             VarInfo {
-                ty: resolve_type_checked(&param.ty, resolver)?,
+                ty: param_ty,
                 mutable: false,
             },
         );
@@ -2000,30 +2024,35 @@ fn analyze_function(
 
     // Check that all paths end with a return
     if !block_always_returns(&func.body) {
-        resolver.pop_type_params(func.type_params.len());
-        return Err(sem_err(format!(
+        diag.emit(sem_err(format!(
             "function `{}` must end with a `return` statement",
             func.name
         )));
+        resolver.pop_scope();
+        resolver.current_return_type = None;
+        resolver.pop_type_params(func.type_params.len());
+        return;
     }
 
     let mut ctx = ctx;
     for stmt in stmts.iter() {
         // Yield is not allowed in function bodies
         if matches!(stmt, Stmt::Yield(_)) {
-            resolver.pop_type_params(func.type_params.len());
-            return Err(sem_err(
+            diag.emit(sem_err(
                 "`yield` cannot be used in function body (use `return` instead)",
             ));
+            resolver.pop_scope();
+            resolver.current_return_type = None;
+            resolver.pop_type_params(func.type_params.len());
+            return;
         }
 
-        analyze_stmt(stmt, resolver, ctx.as_deref_mut())?;
+        analyze_stmt(stmt, resolver, ctx.as_deref_mut(), diag);
     }
 
     resolver.pop_scope();
     resolver.current_return_type = None;
     resolver.pop_type_params(func.type_params.len());
-    Ok(())
 }
 
 /// Analyze a block expression (Expr::Block) — yield required, return forbidden
@@ -2031,22 +2060,27 @@ fn analyze_block_expr(
     block: &Block,
     resolver: &mut Resolver,
     mut ctx: Option<&mut InferenceContext>,
-) -> Result<Type> {
+    diag: &mut DiagCtxt,
+) -> Type {
     resolver.push_scope();
 
     let stmts = &block.stmts;
 
     if stmts.is_empty() {
-        return Err(sem_err(
+        diag.emit(sem_err(
             "block expression must end with a `yield` statement",
         ));
+        resolver.pop_scope();
+        return Type::Error;
     }
 
     // Check that the last statement is Yield
     if !matches!(stmts.last(), Some(Stmt::Yield(_))) {
-        return Err(sem_err(
+        diag.emit(sem_err(
             "block expression must end with a `yield` statement",
         ));
+        resolver.pop_scope();
+        return Type::Error;
     }
 
     let mut yield_type = Type::I32; // will be overwritten
@@ -2056,26 +2090,30 @@ fn analyze_block_expr(
 
         // Return is not allowed in block expressions
         if matches!(stmt, Stmt::Return(_)) {
-            return Err(sem_err("`return` cannot be used inside a block expression"));
+            diag.emit(sem_err("`return` cannot be used inside a block expression"));
+            resolver.pop_scope();
+            return Type::Error;
         }
 
         // Yield is only allowed as the last statement
         if matches!(stmt, Stmt::Yield(_)) && !is_last {
-            return Err(sem_err(
+            diag.emit(sem_err(
                 "`yield` must be the last statement in the block expression",
             ));
+            resolver.pop_scope();
+            return Type::Error;
         }
 
-        analyze_stmt(stmt, resolver, ctx.as_deref_mut())?;
+        analyze_stmt(stmt, resolver, ctx.as_deref_mut(), diag);
 
         // If this is the Yield statement, get the type
         if let Stmt::Yield(expr) = stmt {
-            yield_type = analyze_expr(expr, resolver, ctx.as_deref_mut())?;
+            yield_type = analyze_expr(expr, resolver, ctx.as_deref_mut(), diag);
         }
     }
 
     resolver.pop_scope();
-    Ok(yield_type)
+    yield_type
 }
 
 /// Analyze a control block (if then/else) — yield and return both allowed.
@@ -2084,14 +2122,15 @@ fn analyze_control_block(
     block: &Block,
     resolver: &mut Resolver,
     mut ctx: Option<&mut InferenceContext>,
-) -> Result<Option<Type>> {
+    diag: &mut DiagCtxt,
+) -> Option<Type> {
     resolver.push_scope();
 
     let stmts = &block.stmts;
 
     if stmts.is_empty() {
         resolver.pop_scope();
-        return Ok(Some(Type::Unit));
+        return Some(Type::Unit);
     }
 
     let mut result: Option<Type> = None;
@@ -2101,15 +2140,17 @@ fn analyze_control_block(
 
         // Yield is only allowed as the last statement
         if matches!(stmt, Stmt::Yield(_)) && !is_last {
-            return Err(sem_err("`yield` must be the last statement in the block"));
+            diag.emit(sem_err("`yield` must be the last statement in the block"));
+            resolver.pop_scope();
+            return Some(Type::Error);
         }
 
-        analyze_stmt(stmt, resolver, ctx.as_deref_mut())?;
+        analyze_stmt(stmt, resolver, ctx.as_deref_mut(), diag);
 
         if is_last {
             match stmt {
                 Stmt::Yield(expr) => {
-                    let ty = analyze_expr(expr, resolver, ctx.as_deref_mut())?;
+                    let ty = analyze_expr(expr, resolver, ctx.as_deref_mut(), diag);
                     result = Some(ty);
                 }
                 Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue => {
@@ -2124,7 +2165,7 @@ fn analyze_control_block(
     }
 
     resolver.pop_scope();
-    Ok(result)
+    result
 }
 
 /// Analyze a loop body block — return allowed, yield forbidden.
@@ -2132,39 +2173,63 @@ fn analyze_loop_block(
     block: &Block,
     resolver: &mut Resolver,
     mut ctx: Option<&mut InferenceContext>,
-) -> Result<()> {
+    diag: &mut DiagCtxt,
+) {
     resolver.push_scope();
 
     for stmt in &block.stmts {
         if matches!(stmt, Stmt::Yield(_)) {
-            return Err(sem_err("`yield` cannot be used in a while loop body"));
+            diag.emit(sem_err("`yield` cannot be used in a while loop body"));
+            resolver.pop_scope();
+            return;
         }
-        analyze_stmt(stmt, resolver, ctx.as_deref_mut())?;
+        analyze_stmt(stmt, resolver, ctx.as_deref_mut(), diag);
     }
 
     resolver.pop_scope();
-    Ok(())
 }
 
 fn analyze_stmt(
     stmt: &Stmt,
     resolver: &mut Resolver,
     mut ctx: Option<&mut InferenceContext>,
-) -> Result<()> {
+    diag: &mut DiagCtxt,
+) {
     match stmt {
         Stmt::Let { name, ty, value } => {
-            let val_ty = analyze_expr(value, resolver, ctx.as_deref_mut())?;
-            let var_ty = match ty {
-                Some(ann) => {
-                    let declared = resolve_type_checked(ann, resolver)?;
-                    if let Some(ref mut c) = ctx {
-                        c.unify(val_ty.clone(), declared.clone())?;
-                    } else {
-                        check_type_match(&declared, &val_ty)?;
-                    }
-                    declared
+            let val_ty = analyze_expr(value, resolver, ctx.as_deref_mut(), diag);
+            let var_ty = if val_ty == Type::Error {
+                // Still register the variable with the declared type if available
+                match ty {
+                    Some(ann) => match resolve_type_checked(ann, resolver) {
+                        Ok(declared) => declared,
+                        Err(e) => {
+                            diag.emit(e);
+                            Type::Error
+                        }
+                    },
+                    None => Type::Error,
                 }
-                None => val_ty,
+            } else {
+                match ty {
+                    Some(ann) => match resolve_type_checked(ann, resolver) {
+                        Ok(declared) => {
+                            if let Some(ref mut c) = ctx {
+                                if let Err(e) = c.unify(val_ty.clone(), declared.clone()) {
+                                    diag.emit(e);
+                                }
+                            } else if let Err(e) = check_type_match(&declared, &val_ty) {
+                                diag.emit(e);
+                            }
+                            declared
+                        }
+                        Err(e) => {
+                            diag.emit(e);
+                            Type::Error
+                        }
+                    },
+                    None => val_ty,
+                }
             };
             resolver.define_var(
                 name.clone(),
@@ -2175,18 +2240,38 @@ fn analyze_stmt(
             );
         }
         Stmt::Var { name, ty, value } => {
-            let val_ty = analyze_expr(value, resolver, ctx.as_deref_mut())?;
-            let var_ty = match ty {
-                Some(ann) => {
-                    let declared = resolve_type_checked(ann, resolver)?;
-                    if let Some(ref mut c) = ctx {
-                        c.unify(val_ty.clone(), declared.clone())?;
-                    } else {
-                        check_type_match(&declared, &val_ty)?;
-                    }
-                    declared
+            let val_ty = analyze_expr(value, resolver, ctx.as_deref_mut(), diag);
+            let var_ty = if val_ty == Type::Error {
+                match ty {
+                    Some(ann) => match resolve_type_checked(ann, resolver) {
+                        Ok(declared) => declared,
+                        Err(e) => {
+                            diag.emit(e);
+                            Type::Error
+                        }
+                    },
+                    None => Type::Error,
                 }
-                None => val_ty,
+            } else {
+                match ty {
+                    Some(ann) => match resolve_type_checked(ann, resolver) {
+                        Ok(declared) => {
+                            if let Some(ref mut c) = ctx {
+                                if let Err(e) = c.unify(val_ty.clone(), declared.clone()) {
+                                    diag.emit(e);
+                                }
+                            } else if let Err(e) = check_type_match(&declared, &val_ty) {
+                                diag.emit(e);
+                            }
+                            declared
+                        }
+                        Err(e) => {
+                            diag.emit(e);
+                            Type::Error
+                        }
+                    },
+                    None => val_ty,
+                }
             };
             resolver.define_var(
                 name.clone(),
@@ -2197,12 +2282,12 @@ fn analyze_stmt(
             );
         }
         Stmt::Assign { name, value } => {
-            let val_ty = analyze_expr(value, resolver, ctx.as_deref_mut())?;
+            let val_ty = analyze_expr(value, resolver, ctx.as_deref_mut(), diag);
             match resolver.lookup_var(name) {
                 None => {
                     let help = find_suggestion(name, resolver.all_variable_names())
                         .map(|s| format!("did you mean '{s}'?"));
-                    return Err(sem_err_with_help(
+                    diag.emit(sem_err_with_help(
                         format!("undefined variable `{}`", name),
                         Span { start: 0, end: 0 },
                         help,
@@ -2210,16 +2295,22 @@ fn analyze_stmt(
                 }
                 Some(info) => {
                     if !info.mutable {
-                        return Err(sem_err(format!(
+                        diag.emit(sem_err(format!(
                             "cannot assign to immutable variable `{}`",
                             name
                         )));
+                        return;
+                    }
+                    if val_ty == Type::Error {
+                        return;
                     }
                     let expected_ty = info.ty.clone();
                     if let Some(ref mut c) = ctx {
-                        c.unify(val_ty.clone(), expected_ty)?;
+                        if let Err(e) = c.unify(val_ty.clone(), expected_ty) {
+                            diag.emit(e);
+                        }
                     } else if val_ty != expected_ty {
-                        return Err(sem_err(format!(
+                        diag.emit(sem_err(format!(
                             "type mismatch in assignment: expected `{}`, found `{}`",
                             expected_ty, val_ty
                         )));
@@ -2228,16 +2319,21 @@ fn analyze_stmt(
             }
         }
         Stmt::Return(Some(expr)) => {
-            let ty = analyze_expr(expr, resolver, ctx.as_deref_mut())?;
+            let ty = analyze_expr(expr, resolver, ctx.as_deref_mut(), diag);
+            if ty == Type::Error {
+                return;
+            }
             if let Some(ref return_type) = resolver.current_return_type {
                 if let Some(ref mut c) = ctx {
                     // In inference mode, unify return value with return type
                     // (but skip TypeParam since those are generic and will be checked later)
-                    if !matches!(return_type, Type::TypeParam { .. }) {
-                        c.unify(ty.clone(), return_type.clone())?;
+                    if !matches!(return_type, Type::TypeParam { .. })
+                        && let Err(e) = c.unify(ty.clone(), return_type.clone())
+                    {
+                        diag.emit(e);
                     }
                 } else if !types_compatible(&ty, return_type) {
-                    return Err(sem_err(format!(
+                    diag.emit(sem_err(format!(
                         "return type mismatch: expected `{}`, found `{}`",
                         return_type, ty
                     )));
@@ -2248,36 +2344,45 @@ fn analyze_stmt(
             if let Some(ref return_type) = resolver.current_return_type
                 && !types_compatible(&Type::Unit, return_type)
             {
-                return Err(sem_err(format!(
+                diag.emit(sem_err(format!(
                     "return type mismatch: expected `{}`, found `()`",
                     return_type
                 )));
             }
         }
         Stmt::Yield(expr) => {
-            let _ty = analyze_expr(expr, resolver, ctx.as_deref_mut())?;
+            let _ty = analyze_expr(expr, resolver, ctx.as_deref_mut(), diag);
         }
         Stmt::Expr(expr) => {
-            let _ty = analyze_expr(expr, resolver, ctx.as_deref_mut())?;
+            let _ty = analyze_expr(expr, resolver, ctx.as_deref_mut(), diag);
         }
         Stmt::Break(opt_expr) => {
             if !resolver.in_loop() {
-                return Err(sem_err("break outside of loop"));
+                diag.emit(sem_err("break outside of loop"));
+                return;
             }
             let break_ty = match opt_expr {
-                Some(expr) => analyze_expr(expr, resolver, ctx.as_deref_mut())?,
+                Some(expr) => {
+                    let ty = analyze_expr(expr, resolver, ctx.as_deref_mut(), diag);
+                    if ty == Type::Error {
+                        return;
+                    }
+                    ty
+                }
                 None => Type::Unit,
             };
             if let Some(ref mut c) = ctx {
                 // In inference mode, unify with existing break type instead of equality check
-                resolver.set_or_unify_break_type(break_ty, c)?;
-            } else {
-                resolver.set_break_type(break_ty)?;
+                if let Err(e) = resolver.set_or_unify_break_type(break_ty, c) {
+                    diag.emit(e);
+                }
+            } else if let Err(e) = resolver.set_break_type(break_ty) {
+                diag.emit(e);
             }
         }
         Stmt::Continue => {
             if !resolver.in_loop() {
-                return Err(sem_err("continue outside of loop"));
+                diag.emit(sem_err("continue outside of loop"));
             }
         }
         Stmt::FieldAssign {
@@ -2285,31 +2390,36 @@ fn analyze_stmt(
             field,
             value,
         } => {
-            let obj_ty = analyze_expr(object, resolver, ctx.as_deref_mut())?;
-            let val_ty = analyze_expr(value, resolver, ctx.as_deref_mut())?;
+            let obj_ty = analyze_expr(object, resolver, ctx.as_deref_mut(), diag);
+            let val_ty = analyze_expr(value, resolver, ctx.as_deref_mut(), diag);
+            if obj_ty == Type::Error || val_ty == Type::Error {
+                return;
+            }
             match &obj_ty {
                 Type::Struct(struct_name) => {
-                    let struct_info = resolver
-                        .lookup_struct(struct_name)
-                        .ok_or_else(|| {
+                    let struct_info = match resolver.lookup_struct(struct_name) {
+                        Some(s) => s.clone(),
+                        None => {
                             let help = find_suggestion(struct_name, resolver.all_struct_names())
                                 .map(|s| format!("did you mean '{s}'?"));
-                            sem_err_with_help(
+                            diag.emit(sem_err_with_help(
                                 format!("undefined struct `{}`", struct_name),
                                 Span { start: 0, end: 0 },
                                 help,
-                            )
-                        })?
-                        .clone();
+                            ));
+                            return;
+                        }
+                    };
                     let field_ty = if let Some(&idx) = struct_info.field_index.get(field.as_str()) {
                         struct_info.fields[idx].1.clone()
                     } else if let Some(&idx) = struct_info.computed_index.get(field.as_str()) {
                         let prop = &struct_info.computed[idx];
                         if !prop.has_setter {
-                            return Err(sem_err(format!(
+                            diag.emit(sem_err(format!(
                                 "computed property `{}` is read-only (no setter)",
                                 field
                             )));
+                            return;
                         }
                         prop.ty.clone()
                     } else {
@@ -2322,35 +2432,41 @@ fn analyze_stmt(
                                 .map(|s| s.as_str()),
                         )
                         .map(|s| format!("did you mean '{s}'?"));
-                        return Err(sem_err_with_help(
+                        diag.emit(sem_err_with_help(
                             format!("struct `{}` has no field `{}`", struct_name, field),
                             Span { start: 0, end: 0 },
                             help,
                         ));
+                        return;
                     };
                     if let Some(ref mut c) = ctx {
-                        c.unify(val_ty.clone(), field_ty)?;
+                        if let Err(e) = c.unify(val_ty.clone(), field_ty) {
+                            diag.emit(e);
+                        }
                     } else if val_ty != field_ty {
-                        return Err(sem_err(format!(
+                        diag.emit(sem_err(format!(
                             "type mismatch in field assignment: expected `{}`, found `{}`",
                             field_ty, val_ty
                         )));
                     }
-                    check_assignment_target_mutable(object, resolver)?;
+                    if let Err(e) = check_assignment_target_mutable(object, resolver) {
+                        diag.emit(e);
+                    }
                 }
                 Type::Generic { name, args } => {
-                    let struct_info = resolver
-                        .lookup_struct(name)
-                        .ok_or_else(|| {
+                    let struct_info = match resolver.lookup_struct(name) {
+                        Some(s) => s.clone(),
+                        None => {
                             let help = find_suggestion(name, resolver.all_struct_names())
                                 .map(|s| format!("did you mean '{s}'?"));
-                            sem_err_with_help(
+                            diag.emit(sem_err_with_help(
                                 format!("undefined struct `{}`", name),
                                 Span { start: 0, end: 0 },
                                 help,
-                            )
-                        })?
-                        .clone();
+                            ));
+                            return;
+                        }
+                    };
                     let subst: HashMap<String, Type> = struct_info
                         .type_params
                         .iter()
@@ -2362,10 +2478,11 @@ fn analyze_stmt(
                     } else if let Some(&idx) = struct_info.computed_index.get(field.as_str()) {
                         let prop = &struct_info.computed[idx];
                         if !prop.has_setter {
-                            return Err(sem_err(format!(
+                            diag.emit(sem_err(format!(
                                 "computed property `{}` is read-only (no setter)",
                                 field
                             )));
+                            return;
                         }
                         substitute_type(&prop.ty, &subst)
                     } else {
@@ -2378,24 +2495,29 @@ fn analyze_stmt(
                                 .map(|s| s.as_str()),
                         )
                         .map(|s| format!("did you mean '{s}'?"));
-                        return Err(sem_err_with_help(
+                        diag.emit(sem_err_with_help(
                             format!("struct `{}` has no field `{}`", name, field),
                             Span { start: 0, end: 0 },
                             help,
                         ));
+                        return;
                     };
                     if let Some(ref mut c) = ctx {
-                        c.unify(val_ty.clone(), field_ty)?;
+                        if let Err(e) = c.unify(val_ty.clone(), field_ty) {
+                            diag.emit(e);
+                        }
                     } else if val_ty != field_ty {
-                        return Err(sem_err(format!(
+                        diag.emit(sem_err(format!(
                             "type mismatch in field assignment: expected `{}`, found `{}`",
                             field_ty, val_ty
                         )));
                     }
-                    check_assignment_target_mutable(object, resolver)?;
+                    if let Err(e) = check_assignment_target_mutable(object, resolver) {
+                        diag.emit(e);
+                    }
                 }
                 _ => {
-                    return Err(sem_err(format!(
+                    diag.emit(sem_err(format!(
                         "field assignment on non-struct type `{}`",
                         obj_ty
                     )));
@@ -2407,21 +2529,27 @@ fn analyze_stmt(
             index,
             value,
         } => {
-            let obj_ty = analyze_expr(object, resolver, ctx.as_deref_mut())?;
-            let idx_ty = analyze_expr(index, resolver, ctx.as_deref_mut())?;
-            let val_ty = analyze_expr(value, resolver, ctx.as_deref_mut())?;
+            let obj_ty = analyze_expr(object, resolver, ctx.as_deref_mut(), diag);
+            let idx_ty = analyze_expr(index, resolver, ctx.as_deref_mut(), diag);
+            let val_ty = analyze_expr(value, resolver, ctx.as_deref_mut(), diag);
+            if obj_ty == Type::Error || idx_ty == Type::Error || val_ty == Type::Error {
+                return;
+            }
             match &obj_ty {
                 Type::Array { element, size } => {
                     if !idx_ty.is_integer() {
-                        return Err(sem_err(format!(
+                        diag.emit(sem_err(format!(
                             "array index must be an integer type, found '{}'",
                             idx_ty
                         )));
+                        return;
                     }
                     if let Some(ref mut c) = ctx {
-                        c.unify(val_ty.clone(), *element.clone())?;
+                        if let Err(e) = c.unify(val_ty.clone(), *element.clone()) {
+                            diag.emit(e);
+                        }
                     } else if val_ty != **element {
-                        return Err(sem_err(format!(
+                        diag.emit(sem_err(format!(
                             "type mismatch in index assignment: expected '{}', found '{}'",
                             element, val_ty
                         )));
@@ -2430,7 +2558,7 @@ fn analyze_stmt(
                     if let ExprKind::Number(n) = &index.kind {
                         let idx = *n;
                         if idx < 0 || idx as u64 >= *size {
-                            return Err(sem_err(format!(
+                            diag.emit(sem_err(format!(
                                 "array index {} is out of bounds for array of size {}",
                                 idx, size
                             )));
@@ -2440,7 +2568,7 @@ fn analyze_stmt(
                     match &object.kind {
                         ExprKind::Ident(name) => match resolver.lookup_var(name) {
                             Some(info) if !info.mutable => {
-                                return Err(sem_err(format!(
+                                diag.emit(sem_err(format!(
                                     "cannot assign to index of immutable variable '{}'",
                                     name
                                 )));
@@ -2449,7 +2577,7 @@ fn analyze_stmt(
                             None => {
                                 let help = find_suggestion(name, resolver.all_variable_names())
                                     .map(|s| format!("did you mean '{s}'?"));
-                                return Err(sem_err_with_help(
+                                diag.emit(sem_err_with_help(
                                     format!("undefined variable '{}'", name),
                                     Span { start: 0, end: 0 },
                                     help,
@@ -2457,26 +2585,24 @@ fn analyze_stmt(
                             }
                         },
                         _ => {
-                            return Err(sem_err(
-                                "cannot assign to index of non-variable expression",
-                            ));
+                            diag.emit(sem_err("cannot assign to index of non-variable expression"));
                         }
                     }
                 }
                 _ => {
-                    return Err(sem_err(format!("cannot index into type '{}'", obj_ty)));
+                    diag.emit(sem_err(format!("cannot index into type '{}'", obj_ty)));
                 }
             }
         }
     }
-    Ok(())
 }
 
 fn analyze_expr(
     expr: &Expr,
     resolver: &mut Resolver,
     mut ctx: Option<&mut InferenceContext>,
-) -> Result<Type> {
+    diag: &mut DiagCtxt,
+) -> Type {
     match &expr.kind {
         ExprKind::Number(n) => {
             if let Some(ref mut c) = ctx {
@@ -2484,80 +2610,98 @@ fn analyze_expr(
                 // the range check until after the concrete type is resolved.
                 let id = c.fresh_integer();
                 c.register_int_range_check(id, *n);
-                Ok(Type::IntegerLiteral(id))
+                Type::IntegerLiteral(id)
             } else {
                 if *n < i32::MIN as i64 || *n > i32::MAX as i64 {
-                    return Err(sem_err(format!(
+                    diag.emit(sem_err(format!(
                         "integer literal `{}` is out of range for `Int32`",
                         n
                     )));
+                    return Type::Error;
                 }
-                Ok(Type::I32)
+                Type::I32
             }
         }
-        ExprKind::Bool(_) => Ok(Type::Bool),
+        ExprKind::Bool(_) => Type::Bool,
         ExprKind::Ident(name) => match resolver.lookup_var(name) {
-            Some(info) => Ok(info.ty.clone()),
+            Some(info) => info.ty.clone(),
             None => {
                 let help = find_suggestion(name, resolver.all_variable_names())
                     .map(|s| format!("did you mean '{s}'?"));
-                Err(sem_err_with_help(
+                diag.emit(sem_err_with_help(
                     format!("undefined variable `{}`", name),
                     expr.span,
                     help,
-                ))
+                ));
+                Type::Error
             }
         },
         ExprKind::UnaryOp { op, operand } => {
-            let operand_ty = analyze_expr(operand, resolver, ctx.as_deref_mut())?;
+            let operand_ty = analyze_expr(operand, resolver, ctx.as_deref_mut(), diag);
+            if operand_ty == Type::Error {
+                return Type::Error;
+            }
             match op {
                 UnaryOp::Not => {
                     if operand_ty != Type::Bool {
-                        return Err(sem_err("operand of `!` must be `Bool`"));
+                        diag.emit(sem_err("operand of `!` must be `Bool`"));
+                        return Type::Error;
                     }
-                    Ok(Type::Bool)
+                    Type::Bool
                 }
             }
         }
         ExprKind::BinaryOp { op, left, right } => {
-            let left_ty = analyze_expr(left, resolver, ctx.as_deref_mut())?;
-            let right_ty = analyze_expr(right, resolver, ctx.as_deref_mut())?;
+            let left_ty = analyze_expr(left, resolver, ctx.as_deref_mut(), diag);
+            let right_ty = analyze_expr(right, resolver, ctx.as_deref_mut(), diag);
+            if left_ty == Type::Error || right_ty == Type::Error {
+                return Type::Error;
+            }
             match op {
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
                     if let Some(ref mut c) = ctx {
                         // In inference mode, unify left and right operands
-                        c.unify(left_ty.clone(), right_ty.clone())?;
-                        Ok(left_ty)
+                        if let Err(e) = c.unify(left_ty.clone(), right_ty.clone()) {
+                            diag.emit(e);
+                            return Type::Error;
+                        }
+                        left_ty
                     } else {
                         if !left_ty.is_numeric() || left_ty != right_ty {
-                            return Err(sem_err(format!(
+                            diag.emit(sem_err(format!(
                                 "arithmetic operation requires matching numeric operands, found `{}` and `{}`",
                                 left_ty, right_ty
                             )));
+                            return Type::Error;
                         }
-                        Ok(left_ty)
+                        left_ty
                     }
                 }
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                     if let Some(ref mut c) = ctx {
-                        c.unify(left_ty.clone(), right_ty.clone())?;
-                        Ok(Type::Bool)
+                        if let Err(e) = c.unify(left_ty.clone(), right_ty.clone()) {
+                            diag.emit(e);
+                            return Type::Error;
+                        }
+                        Type::Bool
                     } else {
                         if !left_ty.is_numeric() || left_ty != right_ty {
-                            return Err(sem_err(format!(
+                            diag.emit(sem_err(format!(
                                 "comparison requires matching numeric operands, found `{}` and `{}`",
                                 left_ty, right_ty
                             )));
+                            return Type::Error;
                         }
-                        Ok(Type::Bool)
+                        Type::Bool
                     }
                 }
                 // Logical: bool x bool → bool
                 BinOp::And | BinOp::Or => {
                     if left_ty != Type::Bool || right_ty != Type::Bool {
-                        return Err(sem_err("logical operation requires `Bool` operands"));
+                        diag.emit(sem_err("logical operation requires `Bool` operands"));
+                        return Type::Error;
                     }
-                    Ok(Type::Bool)
+                    Type::Bool
                 }
             }
         }
@@ -2573,40 +2717,59 @@ fn analyze_expr(
                 let struct_info = struct_info.clone();
                 if struct_info.init.params.is_empty() {
                     resolver.record_struct_init_call(expr.id);
-                    return Ok(Type::Struct(name.clone()));
+                    return Type::Struct(name.clone());
                 } else {
-                    return Err(sem_err(format!(
+                    diag.emit(sem_err(format!(
                         "struct `{}` initializer expects {} arguments, but 0 were given",
                         name,
                         struct_info.init.params.len()
                     )));
+                    return Type::Error;
                 }
             }
-            let sig = resolver
-                .lookup_func(name)
-                .ok_or_else(|| {
+            let sig = match resolver.lookup_func(name) {
+                Some(s) => s.clone(),
+                None => {
                     let help = find_suggestion(name, resolver.all_function_names())
                         .map(|s| format!("did you mean '{s}'?"));
-                    sem_err_with_help(format!("undefined function `{}`", name), expr.span, help)
-                })?
-                .clone();
+                    diag.emit(sem_err_with_help(
+                        format!("undefined function `{}`", name),
+                        expr.span,
+                        help,
+                    ));
+                    return Type::Error;
+                }
+            };
             if args.len() != sig.params.len() {
-                return Err(sem_err(format!(
+                diag.emit(sem_err(format!(
                     "function `{}` expects {} arguments, but {} were given",
                     name,
                     sig.params.len(),
                     args.len()
                 )));
+                return Type::Error;
             }
 
             // Build type param substitution map
             let subst: HashMap<String, Type> = if !type_args.is_empty() {
                 // Explicit type args provided
-                sig.type_params
-                    .iter()
-                    .zip(type_args.iter())
-                    .map(|(tp, ta)| Ok((tp.name.clone(), resolve_type_checked(ta, resolver)?)))
-                    .collect::<Result<HashMap<_, _>>>()?
+                let mut map = HashMap::new();
+                let mut failed = false;
+                for (tp, ta) in sig.type_params.iter().zip(type_args.iter()) {
+                    match resolve_type_checked(ta, resolver) {
+                        Ok(resolved) => {
+                            map.insert(tp.name.clone(), resolved);
+                        }
+                        Err(e) => {
+                            diag.emit(e);
+                            failed = true;
+                        }
+                    }
+                }
+                if failed {
+                    return Type::Error;
+                }
+                map
             } else if !sig.type_params.is_empty() {
                 if let Some(ref mut c) = ctx {
                     // Inference mode: create InferVars for each type param
@@ -2640,8 +2803,13 @@ fn analyze_expr(
                 HashMap::new()
             };
 
+            let mut any_arg_error = false;
             for (arg, (param_name, expected_ty)) in args.iter().zip(sig.params.iter()) {
-                let arg_ty = analyze_expr(arg, resolver, ctx.as_deref_mut())?;
+                let arg_ty = analyze_expr(arg, resolver, ctx.as_deref_mut(), diag);
+                if arg_ty == Type::Error {
+                    any_arg_error = true;
+                    continue;
+                }
                 let effective_ty = substitute_type(expected_ty, &subst);
                 if let Some(ref mut c) = ctx {
                     if let Type::InferVar(id) = &effective_ty {
@@ -2659,63 +2827,84 @@ fn analyze_expr(
                         );
                     }
                     // In inference mode, unify arg type with expected parameter type
-                    c.unify(arg_ty.clone(), effective_ty)?;
+                    if let Err(e) = c.unify(arg_ty.clone(), effective_ty) {
+                        diag.emit(e);
+                        any_arg_error = true;
+                    }
                 } else if !types_compatible(&arg_ty, &effective_ty) {
-                    return Err(sem_err(format!(
+                    diag.emit(sem_err(format!(
                         "argument type mismatch: expected `{}`, found `{}`",
                         effective_ty, arg_ty
                     )));
+                    any_arg_error = true;
                 }
             }
-            Ok(substitute_type(&sig.return_type, &subst))
+            if any_arg_error {
+                return Type::Error;
+            }
+            substitute_type(&sig.return_type, &subst)
         }
-        ExprKind::Block(block) => analyze_block_expr(block, resolver, ctx),
+        ExprKind::Block(block) => analyze_block_expr(block, resolver, ctx, diag),
         ExprKind::If {
             condition,
             then_block,
             else_block,
         } => {
-            let cond_ty = analyze_expr(condition, resolver, ctx.as_deref_mut())?;
+            let cond_ty = analyze_expr(condition, resolver, ctx.as_deref_mut(), diag);
+            if cond_ty == Type::Error {
+                return Type::Error;
+            }
             if cond_ty != Type::Bool {
-                return Err(sem_err("if condition must be `Bool`"));
+                diag.emit(sem_err("if condition must be `Bool`"));
+                return Type::Error;
             }
 
-            let then_ty = analyze_control_block(then_block, resolver, ctx.as_deref_mut())?;
+            let then_ty = analyze_control_block(then_block, resolver, ctx.as_deref_mut(), diag);
 
             match else_block {
                 Some(else_blk) => {
-                    let else_ty = analyze_control_block(else_blk, resolver, ctx.as_deref_mut())?;
+                    let else_ty =
+                        analyze_control_block(else_blk, resolver, ctx.as_deref_mut(), diag);
                     // Type merging with divergence
                     match (then_ty, else_ty) {
                         (Some(t1), Some(t2)) => {
+                            if t1 == Type::Error || t2 == Type::Error {
+                                return Type::Error;
+                            }
                             if let Some(ref mut c) = ctx {
-                                c.unify(t1.clone(), t2.clone())?;
-                                Ok(t1)
+                                if let Err(e) = c.unify(t1.clone(), t2.clone()) {
+                                    diag.emit(e);
+                                    return Type::Error;
+                                }
+                                t1
                             } else {
                                 if t1 != t2 {
-                                    return Err(sem_err(format!(
+                                    diag.emit(sem_err(format!(
                                         "if/else branch type mismatch: `{}` vs `{}`",
                                         t1, t2
                                     )));
+                                    return Type::Error;
                                 }
-                                Ok(t1)
+                                t1
                             }
                         }
-                        (None, Some(t)) => Ok(t), // then diverges, use else type
-                        (Some(t), None) => Ok(t), // else diverges, use then type
-                        (None, None) => Ok(Type::Unit), // both diverge
+                        (None, Some(t)) => t, // then diverges, use else type
+                        (Some(t), None) => t, // else diverges, use then type
+                        (None, None) => Type::Unit, // both diverge
                     }
                 }
                 None => {
                     // if without else: type is Unit
                     if let Some(ref ty) = then_ty
                         && *ty != Type::Unit
+                        && *ty != Type::Error
                     {
-                        return Err(sem_err(
+                        diag.emit(sem_err(
                             "if without else must have unit type (use `yield` in both branches for a value)",
                         ));
+                        return Type::Error;
                     }
-                    Ok(Type::Unit)
+                    Type::Unit
                 }
             }
         }
@@ -2724,51 +2913,64 @@ fn analyze_expr(
             body,
             nobreak,
         } => {
-            let cond_ty = analyze_expr(condition, resolver, ctx.as_deref_mut())?;
+            let cond_ty = analyze_expr(condition, resolver, ctx.as_deref_mut(), diag);
+            if cond_ty == Type::Error {
+                return Type::Error;
+            }
             if cond_ty != Type::Bool {
-                return Err(sem_err("while condition must be `Bool`"));
+                diag.emit(sem_err("while condition must be `Bool`"));
+                return Type::Error;
             }
             let is_while_true = condition.kind == ExprKind::Bool(true);
 
             resolver.enter_loop();
-            analyze_loop_block(body, resolver, ctx.as_deref_mut())?;
+            analyze_loop_block(body, resolver, ctx.as_deref_mut(), diag);
             let break_ty = resolver.exit_loop();
 
             let while_ty = break_ty.unwrap_or(Type::Unit);
 
             match (is_while_true, nobreak) {
                 (true, Some(_)) => {
-                    return Err(sem_err("`nobreak` is unreachable in `while true`"));
+                    diag.emit(sem_err("`nobreak` is unreachable in `while true`"));
+                    return Type::Error;
                 }
                 (false, None) if while_ty != Type::Unit => {
-                    return Err(sem_err(
+                    diag.emit(sem_err(
                         "`while` with non-unit break requires `nobreak` block",
                     ));
+                    return Type::Error;
                 }
                 (false, Some(nobreak_block)) => {
                     let nobreak_ty =
-                        analyze_control_block(nobreak_block, resolver, ctx.as_deref_mut())?;
+                        analyze_control_block(nobreak_block, resolver, ctx.as_deref_mut(), diag);
                     if let Some(t) = nobreak_ty {
+                        if t == Type::Error {
+                            return Type::Error;
+                        }
                         if let Some(ref mut c) = ctx {
-                            c.unify(t.clone(), while_ty.clone())?;
+                            if let Err(e) = c.unify(t.clone(), while_ty.clone()) {
+                                diag.emit(e);
+                                return Type::Error;
+                            }
                         } else if t != while_ty {
-                            return Err(sem_err(format!(
+                            diag.emit(sem_err(format!(
                                 "nobreak type `{}` does not match while type `{}`",
                                 t, while_ty
                             )));
+                            return Type::Error;
                         }
                     }
                 }
                 _ => {}
             }
 
-            Ok(while_ty)
+            while_ty
         }
         ExprKind::Float(_) => {
             if let Some(ref mut c) = ctx {
-                Ok(Type::FloatLiteral(c.fresh_float()))
+                Type::FloatLiteral(c.fresh_float())
             } else {
-                Ok(Type::F64)
+                Type::F64
             }
         }
         ExprKind::StructInit {
@@ -2776,37 +2978,50 @@ fn analyze_expr(
             type_args,
             args,
         } => {
-            let struct_info = resolver
-                .lookup_struct(name)
-                .ok_or_else(|| {
+            let struct_info = match resolver.lookup_struct(name) {
+                Some(s) => s.clone(),
+                None => {
                     let help = find_suggestion(name, resolver.all_struct_names())
                         .map(|s| format!("did you mean '{s}'?"));
-                    sem_err_with_help(
+                    diag.emit(sem_err_with_help(
                         format!("undefined struct `{}`", name),
                         Span { start: 0, end: 0 },
                         help,
-                    )
-                })?
-                .clone();
+                    ));
+                    return Type::Error;
+                }
+            };
             let init = &struct_info.init;
             if args.len() != init.params.len() {
-                return Err(sem_err(format!(
+                diag.emit(sem_err(format!(
                     "struct `{}` initializer expects {} arguments, but {} were given",
                     name,
                     init.params.len(),
                     args.len()
                 )));
+                return Type::Error;
             }
 
             // Build type param substitution map
             let subst: HashMap<String, Type> = if !type_args.is_empty() {
                 // Explicit type args provided
-                struct_info
-                    .type_params
-                    .iter()
-                    .zip(type_args.iter())
-                    .map(|(tp, ta)| Ok((tp.name.clone(), resolve_type_checked(ta, resolver)?)))
-                    .collect::<Result<HashMap<_, _>>>()?
+                let mut map = HashMap::new();
+                let mut failed = false;
+                for (tp, ta) in struct_info.type_params.iter().zip(type_args.iter()) {
+                    match resolve_type_checked(ta, resolver) {
+                        Ok(resolved) => {
+                            map.insert(tp.name.clone(), resolved);
+                        }
+                        Err(e) => {
+                            diag.emit(e);
+                            failed = true;
+                        }
+                    }
+                }
+                if failed {
+                    return Type::Error;
+                }
+                map
             } else if !struct_info.type_params.is_empty() {
                 if let Some(ref mut c) = ctx {
                     // Inference mode: create InferVars for each type param
@@ -2841,14 +3056,21 @@ fn analyze_expr(
                 HashMap::new()
             };
 
+            let mut any_arg_error = false;
             for ((label, arg_expr), (param_name, param_ty)) in args.iter().zip(init.params.iter()) {
                 if label != param_name {
-                    return Err(sem_err(format!(
+                    diag.emit(sem_err(format!(
                         "expected argument label `{}`, found `{}`",
                         param_name, label
                     )));
+                    any_arg_error = true;
+                    continue;
                 }
-                let arg_ty = analyze_expr(arg_expr, resolver, ctx.as_deref_mut())?;
+                let arg_ty = analyze_expr(arg_expr, resolver, ctx.as_deref_mut(), diag);
+                if arg_ty == Type::Error {
+                    any_arg_error = true;
+                    continue;
+                }
                 let effective_ty = substitute_type(param_ty, &subst);
                 if let Some(ref mut c) = ctx {
                     if let Type::InferVar(id) = &effective_ty {
@@ -2865,18 +3087,25 @@ fn analyze_expr(
                             },
                         );
                     }
-                    c.unify(arg_ty.clone(), effective_ty)?;
+                    if let Err(e) = c.unify(arg_ty.clone(), effective_ty) {
+                        diag.emit(e);
+                        any_arg_error = true;
+                    }
                 } else if !types_compatible(&arg_ty, &effective_ty) {
-                    return Err(sem_err(format!(
+                    diag.emit(sem_err(format!(
                         "argument type mismatch: expected `{}`, found `{}`",
                         effective_ty, arg_ty
                     )));
+                    any_arg_error = true;
                 }
+            }
+            if any_arg_error {
+                return Type::Error;
             }
 
             // Build the result type
             if subst.is_empty() && struct_info.type_params.is_empty() {
-                Ok(Type::Struct(name.clone()))
+                Type::Struct(name.clone())
             } else if !subst.is_empty() {
                 let args: Vec<Type> = struct_info
                     .type_params
@@ -2891,34 +3120,38 @@ fn analyze_expr(
                             })
                     })
                     .collect();
-                Ok(Type::Generic {
+                Type::Generic {
                     name: name.clone(),
                     args,
-                })
+                }
             } else {
-                Ok(Type::Struct(name.clone()))
+                Type::Struct(name.clone())
             }
         }
         ExprKind::FieldAccess { object, field } => {
-            let obj_ty = analyze_expr(object, resolver, ctx.as_deref_mut())?;
+            let obj_ty = analyze_expr(object, resolver, ctx.as_deref_mut(), diag);
+            if obj_ty == Type::Error {
+                return Type::Error;
+            }
             match &obj_ty {
                 Type::Struct(struct_name) => {
-                    let struct_info = resolver
-                        .lookup_struct(struct_name)
-                        .ok_or_else(|| {
+                    let struct_info = match resolver.lookup_struct(struct_name) {
+                        Some(s) => s.clone(),
+                        None => {
                             let help = find_suggestion(struct_name, resolver.all_struct_names())
                                 .map(|s| format!("did you mean '{s}'?"));
-                            sem_err_with_help(
+                            diag.emit(sem_err_with_help(
                                 format!("undefined struct `{}`", struct_name),
                                 Span { start: 0, end: 0 },
                                 help,
-                            )
-                        })?
-                        .clone();
+                            ));
+                            return Type::Error;
+                        }
+                    };
                     if let Some(&idx) = struct_info.field_index.get(field.as_str()) {
-                        Ok(struct_info.fields[idx].1.clone())
+                        struct_info.fields[idx].1.clone()
                     } else if let Some(&idx) = struct_info.computed_index.get(field.as_str()) {
-                        Ok(struct_info.computed[idx].ty.clone())
+                        struct_info.computed[idx].ty.clone()
                     } else {
                         let help = find_suggestion(
                             field,
@@ -2929,26 +3162,28 @@ fn analyze_expr(
                                 .map(|s| s.as_str()),
                         )
                         .map(|s| format!("did you mean '{s}'?"));
-                        Err(sem_err_with_help(
+                        diag.emit(sem_err_with_help(
                             format!("struct `{}` has no field `{}`", struct_name, field),
                             expr.span,
                             help,
-                        ))
+                        ));
+                        Type::Error
                     }
                 }
                 Type::Generic { name, args } => {
-                    let struct_info = resolver
-                        .lookup_struct(name)
-                        .ok_or_else(|| {
+                    let struct_info = match resolver.lookup_struct(name) {
+                        Some(s) => s.clone(),
+                        None => {
                             let help = find_suggestion(name, resolver.all_struct_names())
                                 .map(|s| format!("did you mean '{s}'?"));
-                            sem_err_with_help(
+                            diag.emit(sem_err_with_help(
                                 format!("undefined struct `{}`", name),
                                 Span { start: 0, end: 0 },
                                 help,
-                            )
-                        })?
-                        .clone();
+                            ));
+                            return Type::Error;
+                        }
+                    };
                     let subst: HashMap<String, Type> = struct_info
                         .type_params
                         .iter()
@@ -2956,9 +3191,9 @@ fn analyze_expr(
                         .map(|(tp, arg)| (tp.name.clone(), arg.clone()))
                         .collect();
                     if let Some(&idx) = struct_info.field_index.get(field.as_str()) {
-                        Ok(substitute_type(&struct_info.fields[idx].1, &subst))
+                        substitute_type(&struct_info.fields[idx].1, &subst)
                     } else if let Some(&idx) = struct_info.computed_index.get(field.as_str()) {
-                        Ok(substitute_type(&struct_info.computed[idx].ty, &subst))
+                        substitute_type(&struct_info.computed[idx].ty, &subst)
                     } else {
                         let help = find_suggestion(
                             field,
@@ -2969,56 +3204,77 @@ fn analyze_expr(
                                 .map(|s| s.as_str()),
                         )
                         .map(|s| format!("did you mean '{s}'?"));
-                        Err(sem_err_with_help(
+                        diag.emit(sem_err_with_help(
                             format!("struct `{}` has no field `{}`", name, field),
                             expr.span,
                             help,
-                        ))
+                        ));
+                        Type::Error
                     }
                 }
-                _ => Err(sem_err(format!(
-                    "field access on non-struct type `{}`",
-                    obj_ty
-                ))),
+                _ => {
+                    diag.emit(sem_err(format!(
+                        "field access on non-struct type `{}`",
+                        obj_ty
+                    )));
+                    Type::Error
+                }
             }
         }
         ExprKind::SelfRef => match &resolver.self_context {
-            Some(ctx) => Ok(Type::Struct(ctx.struct_name.clone())),
-            None => Err(sem_err(
-                "`self` can only be used inside struct initializers, computed properties, or methods",
-            )),
+            Some(ctx) => Type::Struct(ctx.struct_name.clone()),
+            None => {
+                diag.emit(sem_err(
+                    "`self` can only be used inside struct initializers, computed properties, or methods",
+                ));
+                Type::Error
+            }
         },
         ExprKind::Cast { expr, target_type } => {
-            let source_ty = analyze_expr(expr, resolver, ctx.as_deref_mut())?;
-            let target_ty = resolve_type_checked(target_type, resolver)?;
+            let source_ty = analyze_expr(expr, resolver, ctx.as_deref_mut(), diag);
+            if source_ty == Type::Error {
+                return Type::Error;
+            }
+            let target_ty = match resolve_type_checked(target_type, resolver) {
+                Ok(t) => t,
+                Err(e) => {
+                    diag.emit(e);
+                    return Type::Error;
+                }
+            };
             if !source_ty.is_numeric() || !target_ty.is_numeric() {
-                return Err(sem_err(format!(
+                diag.emit(sem_err(format!(
                     "cannot cast `{}` to `{}`",
                     source_ty, target_ty
                 )));
+                return Type::Error;
             }
-            Ok(target_ty)
+            target_ty
         }
         ExprKind::MethodCall {
             object,
             method,
             args,
         } => {
-            let obj_ty = analyze_expr(object, resolver, ctx.as_deref_mut())?;
+            let obj_ty = analyze_expr(object, resolver, ctx.as_deref_mut(), diag);
+            if obj_ty == Type::Error {
+                return Type::Error;
+            }
             match &obj_ty {
                 Type::Struct(struct_name) => {
-                    let struct_info = resolver
-                        .lookup_struct(struct_name)
-                        .ok_or_else(|| {
+                    let struct_info = match resolver.lookup_struct(struct_name) {
+                        Some(s) => s.clone(),
+                        None => {
                             let help = find_suggestion(struct_name, resolver.all_struct_names())
                                 .map(|s| format!("did you mean '{s}'?"));
-                            sem_err_with_help(
+                            diag.emit(sem_err_with_help(
                                 format!("undefined struct `{}`", struct_name),
                                 Span { start: 0, end: 0 },
                                 help,
-                            )
-                        })?
-                        .clone();
+                            ));
+                            return Type::Error;
+                        }
+                    };
                     let method_info = match struct_info.method_index.get(method.as_str()) {
                         Some(&idx) => struct_info.methods[idx].clone(),
                         None => {
@@ -3027,53 +3283,68 @@ fn analyze_expr(
                                 struct_info.method_index.keys().map(|s| s.as_str()),
                             )
                             .map(|s| format!("did you mean '{s}'?"));
-                            return Err(sem_err_with_help(
+                            diag.emit(sem_err_with_help(
                                 format!("type `{}` has no method `{}`", struct_name, method),
                                 expr.span,
                                 help,
                             ));
+                            return Type::Error;
                         }
                     };
                     if args.len() != method_info.params.len() {
-                        return Err(sem_err(format!(
+                        diag.emit(sem_err(format!(
                             "method `{}` expects {} argument(s) but {} were given",
                             method,
                             method_info.params.len(),
                             args.len()
                         )));
+                        return Type::Error;
                     }
+                    let mut any_arg_error = false;
                     for (arg, (param_name, param_ty)) in args.iter().zip(method_info.params.iter())
                     {
-                        let arg_ty = analyze_expr(arg, resolver, ctx.as_deref_mut())?;
+                        let arg_ty = analyze_expr(arg, resolver, ctx.as_deref_mut(), diag);
+                        if arg_ty == Type::Error {
+                            any_arg_error = true;
+                            continue;
+                        }
                         if let Some(ref mut c) = ctx {
-                            if !matches!(param_ty, Type::TypeParam { .. }) {
-                                c.unify(arg_ty.clone(), param_ty.clone())?;
+                            if !matches!(param_ty, Type::TypeParam { .. })
+                                && let Err(e) = c.unify(arg_ty.clone(), param_ty.clone())
+                            {
+                                diag.emit(e);
+                                any_arg_error = true;
                             }
                         } else if arg_ty != *param_ty {
-                            return Err(sem_err(format!(
+                            diag.emit(sem_err(format!(
                                 "expected `{}` but got `{}` in argument `{}` of method `{}`",
                                 param_ty, arg_ty, param_name, method
                             )));
+                            any_arg_error = true;
                         }
                     }
-                    Ok(method_info.return_type)
+                    if any_arg_error {
+                        return Type::Error;
+                    }
+                    method_info.return_type
                 }
                 Type::Generic {
                     name,
                     args: type_args,
                 } => {
-                    let struct_info = resolver
-                        .lookup_struct(name)
-                        .ok_or_else(|| {
+                    let struct_info = match resolver.lookup_struct(name) {
+                        Some(s) => s.clone(),
+                        None => {
                             let help = find_suggestion(name, resolver.all_struct_names())
                                 .map(|s| format!("did you mean '{s}'?"));
-                            sem_err_with_help(
+                            diag.emit(sem_err_with_help(
                                 format!("undefined struct `{}`", name),
                                 Span { start: 0, end: 0 },
                                 help,
-                            )
-                        })?
-                        .clone();
+                            ));
+                            return Type::Error;
+                        }
+                    };
                     // Build substitution map: type_param_name → actual type arg
                     let subst: HashMap<String, Type> = struct_info
                         .type_params
@@ -3089,154 +3360,209 @@ fn analyze_expr(
                                 struct_info.method_index.keys().map(|s| s.as_str()),
                             )
                             .map(|s| format!("did you mean '{s}'?"));
-                            return Err(sem_err_with_help(
+                            diag.emit(sem_err_with_help(
                                 format!("type `{}` has no method `{}`", name, method),
                                 expr.span,
                                 help,
                             ));
+                            return Type::Error;
                         }
                     };
                     if args.len() != method_info.params.len() {
-                        return Err(sem_err(format!(
+                        diag.emit(sem_err(format!(
                             "method `{}` expects {} argument(s) but {} were given",
                             method,
                             method_info.params.len(),
                             args.len()
                         )));
+                        return Type::Error;
                     }
+                    let mut any_arg_error = false;
                     for (arg, (param_name, param_ty)) in args.iter().zip(method_info.params.iter())
                     {
-                        let arg_ty = analyze_expr(arg, resolver, ctx.as_deref_mut())?;
+                        let arg_ty = analyze_expr(arg, resolver, ctx.as_deref_mut(), diag);
+                        if arg_ty == Type::Error {
+                            any_arg_error = true;
+                            continue;
+                        }
                         let expected_ty = substitute_type(param_ty, &subst);
                         if let Some(ref mut c) = ctx {
-                            if !matches!(expected_ty, Type::TypeParam { .. }) {
-                                c.unify(arg_ty.clone(), expected_ty)?;
+                            if !matches!(expected_ty, Type::TypeParam { .. })
+                                && let Err(e) = c.unify(arg_ty.clone(), expected_ty)
+                            {
+                                diag.emit(e);
+                                any_arg_error = true;
                             }
                         } else if arg_ty != expected_ty {
-                            return Err(sem_err(format!(
+                            diag.emit(sem_err(format!(
                                 "expected `{}` but got `{}` in argument `{}` of method `{}`",
                                 expected_ty, arg_ty, param_name, method
                             )));
+                            any_arg_error = true;
                         }
                     }
-                    Ok(substitute_type(&method_info.return_type, &subst))
+                    if any_arg_error {
+                        return Type::Error;
+                    }
+                    substitute_type(&method_info.return_type, &subst)
                 }
                 Type::TypeParam {
                     name: _,
                     bound: Some(proto),
                 } => {
-                    let proto_info = resolver
-                        .lookup_protocol(proto)
-                        .ok_or_else(|| {
+                    let proto_info = match resolver.lookup_protocol(proto) {
+                        Some(p) => p.clone(),
+                        None => {
                             let help = find_suggestion(proto, resolver.all_protocol_names())
                                 .map(|s| format!("did you mean '{s}'?"));
-                            sem_err_with_help(
+                            diag.emit(sem_err_with_help(
                                 format!("undefined protocol `{}`", proto),
                                 expr.span,
                                 help,
-                            )
-                        })?
-                        .clone();
-                    let method_sig = proto_info
-                        .methods
-                        .iter()
-                        .find(|m| m.name == *method)
-                        .ok_or_else(|| {
+                            ));
+                            return Type::Error;
+                        }
+                    };
+                    let method_sig = match proto_info.methods.iter().find(|m| m.name == *method) {
+                        Some(sig) => sig.clone(),
+                        None => {
                             let help = find_suggestion(
                                 method,
                                 proto_info.methods.iter().map(|m| m.name.as_str()),
                             )
                             .map(|s| format!("did you mean '{s}'?"));
-                            sem_err_with_help(
+                            diag.emit(sem_err_with_help(
                                 format!("protocol `{}` has no method `{}`", proto, method),
                                 expr.span,
                                 help,
-                            )
-                        })?
-                        .clone();
+                            ));
+                            return Type::Error;
+                        }
+                    };
                     if args.len() != method_sig.params.len() {
-                        return Err(sem_err(format!(
+                        diag.emit(sem_err(format!(
                             "method `{}` expects {} argument(s) but {} were given",
                             method,
                             method_sig.params.len(),
                             args.len()
                         )));
+                        return Type::Error;
                     }
+                    let mut any_arg_error = false;
                     for (arg, param) in args.iter().zip(method_sig.params.iter()) {
-                        let arg_ty = analyze_expr(arg, resolver, ctx.as_deref_mut())?;
+                        let arg_ty = analyze_expr(arg, resolver, ctx.as_deref_mut(), diag);
+                        if arg_ty == Type::Error {
+                            any_arg_error = true;
+                            continue;
+                        }
                         if let Some(ref mut c) = ctx {
-                            if !matches!(param.1, Type::TypeParam { .. }) {
-                                c.unify(arg_ty.clone(), param.1.clone())?;
+                            if !matches!(param.1, Type::TypeParam { .. })
+                                && let Err(e) = c.unify(arg_ty.clone(), param.1.clone())
+                            {
+                                diag.emit(e);
+                                any_arg_error = true;
                             }
                         } else if arg_ty != param.1 {
-                            return Err(sem_err(format!(
+                            diag.emit(sem_err(format!(
                                 "expected `{}` but got `{}` in argument `{}` of method `{}`",
                                 param.1, arg_ty, param.0, method
                             )));
+                            any_arg_error = true;
                         }
                     }
-                    Ok(method_sig.return_type.clone())
+                    if any_arg_error {
+                        return Type::Error;
+                    }
+                    method_sig.return_type.clone()
                 }
-                Type::TypeParam { name, bound: None } => Err(sem_err(format!(
-                    "method call on unconstrained type parameter `{}`",
-                    name
-                ))),
-                _ => Err(sem_err(format!(
-                    "method call on non-struct type `{}`",
-                    obj_ty
-                ))),
+                Type::TypeParam { name, bound: None } => {
+                    diag.emit(sem_err(format!(
+                        "method call on unconstrained type parameter `{}`",
+                        name
+                    )));
+                    Type::Error
+                }
+                _ => {
+                    diag.emit(sem_err(format!(
+                        "method call on non-struct type `{}`",
+                        obj_ty
+                    )));
+                    Type::Error
+                }
             }
         }
         ExprKind::ArrayLiteral { elements } => {
             if elements.is_empty() {
-                return Err(sem_err("cannot infer type of empty array literal"));
+                diag.emit(sem_err("cannot infer type of empty array literal"));
+                return Type::Error;
             }
-            let first_ty = analyze_expr(&elements[0], resolver, ctx.as_deref_mut())?;
+            let first_ty = analyze_expr(&elements[0], resolver, ctx.as_deref_mut(), diag);
+            if first_ty == Type::Error {
+                return Type::Error;
+            }
+            let mut any_error = false;
             for elem in &elements[1..] {
-                let elem_ty = analyze_expr(elem, resolver, ctx.as_deref_mut())?;
+                let elem_ty = analyze_expr(elem, resolver, ctx.as_deref_mut(), diag);
+                if elem_ty == Type::Error {
+                    any_error = true;
+                    continue;
+                }
                 if let Some(ref mut c) = ctx {
-                    c.unify(elem_ty.clone(), first_ty.clone()).map_err(|_| {
-                        sem_err(format!(
+                    if c.unify(elem_ty.clone(), first_ty.clone()).is_err() {
+                        diag.emit(sem_err(format!(
                             "array elements must all have the same type: expected '{}', found '{}'",
                             first_ty, elem_ty
-                        ))
-                    })?;
+                        )));
+                        any_error = true;
+                    }
                 } else if elem_ty != first_ty {
-                    return Err(sem_err(format!(
+                    diag.emit(sem_err(format!(
                         "array elements must all have the same type: expected '{}', found '{}'",
                         first_ty, elem_ty
                     )));
+                    any_error = true;
                 }
             }
-            Ok(Type::Array {
+            if any_error {
+                return Type::Error;
+            }
+            Type::Array {
                 element: Box::new(first_ty),
                 size: elements.len() as u64,
-            })
+            }
         }
         ExprKind::IndexAccess { object, index } => {
-            let obj_ty = analyze_expr(object, resolver, ctx.as_deref_mut())?;
-            let idx_ty = analyze_expr(index, resolver, ctx)?;
+            let obj_ty = analyze_expr(object, resolver, ctx.as_deref_mut(), diag);
+            let idx_ty = analyze_expr(index, resolver, ctx, diag);
+            if obj_ty == Type::Error || idx_ty == Type::Error {
+                return Type::Error;
+            }
             match &obj_ty {
                 Type::Array { element, size } => {
                     if !idx_ty.is_integer() {
-                        return Err(sem_err(format!(
+                        diag.emit(sem_err(format!(
                             "array index must be an integer type, found '{}'",
                             idx_ty
                         )));
+                        return Type::Error;
                     }
                     // Compile-time bounds check for constant indices
                     if let ExprKind::Number(n) = &index.kind {
                         let idx = *n;
                         if idx < 0 || idx as u64 >= *size {
-                            return Err(sem_err(format!(
+                            diag.emit(sem_err(format!(
                                 "array index {} is out of bounds for array of size {}",
                                 idx, size
                             )));
+                            return Type::Error;
                         }
                     }
-                    Ok(*element.clone())
+                    *element.clone()
                 }
-                _ => Err(sem_err(format!("cannot index into type '{}'", obj_ty))),
+                _ => {
+                    diag.emit(sem_err(format!("cannot index into type '{}'", obj_ty)));
+                    Type::Error
+                }
             }
         }
     }
@@ -3246,7 +3572,8 @@ fn analyze_struct_members(
     struct_def: &StructDef,
     resolver: &mut Resolver,
     ctx: &mut InferenceContext,
-) -> Result<()> {
+    diag: &mut DiagCtxt,
+) {
     use resolver::SelfContext;
 
     for member in &struct_def.members {
@@ -3266,20 +3593,29 @@ fn analyze_struct_members(
 
                 resolver.push_scope();
                 for param in params {
+                    let param_ty = match resolve_type_checked(&param.ty, resolver) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            diag.emit(e);
+                            Type::Error
+                        }
+                    };
                     resolver.define_var(
                         param.name.clone(),
                         VarInfo {
-                            ty: resolve_type_checked(&param.ty, resolver)?,
+                            ty: param_ty,
                             mutable: false,
                         },
                     );
                 }
                 for stmt in &body.stmts {
-                    analyze_stmt(stmt, resolver, Some(ctx))?;
+                    analyze_stmt(stmt, resolver, Some(ctx), diag);
                 }
                 resolver.pop_scope();
 
-                check_all_fields_initialized(&struct_def.name, body, resolver)?;
+                if let Err(e) = check_all_fields_initialized(&struct_def.name, body, resolver) {
+                    diag.emit(e);
+                }
 
                 resolver.current_return_type = prev_return;
                 resolver.self_context = prev_self;
@@ -3287,7 +3623,13 @@ fn analyze_struct_members(
             StructMember::ComputedProperty {
                 ty, getter, setter, ..
             } => {
-                let resolved_ty = resolve_type_checked(ty, resolver)?;
+                let resolved_ty = match resolve_type_checked(ty, resolver) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        diag.emit(e);
+                        continue;
+                    }
+                };
 
                 // Analyze getter
                 {
@@ -3300,7 +3642,7 @@ fn analyze_struct_members(
                     resolver.current_return_type = Some(resolved_ty.clone());
 
                     resolver.push_scope();
-                    analyze_getter_block(getter, resolver, ctx)?;
+                    analyze_getter_block(getter, resolver, ctx, diag);
                     resolver.pop_scope();
 
                     resolver.current_return_type = prev_return;
@@ -3326,7 +3668,7 @@ fn analyze_struct_members(
                         },
                     );
                     for stmt in &setter_block.stmts {
-                        analyze_stmt(stmt, resolver, Some(ctx))?;
+                        analyze_stmt(stmt, resolver, Some(ctx), diag);
                     }
                     resolver.pop_scope();
 
@@ -3342,7 +3684,13 @@ fn analyze_struct_members(
                 return_type,
                 body,
             } => {
-                let resolved_return = resolve_type_checked(return_type, resolver)?;
+                let resolved_return = match resolve_type_checked(return_type, resolver) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        diag.emit(e);
+                        continue;
+                    }
+                };
                 let prev_self = resolver.self_context.clone();
                 resolver.self_context = Some(SelfContext {
                     struct_name: struct_def.name.clone(),
@@ -3353,29 +3701,41 @@ fn analyze_struct_members(
 
                 resolver.push_scope();
                 for param in params {
+                    let param_ty = match resolve_type_checked(&param.ty, resolver) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            diag.emit(e);
+                            Type::Error
+                        }
+                    };
                     resolver.define_var(
                         param.name.clone(),
                         VarInfo {
-                            ty: resolve_type_checked(&param.ty, resolver)?,
+                            ty: param_ty,
                             mutable: false,
                         },
                     );
                 }
 
                 if !block_always_returns(body) {
-                    return Err(sem_err(format!(
+                    diag.emit(sem_err(format!(
                         "method `{}` must end with a `return` statement",
                         mname
                     )));
+                    resolver.pop_scope();
+                    resolver.current_return_type = prev_return;
+                    resolver.self_context = prev_self;
+                    continue;
                 }
                 let stmts = &body.stmts;
                 for stmt in stmts {
                     if matches!(stmt, Stmt::Yield(_)) {
-                        return Err(sem_err(
+                        diag.emit(sem_err(
                             "`yield` cannot be used in method body (use `return` instead)",
                         ));
+                        break;
                     }
-                    analyze_stmt(stmt, resolver, Some(ctx))?;
+                    analyze_stmt(stmt, resolver, Some(ctx), diag);
                 }
 
                 resolver.pop_scope();
@@ -3384,7 +3744,6 @@ fn analyze_struct_members(
             }
         }
     }
-    Ok(())
 }
 
 fn check_all_fields_initialized(
@@ -3433,14 +3792,15 @@ fn analyze_getter_block(
     block: &Block,
     resolver: &mut Resolver,
     ctx: &mut InferenceContext,
-) -> Result<()> {
+    diag: &mut DiagCtxt,
+) {
     if !block_always_returns(block) {
-        return Err(sem_err("getter must end with a `return` statement"));
+        diag.emit(sem_err("getter must end with a `return` statement"));
+        return;
     }
     for stmt in &block.stmts {
-        analyze_stmt(stmt, resolver, Some(ctx))?;
+        analyze_stmt(stmt, resolver, Some(ctx), diag);
     }
-    Ok(())
 }
 
 fn check_assignment_target_mutable(expr: &Expr, resolver: &Resolver) -> Result<()> {
@@ -4031,6 +4391,31 @@ mod tests {
         let result = analyze_single_module(&program, &mut resolver, true, &mut diag);
         assert!(result.is_err(), "expected error due to type mismatches");
         // Both foo and bar have type errors — previously only foo's was reported
+        assert!(
+            diag.error_count() >= 2,
+            "expected at least 2 errors, got {}",
+            diag.error_count()
+        );
+    }
+
+    #[test]
+    fn multiple_errors_in_single_function() {
+        // Source with multiple type errors within one function body
+        let source = r#"
+            func main() -> Int32 {
+                let x: Int32 = true;
+                let y: Bool = 42;
+                return 0;
+            }
+        "#;
+        let tokens = crate::lexer::tokenize(source).unwrap();
+        let program = crate::parser::parse(tokens).unwrap();
+        let mut resolver = Resolver::new();
+        let mut diag = DiagCtxt::new();
+
+        let result = analyze_single_module(&program, &mut resolver, true, &mut diag);
+        assert!(result.is_err(), "expected error due to type mismatches");
+        // Both let bindings have type errors — both should be reported
         assert!(
             diag.error_count() >= 2,
             "expected at least 2 errors, got {}",
