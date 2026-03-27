@@ -31,6 +31,19 @@ enum Command {
     },
 }
 
+/// Display all errors collected in DiagCtxt using miette formatting.
+fn display_diag_errors(
+    diag: &mut bengal::error::DiagCtxt,
+    default_filename: &str,
+    source_map: &std::collections::HashMap<String, String>,
+) {
+    let default_source = source_map.get("<root>").cloned().unwrap_or_default();
+    for err in diag.take_errors() {
+        let diagnostic = err.into_diagnostic(default_filename, &default_source);
+        eprintln!("{:?}", Report::new(diagnostic));
+    }
+}
+
 fn run() -> miette::Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -43,14 +56,39 @@ fn run() -> miette::Result<()> {
                 ));
             }
 
-            // Run pipeline once, optionally printing BIR
+            let filename = file.display().to_string();
+
+            // Run pipeline, collecting multiple errors in diag
             let mut diag = bengal::error::DiagCtxt::new();
             let parsed =
                 bengal::pipeline::parse(&file).map_err(|e| Report::new(e.into_diagnostic()))?;
-            let analyzed = bengal::pipeline::analyze(parsed, &mut diag)
-                .map_err(|e| Report::new(e.into_diagnostic()))?;
-            let lowered = bengal::pipeline::lower(analyzed, &mut diag)
-                .map_err(|e| Report::new(e.into_diagnostic()))?;
+
+            // Capture source texts for error display
+            let source_map: std::collections::HashMap<String, String> = parsed
+                .graph
+                .modules
+                .iter()
+                .map(|(path, info)| (path.to_string(), info.source.clone()))
+                .collect();
+
+            let analyzed = bengal::pipeline::analyze(parsed, &mut diag);
+            if let Err(ref _e) = analyzed {
+                if diag.has_errors() {
+                    display_diag_errors(&mut diag, &filename, &source_map);
+                    process::exit(1);
+                }
+            }
+            let analyzed = analyzed.map_err(|e| Report::new(e.into_diagnostic()))?;
+
+            let lowered = bengal::pipeline::lower(analyzed, &mut diag);
+            if let Err(ref _e) = lowered {
+                if diag.has_errors() {
+                    display_diag_errors(&mut diag, &filename, &source_map);
+                    process::exit(1);
+                }
+            }
+            let lowered = lowered.map_err(|e| Report::new(e.into_diagnostic()))?;
+
             let optimized = bengal::pipeline::optimize(lowered);
 
             if emit_bir {
@@ -64,8 +102,15 @@ fn run() -> miette::Result<()> {
 
             let mono = bengal::pipeline::monomorphize(optimized, &mut diag)
                 .map_err(|e| Report::new(e.into_diagnostic()))?;
-            let compiled = bengal::pipeline::codegen(mono, &mut diag)
-                .map_err(|e| Report::new(e.into_diagnostic()))?;
+            let compiled = bengal::pipeline::codegen(mono, &mut diag);
+            if let Err(ref _e) = compiled {
+                if diag.has_errors() {
+                    display_diag_errors(&mut diag, &filename, &source_map);
+                    process::exit(1);
+                }
+            }
+            let compiled = compiled.map_err(|e| Report::new(e.into_diagnostic()))?;
+
             bengal::pipeline::link(compiled, &exe_path)
                 .map_err(|e| Report::new(e.into_diagnostic()))?;
             eprintln!("Wrote {}", exe_path.display());
