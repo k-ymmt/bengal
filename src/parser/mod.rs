@@ -15,6 +15,7 @@ struct Parser {
     tokens: Vec<SpannedToken>,
     pos: usize,
     next_id: u32,
+    interface_mode: bool,
 }
 
 impl Parser {
@@ -23,6 +24,7 @@ impl Parser {
             tokens,
             pos: 0,
             next_id: 0,
+            interface_mode: false,
         }
     }
 
@@ -211,4 +213,18 @@ pub fn parse(tokens: Vec<SpannedToken>) -> Result<Program> {
             }],
         })
     }
+}
+
+pub fn parse_interface(tokens: Vec<SpannedToken>) -> Result<Program> {
+    let mut parser = Parser::new(tokens);
+    parser.interface_mode = true;
+    let program = parser.parse_program()?;
+    let next = parser.peek();
+    if next.node != Token::Eof {
+        return Err(BengalError::ParseError {
+            message: format!("unexpected token `{}`", next.node),
+            span: next.span,
+        });
+    }
+    Ok(program)
 }

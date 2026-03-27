@@ -242,7 +242,13 @@ impl super::Parser {
         } else {
             TypeAnnotation::Unit
         };
-        let body = Some(self.parse_block()?);
+        let body = if self.interface_mode {
+            // TODO: Future @inlinable support — parse function body here when present
+            self.expect(Token::Semicolon)?;
+            None
+        } else {
+            Some(self.parse_block()?)
+        };
         let span = self.span_from(start);
         Ok(Function {
             visibility: Visibility::Internal,
@@ -301,23 +307,55 @@ impl super::Parser {
                 self.expect(Token::Colon)?;
                 let ty = self.parse_type()?;
                 if self.peek().node == Token::LBrace {
-                    // Computed property: var name: Type { get { ... } set { ... } };
-                    self.advance(); // consume `{`
-                    let getter = Some(self.parse_getter()?);
-                    let setter = if self.peek().node == Token::RBrace {
-                        None
+                    if self.interface_mode {
+                        // Interface mode: protocol-style { get } or { get set }
+                        self.advance(); // consume `{`
+                        let tok = self.expect(Token::Ident(String::new()))?;
+                        match &tok.node {
+                            Token::Ident(s) if s == "get" => {}
+                            _ => {
+                                return Err(BengalError::ParseError {
+                                    message: format!("expected `get`, found `{}`", tok.node),
+                                    span: tok.span,
+                                });
+                            }
+                        }
+                        let has_setter = matches!(&self.peek().node, Token::Ident(s) if s == "set");
+                        if has_setter {
+                            self.advance(); // consume `set`
+                        }
+                        self.expect(Token::RBrace)?;
+                        self.expect(Token::Semicolon)?;
+                        Ok(StructMember::ComputedProperty {
+                            visibility,
+                            name,
+                            ty,
+                            getter: None,
+                            setter: if has_setter {
+                                Some(Block { stmts: vec![] })
+                            } else {
+                                None
+                            },
+                        })
                     } else {
-                        Some(self.parse_setter()?)
-                    };
-                    self.expect(Token::RBrace)?;
-                    self.expect(Token::Semicolon)?;
-                    Ok(StructMember::ComputedProperty {
-                        visibility,
-                        name,
-                        ty,
-                        getter,
-                        setter,
-                    })
+                        // Computed property: var name: Type { get { ... } set { ... } };
+                        self.advance(); // consume `{`
+                        let getter = Some(self.parse_getter()?);
+                        let setter = if self.peek().node == Token::RBrace {
+                            None
+                        } else {
+                            Some(self.parse_setter()?)
+                        };
+                        self.expect(Token::RBrace)?;
+                        self.expect(Token::Semicolon)?;
+                        Ok(StructMember::ComputedProperty {
+                            visibility,
+                            name,
+                            ty,
+                            getter,
+                            setter,
+                        })
+                    }
                 } else {
                     // Stored property: var name: Type;
                     self.expect(Token::Semicolon)?;
@@ -331,7 +369,12 @@ impl super::Parser {
             Token::Init => {
                 self.advance();
                 let params = self.parse_param_list()?;
-                let body = Some(self.parse_block()?);
+                let body = if self.interface_mode {
+                    self.expect(Token::Semicolon)?;
+                    None
+                } else {
+                    Some(self.parse_block()?)
+                };
                 Ok(StructMember::Initializer {
                     visibility,
                     params,
@@ -348,7 +391,12 @@ impl super::Parser {
                 } else {
                     TypeAnnotation::Unit
                 };
-                let body = Some(self.parse_block()?);
+                let body = if self.interface_mode {
+                    self.expect(Token::Semicolon)?;
+                    None
+                } else {
+                    Some(self.parse_block()?)
+                };
                 Ok(StructMember::Method {
                     visibility,
                     name,

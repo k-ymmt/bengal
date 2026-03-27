@@ -1,6 +1,7 @@
 use super::*;
 use crate::error::BengalError;
 use crate::lexer::tokenize;
+use crate::parser::parse_interface;
 
 // --- Phase 2 tests ---
 
@@ -197,4 +198,81 @@ fn parse_protocol_def() {
     assert_eq!(program.protocols.len(), 1);
     assert_eq!(program.protocols[0].name, "Summable");
     assert_eq!(program.protocols[0].members.len(), 2);
+}
+
+// --- Interface mode tests ---
+
+#[test]
+fn parse_interface_function() {
+    let tokens = tokenize("public func add(a: Int32, b: Int32) -> Int32;").unwrap();
+    let program = parse_interface(tokens).unwrap();
+    assert_eq!(program.functions.len(), 1);
+    let f = &program.functions[0];
+    assert_eq!(f.name, "add");
+    assert_eq!(f.visibility, Visibility::Public);
+    assert!(f.body.is_none());
+    assert_eq!(f.params.len(), 2);
+}
+
+#[test]
+fn parse_interface_generic_function() {
+    let tokens = tokenize("public func identity<T>(x: T) -> T;").unwrap();
+    let program = parse_interface(tokens).unwrap();
+    let f = &program.functions[0];
+    assert_eq!(f.type_params.len(), 1);
+    assert_eq!(f.type_params[0].name, "T");
+    assert!(f.body.is_none());
+}
+
+#[test]
+fn parse_interface_unit_return_function() {
+    let tokens = tokenize("public func doSomething();").unwrap();
+    let program = parse_interface(tokens).unwrap();
+    let f = &program.functions[0];
+    assert_eq!(f.return_type, TypeAnnotation::Unit);
+    assert!(f.body.is_none());
+}
+
+#[test]
+fn parse_interface_struct() {
+    let tokens = tokenize(
+        "public struct Point { var x: Int32; var y: Int32; init(x: Int32, y: Int32); func sum() -> Int32; }",
+    )
+    .unwrap();
+    let program = parse_interface(tokens).unwrap();
+    let s = &program.structs[0];
+    assert_eq!(s.name, "Point");
+    assert_eq!(s.members.len(), 4);
+    // Check init has no body
+    if let StructMember::Initializer { body, .. } = &s.members[2] {
+        assert!(body.is_none());
+    } else {
+        panic!("expected Initializer");
+    }
+    // Check method has no body
+    if let StructMember::Method { body, .. } = &s.members[3] {
+        assert!(body.is_none());
+    } else {
+        panic!("expected Method");
+    }
+}
+
+#[test]
+fn parse_interface_computed_property() {
+    let tokens =
+        tokenize("public struct S { var x: Int32 { get }; var y: Int32 { get set }; }").unwrap();
+    let program = parse_interface(tokens).unwrap();
+    let s = &program.structs[0];
+    if let StructMember::ComputedProperty { getter, setter, .. } = &s.members[0] {
+        assert!(getter.is_none());
+        assert!(setter.is_none()); // get only — no setter
+    } else {
+        panic!("expected ComputedProperty");
+    }
+    if let StructMember::ComputedProperty { getter, setter, .. } = &s.members[1] {
+        assert!(getter.is_none());
+        assert!(setter.is_some()); // has setter marker
+    } else {
+        panic!("expected ComputedProperty");
+    }
 }
