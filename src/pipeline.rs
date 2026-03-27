@@ -280,7 +280,7 @@ fn build_name_map(
 /// BIR lowering: build name maps, lower each module's AST to BIR.
 pub fn lower(
     analyzed: AnalyzedPackage,
-    _diag: &mut DiagCtxt,
+    diag: &mut DiagCtxt,
 ) -> Result<LoweredPackage, crate::error::PipelineError> {
     let mut modules = HashMap::new();
     let mut sources = HashMap::new();
@@ -318,6 +318,7 @@ pub fn lower(
             sem_info,
             &name_map,
             inferred_map,
+            diag,
         )
         .map_err(|e| {
             crate::error::PipelineError::new(

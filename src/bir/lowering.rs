@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::error::{BengalError, Result, Span};
+use crate::error::{BengalError, DiagCtxt, Result, Span};
 use crate::parser::ast::*;
 use crate::semantic::resolver;
 
@@ -59,7 +59,7 @@ struct Lowering {
     self_var_name: Option<String>,
     in_init_body: bool,
     init_struct_name: Option<String>,
-    lowering_error: Option<BengalError>,
+    lowering_errors: Vec<BengalError>,
     // Name mangling map for per-module lowering: local name -> mangled name
     name_map: Option<HashMap<String, String>>,
     // Set by lower_if when both branches diverge (all paths return/break/continue)
@@ -93,7 +93,7 @@ impl Lowering {
             self_var_name: None,
             in_init_body: false,
             init_struct_name: None,
-            lowering_error: None,
+            lowering_errors: Vec::new(),
             name_map: None,
             last_expr_diverged: false,
             getter_return_bb: None,
@@ -142,12 +142,10 @@ impl Lowering {
     }
 
     fn record_error(&mut self, message: impl Into<String>, span: Option<Span>) -> Value {
-        if self.lowering_error.is_none() {
-            self.lowering_error = Some(BengalError::LoweringError {
-                message: message.into(),
-                span,
-            });
-        }
+        self.lowering_errors.push(BengalError::LoweringError {
+            message: message.into(),
+            span,
+        });
         let dummy = self.fresh_value();
         self.emit(Instruction::Literal {
             result: dummy,
@@ -2119,7 +2117,20 @@ pub fn lower_program(
     program: &Program,
     sem_info: &crate::semantic::SemanticInfo,
 ) -> Result<BirModule> {
-    lower_program_with_inferred(program, sem_info, &HashMap::new())
+    let mut diag = DiagCtxt::new();
+    match lower_program_with_inferred(program, sem_info, &HashMap::new(), &mut diag) {
+        Ok(module) => Ok(module),
+        Err(fatal) => {
+            // If diag has errors, those are the accumulated lowering errors; return the first.
+            // Otherwise, the error is a fatal pre-lowering error (e.g. recursive struct) — return as-is.
+            let mut errors = diag.take_errors();
+            if errors.is_empty() {
+                Err(fatal)
+            } else {
+                Err(errors.remove(0))
+            }
+        }
+    }
 }
 
 /// Lower program with inferred type args for call sites with omitted type arguments.
@@ -2127,6 +2138,7 @@ pub(crate) fn lower_program_with_inferred(
     program: &Program,
     sem_info: &crate::semantic::SemanticInfo,
     inferred_type_args: &HashMap<NodeId, Vec<TypeAnnotation>>,
+    diag: &mut DiagCtxt,
 ) -> Result<BirModule> {
     // Build struct_layouts from semantic StructInfo
     let mut struct_layouts: HashMap<String, Vec<(String, BirType)>> = HashMap::new();
@@ -2257,8 +2269,14 @@ pub(crate) fn lower_program_with_inferred(
         }
     }
 
-    if let Some(err) = lowering.lowering_error {
-        return Err(err);
+    for err in lowering.lowering_errors.drain(..) {
+        diag.emit(err);
+    }
+    if diag.has_errors() {
+        return Err(BengalError::LoweringError {
+            message: "lowering failed".to_string(),
+            span: None,
+        });
     }
 
     // Build conformance_map: (protocol_method, concrete_type) -> impl_name
@@ -2312,7 +2330,18 @@ pub fn lower_module(
     sem_info: &crate::semantic::SemanticInfo,
     name_map: &HashMap<String, String>,
 ) -> Result<BirModule> {
-    lower_module_with_inferred(program, sem_info, name_map, &HashMap::new())
+    let mut diag = DiagCtxt::new();
+    match lower_module_with_inferred(program, sem_info, name_map, &HashMap::new(), &mut diag) {
+        Ok(module) => Ok(module),
+        Err(fatal) => {
+            let mut errors = diag.take_errors();
+            if errors.is_empty() {
+                Err(fatal)
+            } else {
+                Err(errors.remove(0))
+            }
+        }
+    }
 }
 
 /// Lower a single module's AST to BIR with name mangling and inferred type args.
@@ -2324,6 +2353,7 @@ pub(crate) fn lower_module_with_inferred(
     sem_info: &crate::semantic::SemanticInfo,
     name_map: &HashMap<String, String>,
     inferred_type_args: &HashMap<NodeId, Vec<TypeAnnotation>>,
+    diag: &mut DiagCtxt,
 ) -> Result<BirModule> {
     // Build struct_layouts from semantic StructInfo
     let mut struct_layouts: HashMap<String, Vec<(String, BirType)>> = HashMap::new();
@@ -2464,8 +2494,14 @@ pub(crate) fn lower_module_with_inferred(
         }
     }
 
-    if let Some(err) = lowering.lowering_error {
-        return Err(err);
+    for err in lowering.lowering_errors.drain(..) {
+        diag.emit(err);
+    }
+    if diag.has_errors() {
+        return Err(BengalError::LoweringError {
+            message: "lowering failed".to_string(),
+            span: None,
+        });
     }
 
     // Build conformance_map: (protocol_method, concrete_type) -> impl_name
