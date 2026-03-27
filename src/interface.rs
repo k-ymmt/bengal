@@ -280,19 +280,29 @@ impl ModuleInterface {
 pub struct BengalModFile {
     pub package_name: String,
     pub modules: HashMap<ModulePath, BirModule>,
+    pub interfaces: HashMap<ModulePath, ModuleInterface>,
 }
 
 /// Write a LoweredPackage to a .bengalmod interface file.
 pub fn write_interface(package: &LoweredPackage, path: &Path) -> Result<()> {
-    let modules: HashMap<ModulePath, BirModule> = package
-        .modules
-        .iter()
-        .map(|(k, v)| (k.clone(), v.bir.clone()))
-        .collect();
+    let mut modules: HashMap<ModulePath, BirModule> = HashMap::new();
+    let mut interfaces: HashMap<ModulePath, ModuleInterface> = HashMap::new();
+
+    for (mod_path, lowered_mod) in &package.modules {
+        modules.insert(mod_path.clone(), lowered_mod.bir.clone());
+
+        if let Some(sem_info) = package.pkg_sem_info.module_infos.get(mod_path) {
+            interfaces.insert(
+                mod_path.clone(),
+                ModuleInterface::from_semantic_info(sem_info),
+            );
+        }
+    }
 
     let file = BengalModFile {
         package_name: package.package_name.clone(),
         modules,
+        interfaces,
     };
 
     let payload = rmp_serde::to_vec(&file).map_err(|e| BengalError::InterfaceError {

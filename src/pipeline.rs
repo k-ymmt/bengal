@@ -30,6 +30,7 @@ pub struct LoweredPackage {
     pub package_name: String,
     pub modules: HashMap<ModulePath, LoweredModule>,
     pub sources: HashMap<ModulePath, String>,
+    pub pkg_sem_info: PackageSemanticInfo,
 }
 
 pub struct LoweredModule {
@@ -255,6 +256,7 @@ pub fn lower(
         package_name: analyzed.package_name,
         modules,
         sources,
+        pkg_sem_info: analyzed.pkg_sem_info,
     })
 }
 
