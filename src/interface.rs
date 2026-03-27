@@ -14,6 +14,7 @@ use crate::semantic::types::Type;
 
 pub const MAGIC: &[u8; 4] = b"BGMD";
 pub const FORMAT_VERSION: u32 = 2;
+pub const TEXT_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum InterfaceType {
@@ -359,6 +360,209 @@ pub fn read_interface(path: &Path) -> Result<BengalModFile> {
 
     rmp_serde::from_slice(&data[8..]).map_err(|e| BengalError::InterfaceError {
         message: format!("failed to deserialize interface: {}", e),
+    })
+}
+
+// --- Text emitter helpers ---
+
+fn emit_type(ty: &InterfaceType) -> String {
+    match ty {
+        InterfaceType::I32 => "Int32".to_string(),
+        InterfaceType::I64 => "Int64".to_string(),
+        InterfaceType::F32 => "Float32".to_string(),
+        InterfaceType::F64 => "Float64".to_string(),
+        InterfaceType::Bool => "Bool".to_string(),
+        InterfaceType::Unit => "Void".to_string(),
+        InterfaceType::Struct(name) => name.clone(),
+        InterfaceType::TypeParam { name, .. } => name.clone(),
+        InterfaceType::Generic { name, args } => {
+            let args_str: Vec<String> = args.iter().map(emit_type).collect();
+            format!("{}<{}>", name, args_str.join(", "))
+        }
+        InterfaceType::Array { element, size } => {
+            format!("[{}; {}]", emit_type(element), size)
+        }
+    }
+}
+
+fn emit_visibility(vis: Visibility) -> &'static str {
+    match vis {
+        Visibility::Public => "public",
+        Visibility::Package => "package",
+        _ => "internal",
+    }
+}
+
+fn emit_type_params(tps: &[InterfaceTypeParam]) -> String {
+    if tps.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = tps
+        .iter()
+        .map(|tp| match &tp.bound {
+            Some(bound) => format!("{}: {}", tp.name, bound),
+            None => tp.name.clone(),
+        })
+        .collect();
+    format!("<{}>", parts.join(", "))
+}
+
+fn emit_params(params: &[(String, InterfaceType)]) -> String {
+    let parts: Vec<String> = params
+        .iter()
+        .map(|(name, ty)| format!("{}: {}", name, emit_type(ty)))
+        .collect();
+    parts.join(", ")
+}
+
+fn emit_return_type(ty: &InterfaceType) -> String {
+    match ty {
+        InterfaceType::Unit => String::new(),
+        _ => format!(" -> {}", emit_type(ty)),
+    }
+}
+
+/// Convert a `ModuleInterface` into `.bengalinterface` text format.
+pub fn emit_text_interface(iface: &ModuleInterface) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "// bengal-interface-format-version: {}\n",
+        TEXT_FORMAT_VERSION
+    ));
+
+    let mut has_previous_section = false;
+
+    // Functions section
+    if !iface.functions.is_empty() {
+        has_previous_section = true;
+        for func in &iface.functions {
+            out.push_str(&format!(
+                "{} func {}{}({}){};",
+                emit_visibility(func.visibility),
+                func.name,
+                emit_type_params(&func.sig.type_params),
+                emit_params(&func.sig.params),
+                emit_return_type(&func.sig.return_type),
+            ));
+            out.push('\n');
+        }
+    }
+
+    // Structs section
+    if !iface.structs.is_empty() {
+        if has_previous_section {
+            out.push('\n');
+        }
+        has_previous_section = true;
+        for s in &iface.structs {
+            // Header: visibility struct Name<T, U>: Proto1, Proto2 {
+            let conformances = if s.conformances.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", s.conformances.join(", "))
+            };
+            out.push_str(&format!(
+                "{} struct {}{}{} {{\n",
+                emit_visibility(s.visibility),
+                s.name,
+                emit_type_params(&s.type_params),
+                conformances,
+            ));
+
+            // Stored properties
+            for (name, ty) in &s.fields {
+                out.push_str(&format!("  var {}: {};\n", name, emit_type(ty)));
+            }
+
+            // Computed properties
+            for comp in &s.computed {
+                let accessor = if comp.has_setter {
+                    "{ get set }"
+                } else {
+                    "{ get }"
+                };
+                out.push_str(&format!(
+                    "  var {}: {} {};\n",
+                    comp.name,
+                    emit_type(&comp.ty),
+                    accessor
+                ));
+            }
+
+            // Init
+            if !s.init_params.is_empty() {
+                out.push_str(&format!("  init({});\n", emit_params(&s.init_params)));
+            }
+
+            // Methods
+            for m in &s.methods {
+                out.push_str(&format!(
+                    "  func {}({}){};",
+                    m.name,
+                    emit_params(&m.params),
+                    emit_return_type(&m.return_type),
+                ));
+                out.push('\n');
+            }
+
+            out.push_str("}\n");
+        }
+    }
+
+    // Protocols section
+    if !iface.protocols.is_empty() {
+        if has_previous_section {
+            out.push('\n');
+        }
+        for p in &iface.protocols {
+            out.push_str(&format!(
+                "{} protocol {} {{\n",
+                emit_visibility(p.visibility),
+                p.name,
+            ));
+
+            // Methods
+            for m in &p.methods {
+                out.push_str(&format!(
+                    "  func {}({}){};",
+                    m.name,
+                    emit_params(&m.params),
+                    emit_return_type(&m.return_type),
+                ));
+                out.push('\n');
+            }
+
+            // Properties
+            for prop in &p.properties {
+                let accessor = if prop.has_setter {
+                    "{ get set }"
+                } else {
+                    "{ get }"
+                };
+                out.push_str(&format!(
+                    "  var {}: {} {};\n",
+                    prop.name,
+                    emit_type(&prop.ty),
+                    accessor
+                ));
+            }
+
+            out.push_str("}\n");
+        }
+    }
+
+    out
+}
+
+/// Write a `ModuleInterface` as text to a `.bengalinterface` file.
+pub fn write_text_interface(iface: &ModuleInterface, path: &Path) -> Result<()> {
+    let text = emit_text_interface(iface);
+    std::fs::write(path, text).map_err(|e| BengalError::InterfaceError {
+        message: format!(
+            "failed to write text interface file '{}': {}",
+            path.display(),
+            e
+        ),
     })
 }
 

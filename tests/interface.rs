@@ -3,8 +3,14 @@ mod common;
 use std::io::Write;
 
 use bengal::error::DiagCtxt;
-use bengal::interface::{FORMAT_VERSION, MAGIC, read_interface, write_interface};
+use bengal::interface::{
+    FORMAT_VERSION, InterfaceComputedProp, InterfaceFuncEntry, InterfaceFuncSig,
+    InterfaceMethodSig, InterfacePropertyReq, InterfaceProtocolEntry, InterfaceStructEntry,
+    InterfaceType, InterfaceTypeParam, MAGIC, ModuleInterface, emit_text_interface, read_interface,
+    write_interface, write_text_interface,
+};
 use bengal::package::ModulePath;
+use bengal::parser::ast::Visibility;
 use bengal::pipeline::{self, LoweredPackage};
 use tempfile::{NamedTempFile, TempDir};
 
@@ -356,4 +362,266 @@ fn round_trip_multi_module_package() {
             .unwrap_or_else(|| panic!("missing module {}", path));
         assert_eq!(&module.bir, loaded_bir);
     }
+}
+
+// ---------- Text emitter tests ----------
+
+#[test]
+fn emit_empty_interface() {
+    let iface = ModuleInterface {
+        functions: vec![],
+        structs: vec![],
+        protocols: vec![],
+    };
+    let text = emit_text_interface(&iface);
+    assert!(text.contains("// bengal-interface-format-version: 1"));
+    // Only the header line, no extra sections
+    assert_eq!(text.lines().count(), 1);
+}
+
+#[test]
+fn emit_simple_function() {
+    let iface = ModuleInterface {
+        functions: vec![InterfaceFuncEntry {
+            visibility: Visibility::Public,
+            name: "add".to_string(),
+            sig: InterfaceFuncSig {
+                type_params: vec![],
+                params: vec![
+                    ("a".to_string(), InterfaceType::I32),
+                    ("b".to_string(), InterfaceType::I32),
+                ],
+                return_type: InterfaceType::I32,
+            },
+        }],
+        structs: vec![],
+        protocols: vec![],
+    };
+    let text = emit_text_interface(&iface);
+    assert!(text.contains("public func add(a: Int32, b: Int32) -> Int32;"));
+}
+
+#[test]
+fn emit_generic_function() {
+    let iface = ModuleInterface {
+        functions: vec![InterfaceFuncEntry {
+            visibility: Visibility::Public,
+            name: "identity".to_string(),
+            sig: InterfaceFuncSig {
+                type_params: vec![InterfaceTypeParam {
+                    name: "T".to_string(),
+                    bound: Some("Summable".to_string()),
+                }],
+                params: vec![(
+                    "x".to_string(),
+                    InterfaceType::TypeParam {
+                        name: "T".to_string(),
+                        bound: Some("Summable".to_string()),
+                    },
+                )],
+                return_type: InterfaceType::TypeParam {
+                    name: "T".to_string(),
+                    bound: Some("Summable".to_string()),
+                },
+            },
+        }],
+        structs: vec![],
+        protocols: vec![],
+    };
+    let text = emit_text_interface(&iface);
+    assert!(text.contains("public func identity<T: Summable>(x: T) -> T;"));
+}
+
+#[test]
+fn emit_unit_return_omitted() {
+    let iface = ModuleInterface {
+        functions: vec![InterfaceFuncEntry {
+            visibility: Visibility::Public,
+            name: "doSomething".to_string(),
+            sig: InterfaceFuncSig {
+                type_params: vec![],
+                params: vec![],
+                return_type: InterfaceType::Unit,
+            },
+        }],
+        structs: vec![],
+        protocols: vec![],
+    };
+    let text = emit_text_interface(&iface);
+    assert!(text.contains("public func doSomething();"));
+    assert!(!text.contains("-> Void"));
+}
+
+#[test]
+fn emit_struct_with_members() {
+    let iface = ModuleInterface {
+        functions: vec![],
+        structs: vec![InterfaceStructEntry {
+            visibility: Visibility::Public,
+            name: "Pair".to_string(),
+            type_params: vec![
+                InterfaceTypeParam {
+                    name: "T".to_string(),
+                    bound: None,
+                },
+                InterfaceTypeParam {
+                    name: "U".to_string(),
+                    bound: None,
+                },
+            ],
+            conformances: vec!["Printable".to_string()],
+            fields: vec![
+                (
+                    "first".to_string(),
+                    InterfaceType::TypeParam {
+                        name: "T".to_string(),
+                        bound: None,
+                    },
+                ),
+                (
+                    "second".to_string(),
+                    InterfaceType::TypeParam {
+                        name: "U".to_string(),
+                        bound: None,
+                    },
+                ),
+            ],
+            computed: vec![InterfaceComputedProp {
+                name: "total".to_string(),
+                ty: InterfaceType::I32,
+                has_setter: false,
+            }],
+            init_params: vec![
+                (
+                    "first".to_string(),
+                    InterfaceType::TypeParam {
+                        name: "T".to_string(),
+                        bound: None,
+                    },
+                ),
+                (
+                    "second".to_string(),
+                    InterfaceType::TypeParam {
+                        name: "U".to_string(),
+                        bound: None,
+                    },
+                ),
+            ],
+            methods: vec![InterfaceMethodSig {
+                name: "swap".to_string(),
+                params: vec![],
+                return_type: InterfaceType::Generic {
+                    name: "Pair".to_string(),
+                    args: vec![
+                        InterfaceType::TypeParam {
+                            name: "U".to_string(),
+                            bound: None,
+                        },
+                        InterfaceType::TypeParam {
+                            name: "T".to_string(),
+                            bound: None,
+                        },
+                    ],
+                },
+            }],
+        }],
+        protocols: vec![],
+    };
+    let text = emit_text_interface(&iface);
+    assert!(text.contains("public struct Pair<T, U>: Printable {"));
+    assert!(text.contains("  var first: T;"));
+    assert!(text.contains("  var second: U;"));
+    assert!(text.contains("  var total: Int32 { get };"));
+    assert!(text.contains("  init(first: T, second: U);"));
+    assert!(text.contains("  func swap() -> Pair<U, T>;"));
+}
+
+#[test]
+fn emit_protocol() {
+    let iface = ModuleInterface {
+        functions: vec![],
+        structs: vec![],
+        protocols: vec![InterfaceProtocolEntry {
+            visibility: Visibility::Public,
+            name: "Summable".to_string(),
+            methods: vec![InterfaceMethodSig {
+                name: "sum".to_string(),
+                params: vec![],
+                return_type: InterfaceType::I32,
+            }],
+            properties: vec![InterfacePropertyReq {
+                name: "value".to_string(),
+                ty: InterfaceType::I32,
+                has_setter: true,
+            }],
+        }],
+    };
+    let text = emit_text_interface(&iface);
+    assert!(text.contains("public protocol Summable {"));
+    assert!(text.contains("  func sum() -> Int32;"));
+    assert!(text.contains("  var value: Int32 { get set };"));
+}
+
+#[test]
+fn emit_array_types() {
+    let iface = ModuleInterface {
+        functions: vec![InterfaceFuncEntry {
+            visibility: Visibility::Public,
+            name: "getArray".to_string(),
+            sig: InterfaceFuncSig {
+                type_params: vec![],
+                params: vec![],
+                return_type: InterfaceType::Array {
+                    element: Box::new(InterfaceType::I32),
+                    size: 4,
+                },
+            },
+        }],
+        structs: vec![],
+        protocols: vec![],
+    };
+    let text = emit_text_interface(&iface);
+    assert!(text.contains("[Int32; 4]"));
+}
+
+#[test]
+fn emit_package_visibility() {
+    let iface = ModuleInterface {
+        functions: vec![InterfaceFuncEntry {
+            visibility: Visibility::Package,
+            name: "helperFunc".to_string(),
+            sig: InterfaceFuncSig {
+                type_params: vec![],
+                params: vec![("x".to_string(), InterfaceType::I32)],
+                return_type: InterfaceType::I32,
+            },
+        }],
+        structs: vec![],
+        protocols: vec![],
+    };
+    let text = emit_text_interface(&iface);
+    assert!(text.contains("package func helperFunc(x: Int32) -> Int32;"));
+}
+
+#[test]
+fn write_text_interface_creates_file() {
+    let iface = ModuleInterface {
+        functions: vec![InterfaceFuncEntry {
+            visibility: Visibility::Public,
+            name: "foo".to_string(),
+            sig: InterfaceFuncSig {
+                type_params: vec![],
+                params: vec![],
+                return_type: InterfaceType::I32,
+            },
+        }],
+        structs: vec![],
+        protocols: vec![],
+    };
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("test.bengalinterface");
+    write_text_interface(&iface, &path).unwrap();
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("// bengal-interface-format-version: 1"));
+    assert!(content.contains("public func foo() -> Int32;"));
 }
