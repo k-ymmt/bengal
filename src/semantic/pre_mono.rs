@@ -8,8 +8,8 @@ use super::infer::{InferenceContext, InferredTypeArgs};
 use super::resolver::{self, FuncSig, Resolver};
 use super::types::Type;
 use super::{
-    DiagCtxt, SemanticInfo, analyze_function, analyze_struct_members, is_builtin_type,
-    resolve_struct_members, resolve_type_checked, sem_err, sem_err_with_help,
+    DiagCtxt, SemanticInfo, analyze_function, analyze_struct_members, collect_visibilities,
+    is_builtin_type, resolve_struct_members, resolve_type_checked, sem_err, sem_err_with_help,
     type_annotation_display_name,
 };
 
@@ -351,6 +351,8 @@ fn analyze_pre_mono_inner(
         struct_defs: resolver.take_struct_defs(),
         struct_init_calls: resolver.take_struct_init_calls(),
         protocols: resolver.take_protocols(),
+        functions: resolver.take_functions(),
+        visibilities: collect_visibilities(program),
     };
     Ok((inferred, sem_info))
 }

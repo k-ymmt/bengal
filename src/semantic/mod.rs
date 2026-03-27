@@ -40,6 +40,8 @@ pub struct SemanticInfo {
     pub struct_defs: HashMap<String, resolver::StructInfo>,
     pub struct_init_calls: std::collections::HashSet<NodeId>,
     pub protocols: HashMap<String, resolver::ProtocolInfo>,
+    pub functions: HashMap<String, resolver::FuncSig>,
+    pub visibilities: HashMap<String, Visibility>,
 }
 
 #[derive(Debug)]
@@ -323,6 +325,7 @@ fn resolve_struct_members(struct_def: &StructDef, resolver: &mut Resolver) -> Re
         name.clone(),
         resolver::StructInfo {
             type_params: struct_def.type_params.clone(),
+            conformances: struct_def.conformances.clone(),
             fields,
             field_index,
             computed,
@@ -358,6 +361,20 @@ fn block_always_returns(block: &Block) -> bool {
         Some(stmt) => stmt_always_returns(stmt),
         None => false,
     }
+}
+
+pub(super) fn collect_visibilities(program: &Program) -> HashMap<String, Visibility> {
+    let mut vis = HashMap::new();
+    for f in &program.functions {
+        vis.insert(f.name.clone(), f.visibility);
+    }
+    for s in &program.structs {
+        vis.insert(s.name.clone(), s.visibility);
+    }
+    for p in &program.protocols {
+        vis.insert(p.name.clone(), p.visibility);
+    }
+    vis
 }
 
 #[cfg(test)]

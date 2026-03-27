@@ -6,8 +6,8 @@ use super::infer::InferenceContext;
 use super::resolver::{self, FuncSig, ProtocolInfo, Resolver};
 use super::types::Type;
 use super::{
-    DiagCtxt, SemanticInfo, analyze_function, analyze_struct_members, resolve_struct_members,
-    resolve_type_checked, sem_err, sem_err_with_help,
+    DiagCtxt, SemanticInfo, analyze_function, analyze_struct_members, collect_visibilities,
+    resolve_struct_members, resolve_type_checked, sem_err, sem_err_with_help,
 };
 
 /// Analyze a single module's AST.
@@ -308,5 +308,7 @@ pub(super) fn analyze_single_module(
         struct_defs: resolver.take_all_struct_defs(),
         struct_init_calls: resolver.take_struct_init_calls(),
         protocols: resolver.take_all_protocols(),
+        functions: resolver.take_all_functions(),
+        visibilities: collect_visibilities(program),
     })
 }

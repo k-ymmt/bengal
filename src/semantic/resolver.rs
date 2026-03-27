@@ -28,6 +28,7 @@ pub struct MethodInfo {
 #[derive(Debug, Clone)]
 pub struct StructInfo {
     pub type_params: Vec<TypeParam>,
+    pub conformances: Vec<String>,
     pub fields: Vec<(String, Type)>,
     pub field_index: HashMap<String, usize>,
     pub computed: Vec<ComputedPropInfo>,
@@ -161,6 +162,7 @@ impl Resolver {
             name,
             StructInfo {
                 type_params: vec![],
+                conformances: vec![],
                 fields: vec![],
                 field_index: HashMap::new(),
                 computed: vec![],
@@ -205,6 +207,18 @@ impl Resolver {
         let mut all = std::mem::take(&mut self.protocol_defs);
         for (name, info) in std::mem::take(&mut self.imported_protocols) {
             all.entry(name).or_insert(info);
+        }
+        all
+    }
+
+    pub fn take_functions(&mut self) -> HashMap<String, FuncSig> {
+        std::mem::take(&mut self.functions)
+    }
+
+    pub fn take_all_functions(&mut self) -> HashMap<String, FuncSig> {
+        let mut all = std::mem::take(&mut self.functions);
+        for (name, sig) in std::mem::take(&mut self.imported_funcs) {
+            all.entry(name).or_insert(sig);
         }
         all
     }
