@@ -137,7 +137,7 @@ pub fn parse_source(
 /// Semantic analysis: validate generics, run pre-mono inference, cross-module resolution.
 pub fn analyze(
     parsed: ParsedPackage,
-    _diag: &mut DiagCtxt,
+    diag: &mut DiagCtxt,
 ) -> Result<AnalyzedPackage, crate::error::PipelineError> {
     // Validate generics for all modules
     for (mod_path, mod_info) in &parsed.graph.modules {
@@ -173,7 +173,7 @@ pub fn analyze(
     }
 
     // Cross-module semantic analysis
-    let pkg_sem_info = crate::semantic::analyze_package(&parsed.graph, &parsed.package_name)
+    let pkg_sem_info = crate::semantic::analyze_package(&parsed.graph, &parsed.package_name, diag)
         .map_err(|e| crate::error::PipelineError::package("analyze", e))?;
 
     Ok(AnalyzedPackage {

@@ -4,7 +4,7 @@ pub mod types;
 
 use std::collections::{HashMap, HashSet};
 
-use crate::error::{BengalError, Result, Span};
+use crate::error::{BengalError, DiagCtxt, Result, Span};
 use crate::package::{ModuleGraph, ModulePath};
 use crate::parser::ast::*;
 use crate::suggest::find_suggestion;
@@ -78,7 +78,11 @@ type GlobalSymbolTable = HashMap<ModulePath, HashMap<String, GlobalSymbol>>;
 ///   1. Collect all top-level symbols from every module.
 ///   2. Resolve imports for each module and check visibility.
 ///   3. Run the existing single-module analysis passes with imported symbols.
-pub fn analyze_package(graph: &ModuleGraph, _package_name: &str) -> Result<PackageSemanticInfo> {
+pub fn analyze_package(
+    graph: &ModuleGraph,
+    _package_name: &str,
+    diag: &mut DiagCtxt,
+) -> Result<PackageSemanticInfo> {
     // ---------------------------------------------------------------
     // Phase 1: Collect all top-level symbols from all modules
     // ---------------------------------------------------------------
@@ -110,8 +114,18 @@ pub fn analyze_package(graph: &ModuleGraph, _package_name: &str) -> Result<Packa
         // Run the standard single-module analysis (same as `analyze()` but
         // parameterised on whether to require `main`).
         let is_root = mod_path.is_root();
-        let sem_info = analyze_single_module(&mod_info.ast, &mut resolver, is_root)?;
-        module_infos.insert(mod_path.clone(), sem_info);
+        match analyze_single_module(&mod_info.ast, &mut resolver, is_root, diag) {
+            Ok(sem_info) => {
+                module_infos.insert(mod_path.clone(), sem_info);
+            }
+            Err(_) => {
+                // Errors already emitted to diag; continue to next module
+            }
+        }
+    }
+
+    if diag.has_errors() {
+        return Err(sem_err(format!("{} error(s) found", diag.error_count())));
     }
 
     Ok(PackageSemanticInfo {
@@ -394,6 +408,7 @@ fn analyze_single_module(
     program: &Program,
     resolver: &mut Resolver,
     require_main: bool,
+    diag: &mut DiagCtxt,
 ) -> Result<SemanticInfo> {
     // Pass 1a: register all struct and function names (for forward reference)
     for struct_def in &program.structs {
@@ -520,13 +535,15 @@ fn analyze_single_module(
     // Pass 2: verify main function exists with correct signature (only for root module)
     if require_main {
         match resolver.lookup_func("main") {
-            None => return Err(sem_err("no `main` function found")),
+            None => {
+                diag.emit(sem_err("no `main` function found"));
+            }
             Some(sig) => {
                 if !sig.params.is_empty() {
-                    return Err(sem_err("`main` function must have no parameters"));
+                    diag.emit(sem_err("`main` function must have no parameters"));
                 }
                 if sig.return_type != Type::I32 {
-                    return Err(sem_err("`main` function must return `Int32`"));
+                    diag.emit(sem_err("`main` function must return `Int32`"));
                 }
             }
         }
@@ -540,38 +557,42 @@ fn analyze_single_module(
         if !struct_def.type_params.is_empty() {
             continue;
         }
-        analyze_struct_members(struct_def, resolver, &mut infer_ctx)?;
-        let _ = infer_ctx.apply_defaults(); // best-effort; errors ignored here
+        if let Err(e) = analyze_struct_members(struct_def, resolver, &mut infer_ctx) {
+            diag.emit(e);
+        }
+        let _ = infer_ctx.apply_defaults();
         infer_ctx.reset();
     }
 
     // Pass 3b: check protocol conformance
     for struct_def in &program.structs {
-        for proto_name in &struct_def.conformances {
-            let proto_info = resolver
-                .lookup_protocol(proto_name)
-                .ok_or_else(|| {
+        'proto: for proto_name in &struct_def.conformances {
+            let proto_info = match resolver.lookup_protocol(proto_name) {
+                Some(info) => info.clone(),
+                None => {
                     let help = find_suggestion(proto_name, resolver.all_protocol_names())
                         .map(|s| format!("did you mean '{s}'?"));
-                    sem_err_with_help(
+                    diag.emit(sem_err_with_help(
                         format!("unknown protocol `{}`", proto_name),
                         Span { start: 0, end: 0 },
                         help,
-                    )
-                })?
-                .clone();
-            let struct_info = resolver
-                .lookup_struct(&struct_def.name)
-                .ok_or_else(|| {
+                    ));
+                    continue 'proto;
+                }
+            };
+            let struct_info = match resolver.lookup_struct(&struct_def.name) {
+                Some(info) => info.clone(),
+                None => {
                     let help = find_suggestion(&struct_def.name, resolver.all_struct_names())
                         .map(|s| format!("did you mean '{s}'?"));
-                    sem_err_with_help(
+                    diag.emit(sem_err_with_help(
                         format!("undefined struct `{}`", struct_def.name),
                         Span { start: 0, end: 0 },
                         help,
-                    )
-                })?
-                .clone();
+                    ));
+                    continue 'proto;
+                }
+            };
 
             // Check methods
             for req_method in &proto_info.methods {
@@ -579,32 +600,33 @@ fn analyze_single_module(
                     Some(&idx) => {
                         let impl_method = &struct_info.methods[idx];
                         if impl_method.params.len() != req_method.params.len() {
-                            return Err(sem_err(format!(
+                            diag.emit(sem_err(format!(
                                 "method `{}` expects {} parameter(s) but protocol `{}` requires {}",
                                 req_method.name,
                                 impl_method.params.len(),
                                 proto_name,
                                 req_method.params.len()
                             )));
+                            continue;
                         }
                         for ((impl_name, impl_ty), (req_name, req_ty)) in
                             impl_method.params.iter().zip(req_method.params.iter())
                         {
                             if impl_ty != req_ty {
-                                return Err(sem_err(format!(
+                                diag.emit(sem_err(format!(
                                     "method `{}` has parameter `{}` of type `{}` but protocol `{}` requires `{}`",
                                     req_method.name, impl_name, impl_ty, proto_name, req_ty
                                 )));
                             }
                             if impl_name != req_name {
-                                return Err(sem_err(format!(
+                                diag.emit(sem_err(format!(
                                     "method `{}` has parameter `{}` but protocol `{}` requires `{}`",
                                     req_method.name, impl_name, proto_name, req_name
                                 )));
                             }
                         }
                         if impl_method.return_type != req_method.return_type {
-                            return Err(sem_err(format!(
+                            diag.emit(sem_err(format!(
                                 "method `{}` has return type `{}` but protocol `{}` requires `{}`",
                                 req_method.name,
                                 impl_method.return_type,
@@ -614,7 +636,7 @@ fn analyze_single_module(
                         }
                     }
                     None => {
-                        return Err(sem_err(format!(
+                        diag.emit(sem_err(format!(
                             "type `{}` does not implement method `{}` required by protocol `{}`",
                             struct_def.name, req_method.name, proto_name
                         )));
@@ -627,7 +649,7 @@ fn analyze_single_module(
                 if let Some(&idx) = struct_info.field_index.get(&req_prop.name) {
                     let (_, field_ty) = &struct_info.fields[idx];
                     if *field_ty != req_prop.ty {
-                        return Err(sem_err(format!(
+                        diag.emit(sem_err(format!(
                             "property `{}` has type `{}` but protocol `{}` requires `{}`",
                             req_prop.name, field_ty, proto_name, req_prop.ty
                         )));
@@ -637,20 +659,20 @@ fn analyze_single_module(
                 if let Some(&idx) = struct_info.computed_index.get(&req_prop.name) {
                     let computed = &struct_info.computed[idx];
                     if computed.ty != req_prop.ty {
-                        return Err(sem_err(format!(
+                        diag.emit(sem_err(format!(
                             "property `{}` has type `{}` but protocol `{}` requires `{}`",
                             req_prop.name, computed.ty, proto_name, req_prop.ty
                         )));
                     }
                     if req_prop.has_setter && !computed.has_setter {
-                        return Err(sem_err(format!(
+                        diag.emit(sem_err(format!(
                             "property `{}` requires a setter to conform to protocol `{}`",
                             req_prop.name, proto_name
                         )));
                     }
                     continue;
                 }
-                return Err(sem_err(format!(
+                diag.emit(sem_err(format!(
                     "type `{}` does not implement property `{}` required by protocol `{}`",
                     struct_def.name, req_prop.name, proto_name
                 )));
@@ -661,13 +683,19 @@ fn analyze_single_module(
     {
         let mut ctx = InferenceContext::new();
         for func in &program.functions {
-            analyze_function(func, resolver, Some(&mut ctx))?;
+            if let Err(e) = analyze_function(func, resolver, Some(&mut ctx)) {
+                diag.emit(e);
+            }
             let errs = ctx.apply_defaults();
-            if let Some(e) = errs.into_iter().next() {
-                return Err(e);
+            for e in errs {
+                diag.emit(e);
             }
             ctx.reset();
         }
+    }
+
+    if diag.has_errors() {
+        return Err(sem_err(format!("{} error(s) found", diag.error_count())));
     }
 
     Ok(SemanticInfo {
@@ -3986,6 +4014,29 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, BengalError::SemanticError { .. }));
     }
+
+    #[test]
+    fn multiple_errors_reported() {
+        // Source with errors in two separate functions
+        let source = r#"
+            func foo() -> Int32 { return true; }
+            func bar() -> Int32 { return true; }
+            func main() -> Int32 { return 1; }
+        "#;
+        let tokens = crate::lexer::tokenize(source).unwrap();
+        let program = crate::parser::parse(tokens).unwrap();
+        let mut resolver = Resolver::new();
+        let mut diag = DiagCtxt::new();
+
+        let result = analyze_single_module(&program, &mut resolver, true, &mut diag);
+        assert!(result.is_err(), "expected error due to type mismatches");
+        // Both foo and bar have type errors — previously only foo's was reported
+        assert!(
+            diag.error_count() >= 2,
+            "expected at least 2 errors, got {}",
+            diag.error_count()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4006,7 +4057,16 @@ mod module_tests {
         }
         let entry = dir.path().join(files[0].0);
         let graph = build_module_graph(&entry)?;
-        analyze_package(&graph, "test_pkg")
+        let mut diag = DiagCtxt::new();
+        let result = analyze_package(&graph, "test_pkg", &mut diag);
+        if result.is_err() {
+            // Return the first real error from diag instead of the sentinel
+            let errors = diag.take_errors();
+            if let Some(first) = errors.into_iter().next() {
+                return Err(first);
+            }
+        }
+        result
     }
 
     #[test]
