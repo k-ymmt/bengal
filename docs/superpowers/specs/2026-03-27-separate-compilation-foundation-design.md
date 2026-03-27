@@ -91,7 +91,7 @@ pub fn interface_to_global_symbols(
     let mut symbols = HashMap::new();
     for func in &iface.functions {
         symbols.insert(func.name.clone(), GlobalSymbol {
-            kind: SymbolKind::Function(func.to_func_sig()),
+            kind: SymbolKind::Func(func.to_func_sig()),
             visibility: func.visibility,
             module: module_path.clone(),
         });
