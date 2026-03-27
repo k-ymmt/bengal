@@ -64,6 +64,7 @@ Add conversion methods to `InterfaceTypeParam`, `InterfaceFuncEntry`, `Interface
 **`InterfaceStructEntry::to_struct_info()`** → `StructInfo`
 - Rebuilds `field_index`, `computed_index`, `method_index` HashMaps from the ordered lists
 - `InitializerInfo.body` is `None` (no body available from interface — used for type checking only)
+- `ComputedPropInfo.getter` uses a dummy empty `Block { stmts: vec![] }` (no getter body available from interface). `ComputedPropInfo.setter` uses `Some(Block { stmts: vec![] })` if `has_setter` is true, `None` otherwise. These dummy blocks are never executed — only `ty` and `has_setter` are used during type checking.
 - Maps conformances, fields, computed properties, methods, init params
 
 **`InterfaceProtocolEntry::to_protocol_info()`** → `ProtocolInfo`
@@ -71,42 +72,80 @@ Add conversion methods to `InterfaceTypeParam`, `InterfaceFuncEntry`, `Interface
 
 These conversions are the symmetric inverse of `from_semantic_info()`.
 
+Note: `MethodInfo` and `InterfaceMethodSig` both lack `type_params` — generic methods on structs are not yet supported in the language. This is a known limitation consistent with the interface format.
+
 ### 3. `Resolver::register_interface`
 
-Add a new method to `Resolver` in `src/semantic/resolver.rs`:
+There are two levels of injection:
+
+**Level 1: `GlobalSymbolTable` injection (for Phase 1)**
+
+`analyze_package` Phase 1 builds a `GlobalSymbolTable = HashMap<ModulePath, HashMap<String, GlobalSymbol>>` where `GlobalSymbol` contains `kind`, `visibility`, and `module`. A new function converts `ModuleInterface` into `GlobalSymbolTable` entries:
 
 ```rust
-pub fn register_interface(
-    &mut self,
+// src/semantic/package_analysis.rs
+pub fn interface_to_global_symbols(
     iface: &ModuleInterface,
     module_path: &ModulePath,
-) {
+) -> HashMap<String, GlobalSymbol> {
+    let mut symbols = HashMap::new();
     for func in &iface.functions {
-        let qualified_name = format!("{}::{}", module_path, func.name);
-        self.functions.insert(qualified_name.clone(), func.to_func_sig());
-        self.visibilities.insert(qualified_name, func.visibility);
+        symbols.insert(func.name.clone(), GlobalSymbol {
+            kind: SymbolKind::Function(func.to_func_sig()),
+            visibility: func.visibility,
+            module: module_path.clone(),
+        });
     }
     for s in &iface.structs {
-        self.struct_defs.insert(s.name.clone(), s.to_struct_info());
-        self.visibilities.insert(s.name.clone(), s.visibility);
+        symbols.insert(s.name.clone(), GlobalSymbol {
+            kind: SymbolKind::Struct(s.to_struct_info()),
+            visibility: s.visibility,
+            module: module_path.clone(),
+        });
     }
     for p in &iface.protocols {
-        self.protocols.insert(p.name.clone(), p.to_protocol_info());
-        self.visibilities.insert(p.name.clone(), p.visibility);
+        symbols.insert(p.name.clone(), GlobalSymbol {
+            kind: SymbolKind::Protocol(p.to_protocol_info()),
+            visibility: p.visibility,
+            module: module_path.clone(),
+        });
+    }
+    symbols
+}
+```
+
+This is injected into the `GlobalSymbolTable` alongside AST-derived symbols. Phase 2 (import resolution) then uses the existing `resolve_imports_for_module` which calls `resolver.import_func()`, `resolver.import_struct()`, `resolver.import_protocol()` — the same path as AST-derived symbols.
+
+**Level 2: `Resolver` import methods (for direct injection)**
+
+For testing and future use, add a convenience method to `Resolver`:
+
+```rust
+// src/semantic/resolver.rs
+pub fn register_interface(&mut self, iface: &ModuleInterface) {
+    for func in &iface.functions {
+        self.import_func(func.name.clone(), func.to_func_sig());
+    }
+    for s in &iface.structs {
+        self.import_struct(s.name.clone(), s.to_struct_info());
+    }
+    for p in &iface.protocols {
+        self.import_protocol(p.name.clone(), p.to_protocol_info());
     }
 }
 ```
 
+This uses the existing `import_func`/`import_struct`/`import_protocol` methods which write to `imported_funcs`/`imported_structs`/`imported_protocols` HashMaps — the correct import maps, not the local definition maps.
+
 **Design rationale (Swift/Rust precedent):**
 - Both Swift and Rust convert serialized module data into the compiler's native internal types, making loaded symbols indistinguishable from source-parsed symbols
-- Functions use qualified names (`module_path::func_name`) matching the existing `analyze_package` Phase 1 convention
-- Structs and protocols use unqualified names (they are package-global in Bengal)
-- Visibility is registered for import-time access checks
+- Visibility is tracked in `GlobalSymbol.visibility`, matching the existing `analyze_package` Phase 1 convention
+- `Resolver` has no `visibilities` field — visibility is handled at the `GlobalSymbolTable` level during import resolution
 
 **Integration with `analyze_package`:**
-- Phase 1 (global symbol collection) currently walks ASTs and populates `Resolver.functions`, `struct_defs`, `protocols`, `visibilities`
-- `register_interface` writes to the same HashMaps in the same format
-- Phase 2 (import resolution) and Phase 3 (per-module analysis) see no difference between AST-derived and interface-derived symbols
+- Phase 1 (`collect_global_symbols`): interface-derived symbols inserted into `GlobalSymbolTable` alongside AST-derived symbols
+- Phase 2 (`resolve_imports_for_module`): unchanged — uses `GlobalSymbolTable` to resolve imports, calls `import_func`/`import_struct`/`import_protocol` on `Resolver`
+- Phase 3 (per-module analysis): unchanged — `Resolver` already looks up both local and imported symbols transparently
 
 ### 4. Pipeline `.bengalmod` Auto-Generation
 
@@ -130,7 +169,8 @@ fn emit_interfaces(lowered: &LoweredPackage) -> Result<()> {
     std::fs::create_dir_all(cache_dir)?;
 
     for (module_path, module) in &lowered.modules {
-        let sem_info = lowered.pkg_sem_info.get(module_path);
+        let sem_info = lowered.pkg_sem_info.module_infos.get(module_path);
+        let Some(sem_info) = sem_info else { continue };
         let iface = ModuleInterface::from_semantic_info(sem_info);
         let mod_file = BengalModFile {
             package_name: lowered.package_name.clone(),
@@ -142,15 +182,19 @@ fn emit_interfaces(lowered: &LoweredPackage) -> Result<()> {
         if let Some(parent) = file_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        write_interface(&mod_file, &file_path)?;
+        write_bengalmod_file(&mod_file, &file_path)?;
     }
     Ok(())
 }
 ```
 
-**Invocation:** Between lower and optimize in `compile_to_executable`.
+**`write_bengalmod_file`:** New function in `src/interface.rs` that takes `&BengalModFile` directly (the existing `write_interface` takes `&LoweredPackage`). The existing `write_interface` is refactored to internally call `write_bengalmod_file`.
 
-**`ModulePath::to_file_path`:** New helper method that converts `math::utils` → `math/utils.bengalmod`.
+**Invocation:** Between lower and optimize in `compile_to_executable`. The cached `.bengalmod` files contain unoptimized BIR. This is intentional — optimization is applied per-consumer during compilation, not at cache time. This matches Rust's `.rmeta` approach where MIR is stored pre-optimization.
+
+**`ModulePath::to_file_path`:** New helper method that converts `math::utils` → `math/utils.bengalmod`. For root module (`ModulePath(vec![])`), returns `root.bengalmod`.
+
+**Error handling:** Failures in `emit_interfaces` are non-fatal warnings — they should not prevent compilation from succeeding. The `.bengalmod` files are a cache, not a required output.
 
 **`.build/` should be added to `.gitignore`.**
 
