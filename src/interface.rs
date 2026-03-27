@@ -650,6 +650,26 @@ pub struct BengalModFile {
     pub interfaces: HashMap<ModulePath, ModuleInterface>,
 }
 
+/// Serialize a `BengalModFile` and write it to disk.
+pub fn write_bengalmod_file(file: &BengalModFile, path: &Path) -> Result<()> {
+    let payload = rmp_serde::to_vec(file).map_err(|e| BengalError::InterfaceError {
+        message: format!("failed to serialize interface: {}", e),
+    })?;
+
+    let mut out = std::fs::File::create(path).map_err(|e| BengalError::InterfaceError {
+        message: format!("failed to create file '{}': {}", path.display(), e),
+    })?;
+
+    out.write_all(MAGIC)
+        .and_then(|()| out.write_all(&FORMAT_VERSION.to_le_bytes()))
+        .and_then(|()| out.write_all(&payload))
+        .map_err(|e| BengalError::InterfaceError {
+            message: format!("failed to write interface file: {}", e),
+        })?;
+
+    Ok(())
+}
+
 /// Write a LoweredPackage to a .bengalmod interface file.
 pub fn write_interface(package: &LoweredPackage, path: &Path) -> Result<()> {
     let mut modules: HashMap<ModulePath, BirModule> = HashMap::new();
@@ -672,22 +692,7 @@ pub fn write_interface(package: &LoweredPackage, path: &Path) -> Result<()> {
         interfaces,
     };
 
-    let payload = rmp_serde::to_vec(&file).map_err(|e| BengalError::InterfaceError {
-        message: format!("failed to serialize interface: {}", e),
-    })?;
-
-    let mut out = std::fs::File::create(path).map_err(|e| BengalError::InterfaceError {
-        message: format!("failed to create file '{}': {}", path.display(), e),
-    })?;
-
-    out.write_all(MAGIC)
-        .and_then(|()| out.write_all(&FORMAT_VERSION.to_le_bytes()))
-        .and_then(|()| out.write_all(&payload))
-        .map_err(|e| BengalError::InterfaceError {
-            message: format!("failed to write interface file: {}", e),
-        })?;
-
-    Ok(())
+    write_bengalmod_file(&file, path)
 }
 
 /// Read a .bengalmod interface file.

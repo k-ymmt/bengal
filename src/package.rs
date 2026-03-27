@@ -70,6 +70,22 @@ impl ModulePath {
     pub fn is_root(&self) -> bool {
         self.0.is_empty()
     }
+
+    pub fn to_file_path(&self, extension: &str) -> std::path::PathBuf {
+        if self.0.is_empty() {
+            std::path::PathBuf::from(format!("root.{}", extension))
+        } else {
+            let mut path = std::path::PathBuf::new();
+            for (i, segment) in self.0.iter().enumerate() {
+                if i == self.0.len() - 1 {
+                    path.push(format!("{}.{}", segment, extension));
+                } else {
+                    path.push(segment);
+                }
+            }
+            path
+        }
+    }
 }
 
 impl std::fmt::Display for ModulePath {
@@ -347,6 +363,33 @@ mod tests {
     fn module_graph_from_source_lex_error() {
         let result = ModuleGraph::from_source("test", "func @@@");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn to_file_path_root() {
+        let path = ModulePath::root();
+        assert_eq!(
+            path.to_file_path("bengalmod"),
+            std::path::PathBuf::from("root.bengalmod")
+        );
+    }
+
+    #[test]
+    fn to_file_path_single() {
+        let path = ModulePath(vec!["math".to_string()]);
+        assert_eq!(
+            path.to_file_path("bengalmod"),
+            std::path::PathBuf::from("math.bengalmod")
+        );
+    }
+
+    #[test]
+    fn to_file_path_nested() {
+        let path = ModulePath(vec!["utils".to_string(), "string".to_string()]);
+        assert_eq!(
+            path.to_file_path("bengalmod"),
+            std::path::PathBuf::from("utils/string.bengalmod")
+        );
     }
 
     #[test]
