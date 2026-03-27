@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::error::Result;
+use crate::interface::ModuleInterface;
 use crate::package::{ModuleGraph, ModulePath};
 use crate::parser::ast::*;
 
@@ -17,7 +18,7 @@ use super::{
 
 /// Kinds of top-level symbols we track across modules.
 #[derive(Debug, Clone)]
-enum SymbolKind {
+pub enum SymbolKind {
     Func(FuncSig),
     Struct(resolver::StructInfo),
     Protocol(ProtocolInfo),
@@ -25,14 +26,14 @@ enum SymbolKind {
 
 /// A single entry in the global (cross-module) symbol table.
 #[derive(Debug, Clone)]
-struct GlobalSymbol {
-    kind: SymbolKind,
-    visibility: Visibility,
-    module: ModulePath,
+pub struct GlobalSymbol {
+    pub kind: SymbolKind,
+    pub visibility: Visibility,
+    pub module: ModulePath,
 }
 
 /// Global symbol table: module path -> (name -> GlobalSymbol)
-type GlobalSymbolTable = HashMap<ModulePath, HashMap<String, GlobalSymbol>>;
+pub type GlobalSymbolTable = HashMap<ModulePath, HashMap<String, GlobalSymbol>>;
 
 /// Analyze an entire package represented by its `ModuleGraph`.
 ///
@@ -94,6 +95,49 @@ pub fn analyze_package(
         module_infos,
         import_sources,
     })
+}
+
+/// Convert a `ModuleInterface` into a map of `GlobalSymbol` entries suitable
+/// for injection into a `GlobalSymbolTable`.
+///
+/// This is the bridge that allows pre-compiled module interfaces (`.bengalmod`)
+/// to participate in cross-module name resolution alongside source modules.
+pub fn interface_to_global_symbols(
+    iface: &ModuleInterface,
+    module_path: &ModulePath,
+) -> HashMap<String, GlobalSymbol> {
+    let mut symbols = HashMap::new();
+    for func in &iface.functions {
+        symbols.insert(
+            func.name.clone(),
+            GlobalSymbol {
+                kind: SymbolKind::Func(func.to_func_sig()),
+                visibility: func.visibility,
+                module: module_path.clone(),
+            },
+        );
+    }
+    for s in &iface.structs {
+        symbols.insert(
+            s.name.clone(),
+            GlobalSymbol {
+                kind: SymbolKind::Struct(s.to_struct_info()),
+                visibility: s.visibility,
+                module: module_path.clone(),
+            },
+        );
+    }
+    for p in &iface.protocols {
+        symbols.insert(
+            p.name.clone(),
+            GlobalSymbol {
+                kind: SymbolKind::Protocol(p.to_protocol_info()),
+                visibility: p.visibility,
+                module: module_path.clone(),
+            },
+        );
+    }
+    symbols
 }
 
 /// Phase 1: Walk every module in the graph, register all top-level symbols,

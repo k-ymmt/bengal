@@ -16,7 +16,9 @@ mod stmt_analysis;
 mod struct_analysis;
 
 pub use generic_validation::{validate_generics, validate_main};
-pub use package_analysis::analyze_package;
+pub use package_analysis::{
+    GlobalSymbol, GlobalSymbolTable, SymbolKind, analyze_package, interface_to_global_symbols,
+};
 pub use post_mono::analyze_post_mono;
 pub use pre_mono::{analyze_pre_mono, analyze_pre_mono_lenient};
 use single_module_analysis::analyze_single_module;

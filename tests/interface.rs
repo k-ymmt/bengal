@@ -1060,3 +1060,52 @@ fn register_interface_protocols() {
         .expect("protocol should be registered");
     assert_eq!(info.methods.len(), 1);
 }
+
+#[test]
+fn interface_to_global_symbols_all_types() {
+    use bengal::package::ModulePath;
+    use bengal::semantic::interface_to_global_symbols;
+
+    let iface = ModuleInterface {
+        functions: vec![InterfaceFuncEntry {
+            visibility: Visibility::Public,
+            name: "add".to_string(),
+            sig: InterfaceFuncSig {
+                type_params: vec![],
+                params: vec![("a".to_string(), InterfaceType::I32)],
+                return_type: InterfaceType::I32,
+            },
+        }],
+        structs: vec![InterfaceStructEntry {
+            visibility: Visibility::Package,
+            name: "Point".to_string(),
+            type_params: vec![],
+            conformances: vec![],
+            fields: vec![("x".to_string(), InterfaceType::I32)],
+            methods: vec![],
+            computed: vec![],
+            init_params: vec![("x".to_string(), InterfaceType::I32)],
+        }],
+        protocols: vec![InterfaceProtocolEntry {
+            visibility: Visibility::Public,
+            name: "Runnable".to_string(),
+            methods: vec![],
+            properties: vec![],
+        }],
+    };
+
+    let mod_path = ModulePath(vec!["math".to_string()]);
+    let symbols = interface_to_global_symbols(&iface, &mod_path);
+
+    assert_eq!(symbols.len(), 3);
+    assert!(symbols.contains_key("add"));
+    assert!(symbols.contains_key("Point"));
+    assert!(symbols.contains_key("Runnable"));
+
+    // Verify visibility
+    assert_eq!(symbols["add"].visibility, Visibility::Public);
+    assert_eq!(symbols["Point"].visibility, Visibility::Package);
+
+    // Verify module path
+    assert_eq!(symbols["add"].module, mod_path);
+}
