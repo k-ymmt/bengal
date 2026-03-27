@@ -5,6 +5,9 @@ mod lower_stmt;
 mod lower_struct;
 
 mod lower_program;
+
+#[cfg(test)]
+mod tests;
 pub(crate) use lower_program::lower_module_with_inferred;
 pub use lower_program::{lower_module, lower_program};
 
