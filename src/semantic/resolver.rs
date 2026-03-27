@@ -308,6 +308,20 @@ impl Resolver {
         self.imported_protocols.insert(name, info);
     }
 
+    /// Register all symbols from a `ModuleInterface` into the import maps,
+    /// making them available for cross-module name resolution.
+    pub fn register_interface(&mut self, iface: &crate::interface::ModuleInterface) {
+        for func in &iface.functions {
+            self.import_func(func.name.clone(), func.to_func_sig());
+        }
+        for s in &iface.structs {
+            self.import_struct(s.name.clone(), s.to_struct_info());
+        }
+        for p in &iface.protocols {
+            self.import_protocol(p.name.clone(), p.to_protocol_info());
+        }
+    }
+
     /// Return all variable names currently in scope (all scope levels).
     pub fn all_variable_names(&self) -> impl Iterator<Item = &str> {
         self.scopes

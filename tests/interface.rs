@@ -957,3 +957,80 @@ fn read_text_interface_file_round_trip() {
     let restored = read_text_interface_file(&path).unwrap();
     assert_eq!(iface, restored);
 }
+
+// ---------- Resolver::register_interface tests ----------
+
+#[test]
+fn register_interface_functions() {
+    let iface = ModuleInterface {
+        functions: vec![InterfaceFuncEntry {
+            visibility: Visibility::Public,
+            name: "add".to_string(),
+            sig: InterfaceFuncSig {
+                type_params: vec![],
+                params: vec![
+                    ("a".to_string(), InterfaceType::I32),
+                    ("b".to_string(), InterfaceType::I32),
+                ],
+                return_type: InterfaceType::I32,
+            },
+        }],
+        structs: vec![],
+        protocols: vec![],
+    };
+    let mut resolver = bengal::semantic::resolver::Resolver::default();
+    resolver.register_interface(&iface);
+    let sig = resolver
+        .lookup_func("add")
+        .expect("function should be registered");
+    assert_eq!(sig.params.len(), 2);
+    assert_eq!(sig.return_type, bengal::semantic::types::Type::I32);
+}
+
+#[test]
+fn register_interface_structs() {
+    let iface = ModuleInterface {
+        functions: vec![],
+        structs: vec![InterfaceStructEntry {
+            visibility: Visibility::Public,
+            name: "Point".to_string(),
+            type_params: vec![],
+            conformances: vec![],
+            fields: vec![("x".to_string(), InterfaceType::I32)],
+            methods: vec![],
+            computed: vec![],
+            init_params: vec![("x".to_string(), InterfaceType::I32)],
+        }],
+        protocols: vec![],
+    };
+    let mut resolver = bengal::semantic::resolver::Resolver::default();
+    resolver.register_interface(&iface);
+    let info = resolver
+        .lookup_struct("Point")
+        .expect("struct should be registered");
+    assert_eq!(info.fields.len(), 1);
+}
+
+#[test]
+fn register_interface_protocols() {
+    let iface = ModuleInterface {
+        functions: vec![],
+        structs: vec![],
+        protocols: vec![InterfaceProtocolEntry {
+            visibility: Visibility::Public,
+            name: "Runnable".to_string(),
+            methods: vec![InterfaceMethodSig {
+                name: "run".to_string(),
+                params: vec![],
+                return_type: InterfaceType::Unit,
+            }],
+            properties: vec![],
+        }],
+    };
+    let mut resolver = bengal::semantic::resolver::Resolver::default();
+    resolver.register_interface(&iface);
+    let info = resolver
+        .lookup_protocol("Runnable")
+        .expect("protocol should be registered");
+    assert_eq!(info.methods.len(), 1);
+}
