@@ -276,3 +276,15 @@ fn parse_interface_computed_property() {
         panic!("expected ComputedProperty");
     }
 }
+
+#[test]
+fn parse_interface_protocol() {
+    let tokens =
+        tokenize("public protocol Summable { func sum() -> Int32; var value: Int32 { get set }; }")
+            .unwrap();
+    let program = parse_interface(tokens).unwrap();
+    assert_eq!(program.protocols.len(), 1);
+    let p = &program.protocols[0];
+    assert_eq!(p.name, "Summable");
+    assert_eq!(p.members.len(), 2);
+}

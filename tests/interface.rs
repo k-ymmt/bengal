@@ -1109,3 +1109,94 @@ fn interface_to_global_symbols_all_types() {
     // Verify module path
     assert_eq!(symbols["add"].module, mod_path);
 }
+
+#[test]
+fn emit_ordering() {
+    let iface = ModuleInterface {
+        functions: vec![
+            InterfaceFuncEntry {
+                visibility: Visibility::Public,
+                name: "zebra".to_string(),
+                sig: InterfaceFuncSig {
+                    type_params: vec![],
+                    params: vec![],
+                    return_type: InterfaceType::I32,
+                },
+            },
+            InterfaceFuncEntry {
+                visibility: Visibility::Public,
+                name: "alpha".to_string(),
+                sig: InterfaceFuncSig {
+                    type_params: vec![],
+                    params: vec![],
+                    return_type: InterfaceType::I32,
+                },
+            },
+        ],
+        structs: vec![InterfaceStructEntry {
+            visibility: Visibility::Public,
+            name: "MyStruct".to_string(),
+            type_params: vec![],
+            conformances: vec![],
+            fields: vec![("x".to_string(), InterfaceType::I32)],
+            methods: vec![],
+            computed: vec![],
+            init_params: vec![("x".to_string(), InterfaceType::I32)],
+        }],
+        protocols: vec![InterfaceProtocolEntry {
+            visibility: Visibility::Public,
+            name: "MyProto".to_string(),
+            methods: vec![],
+            properties: vec![],
+        }],
+    };
+    let text = emit_text_interface(&iface);
+    let alpha_pos = text.find("func alpha").unwrap();
+    let zebra_pos = text.find("func zebra").unwrap();
+    let struct_pos = text.find("struct MyStruct").unwrap();
+    let proto_pos = text.find("protocol MyProto").unwrap();
+    // Alphabetical within functions
+    assert!(alpha_pos < zebra_pos, "alpha should come before zebra");
+    // Section ordering: functions < structs < protocols
+    assert!(
+        zebra_pos < struct_pos,
+        "functions should come before structs"
+    );
+    assert!(
+        struct_pos < proto_pos,
+        "structs should come before protocols"
+    );
+}
+
+#[test]
+fn emit_interfaces_nested_module_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache_dir = dir.path().join("cache");
+
+    // Create a minimal BengalModFile for a nested module
+    let mod_path = ModulePath(vec!["utils".to_string(), "math".to_string()]);
+    let mod_file = bengal::interface::BengalModFile {
+        package_name: "test_pkg".to_string(),
+        modules: std::collections::HashMap::new(),
+        interfaces: std::collections::HashMap::from([(
+            mod_path.clone(),
+            ModuleInterface {
+                functions: vec![],
+                structs: vec![],
+                protocols: vec![],
+            },
+        )]),
+    };
+
+    let file_path = cache_dir.join(mod_path.to_file_path("bengalmod"));
+    std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    bengal::interface::write_bengalmod_file(&mod_file, &file_path).unwrap();
+
+    // Verify nested path was created correctly
+    assert!(file_path.exists());
+    assert_eq!(file_path, cache_dir.join("utils/math.bengalmod"));
+
+    // Verify readable
+    let restored = read_interface(&file_path).unwrap();
+    assert_eq!(restored.package_name, "test_pkg");
+}

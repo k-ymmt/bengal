@@ -797,10 +797,12 @@ pub fn emit_text_interface(iface: &ModuleInterface) -> String {
 
     let mut has_previous_section = false;
 
-    // Functions section
+    // Functions section (sorted alphabetically by name)
     if !iface.functions.is_empty() {
         has_previous_section = true;
-        for func in &iface.functions {
+        let mut sorted_funcs: Vec<_> = iface.functions.iter().collect();
+        sorted_funcs.sort_by(|a, b| a.name.cmp(&b.name));
+        for func in sorted_funcs {
             out.push_str(&format!(
                 "{} func {}{}({}){};",
                 emit_visibility(func.visibility),
@@ -819,7 +821,9 @@ pub fn emit_text_interface(iface: &ModuleInterface) -> String {
             out.push('\n');
         }
         has_previous_section = true;
-        for s in &iface.structs {
+        let mut sorted_structs: Vec<_> = iface.structs.iter().collect();
+        sorted_structs.sort_by(|a, b| a.name.cmp(&b.name));
+        for s in sorted_structs {
             // Header: visibility struct Name<T, U>: Proto1, Proto2 {
             let conformances = if s.conformances.is_empty() {
                 String::new()
@@ -877,7 +881,9 @@ pub fn emit_text_interface(iface: &ModuleInterface) -> String {
         if has_previous_section {
             out.push('\n');
         }
-        for p in &iface.protocols {
+        let mut sorted_protocols: Vec<_> = iface.protocols.iter().collect();
+        sorted_protocols.sort_by(|a, b| a.name.cmp(&b.name));
+        for p in sorted_protocols {
             out.push_str(&format!(
                 "{} protocol {} {{\n",
                 emit_visibility(p.visibility),
