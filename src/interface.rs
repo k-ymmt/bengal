@@ -69,6 +69,30 @@ impl InterfaceType {
         }
     }
 
+    pub fn to_type(&self) -> Type {
+        match self {
+            InterfaceType::I32 => Type::I32,
+            InterfaceType::I64 => Type::I64,
+            InterfaceType::F32 => Type::F32,
+            InterfaceType::F64 => Type::F64,
+            InterfaceType::Bool => Type::Bool,
+            InterfaceType::Unit => Type::Unit,
+            InterfaceType::Struct(name) => Type::Struct(name.clone()),
+            InterfaceType::TypeParam { name, bound } => Type::TypeParam {
+                name: name.clone(),
+                bound: bound.clone(),
+            },
+            InterfaceType::Generic { name, args } => Type::Generic {
+                name: name.clone(),
+                args: args.iter().map(|a| a.to_type()).collect(),
+            },
+            InterfaceType::Array { element, size } => Type::Array {
+                element: Box::new(element.to_type()),
+                size: *size,
+            },
+        }
+    }
+
     pub fn from_annotation(ann: &TypeAnnotation, type_params: &[TypeParam]) -> Self {
         match ann {
             TypeAnnotation::I32 => InterfaceType::I32,
@@ -1103,5 +1127,54 @@ mod tests {
         assert!(iface.functions.is_empty());
         assert!(iface.structs.is_empty());
         assert!(iface.protocols.is_empty());
+    }
+
+    #[test]
+    fn interface_type_to_type_round_trip_primitives() {
+        let types = vec![
+            Type::I32,
+            Type::I64,
+            Type::F32,
+            Type::F64,
+            Type::Bool,
+            Type::Unit,
+        ];
+        for ty in types {
+            let iface_ty = InterfaceType::from_type(&ty);
+            assert_eq!(iface_ty.to_type(), ty);
+        }
+    }
+
+    #[test]
+    fn interface_type_to_type_round_trip_struct() {
+        let ty = Type::Struct("Point".to_string());
+        assert_eq!(InterfaceType::from_type(&ty).to_type(), ty);
+    }
+
+    #[test]
+    fn interface_type_to_type_round_trip_type_param() {
+        let ty = Type::TypeParam {
+            name: "T".to_string(),
+            bound: Some("Summable".to_string()),
+        };
+        assert_eq!(InterfaceType::from_type(&ty).to_type(), ty);
+    }
+
+    #[test]
+    fn interface_type_to_type_round_trip_generic() {
+        let ty = Type::Generic {
+            name: "Pair".to_string(),
+            args: vec![Type::I32, Type::Bool],
+        };
+        assert_eq!(InterfaceType::from_type(&ty).to_type(), ty);
+    }
+
+    #[test]
+    fn interface_type_to_type_round_trip_array() {
+        let ty = Type::Array {
+            element: Box::new(Type::I32),
+            size: 4,
+        };
+        assert_eq!(InterfaceType::from_type(&ty).to_type(), ty);
     }
 }
