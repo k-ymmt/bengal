@@ -29,7 +29,7 @@ For generic monomorphization, consumers need BIR from `.bengalmod`. The text int
 // bengal-interface-format-version: 1
 ```
 
-First line, required. Validated before parsing.
+First line, required. The reader extracts and validates this line from the raw text **before** lexing. The Bengal lexer does not support comments (`//` tokenizes as two `Slash` tokens), so the header line must be stripped before the remaining text is passed to the lexer.
 
 ### Functions
 
@@ -39,7 +39,7 @@ public func identity<T>(x: T) -> T;
 public func constrained<T: Summable>(x: T) -> Int32;
 ```
 
-No body. Terminated by `;`.
+No body. Terminated by `;`. Functions returning `Unit` omit the `-> Void` suffix (e.g., `public func doSomething();`). Functions/structs with no type parameters omit the `<...>` entirely.
 
 ### Structs
 
@@ -47,7 +47,7 @@ No body. Terminated by `;`.
 public struct Pair<T, U>: Printable {
   var first: T;
   var second: U;
-  var description: String { get };
+  var total: Int32 { get };
   init(first: T, second: U);
   func swap() -> Pair<U, T>;
 }
@@ -56,8 +56,10 @@ public struct Pair<T, U>: Printable {
 Members are signature-only:
 - Stored property: `var name: Type;`
 - Computed property: `var name: Type { get };` or `var name: Type { get set };`
-- Initializer: `init(params);`
-- Method: `func name(params) -> ReturnType;`
+- Initializer: `init(params);` — always emitted (from explicit init or synthesized memberwise init)
+- Method: `func name(params) -> ReturnType;` — methods returning `Unit` omit `-> Void`
+
+Note: Generic methods on structs are not currently supported in the language; `InterfaceMethodSig` does not include type params. This is a known limitation.
 
 ### Protocols
 
@@ -96,7 +98,9 @@ Sections separated by blank lines. Empty sections omitted.
 
 ### Visibility
 
-All entries emitted with `public` prefix. Only `Public`/`Package` visibility items appear in the interface (already filtered by `ModuleInterface::from_semantic_info`).
+`Public` items are emitted with `public` prefix, `Package` items with `package` prefix. Only these two visibility levels appear in the interface (already filtered by `ModuleInterface::from_semantic_info`). This preserves the distinction on round-trip so consumers from other packages can enforce visibility rules.
+
+Note: This requires adding a `visibility` field to `InterfaceFuncEntry`, `InterfaceStructEntry`, and `InterfaceProtocolEntry`. Currently these types have no visibility field because the binary format only stores public/package items without distinguishing them.
 
 ## Emitter Design
 
@@ -146,14 +150,23 @@ Body fields changed from required to optional:
 | `StructMember::Initializer` | `body` | `Block` | `Option<Block>` |
 | `StructMember::ComputedProperty` | `getter` | `Block` | `Option<Block>` |
 
-Normal mode always produces `Some(block)`. Existing code (semantic analysis, BIR lowering) uses `.unwrap()` — these are never called on interface-mode ASTs.
+Normal mode always produces `Some(block)`. Existing code accesses `body` via direct field access and pattern matching (not `.unwrap()`). All such sites must be updated to handle `Option<Block>`.
+
+**Affected files requiring pattern match updates:**
+- `src/semantic/function_analysis.rs` — `func.body.stmts` → `func.body.as_ref().unwrap().stmts`
+- `src/semantic/generic_validation.rs` — destructures `body` and `getter` directly
+- `src/semantic/struct_analysis.rs` — destructures `body` and `getter` in struct member matching
+- `src/bir/lowering/mod.rs` — `self.lower_block_stmts(&func.body)`
+- `src/bir/lowering/lower_program.rs` — destructures `body` in struct member matching
+
+These are only called for normal-mode ASTs (never for interface-mode), so `.unwrap()` is safe. The changes are mechanical: wrap accesses with `.as_ref().unwrap()` or add `Some(body)` to pattern matches.
 
 ### Parsing Behavior in Interface Mode
 
 - **Function**: After signature, expect `;` instead of `{` → `body: None`
 - **Struct method**: Same — `;` instead of body → `body: None`
 - **Struct init**: Same — `;` instead of body → `body: None`
-- **Struct computed property**: `{ get set }` / `{ get }` only, no getter/setter blocks → `getter: None`
+- **Struct computed property**: In interface mode, follow protocol-style parsing (`{ get }` / `{ get set }` with no blocks), not struct-style (`get { block }`). Produces `getter: None`, `has_setter` derived from presence of `set`.
 - **Struct stored property**: No change (already body-less)
 - **Protocol**: No change (already body-less)
 
@@ -169,8 +182,8 @@ pub fn read_text_interface_file(path: &Path) -> Result<ModuleInterface>
 
 ### Processing Flow
 
-1. Extract and validate header comment from first line
-2. Tokenize full text with existing lexer (header comment is skipped by lexer)
+1. Extract and validate header comment from first line of raw text
+2. Strip the header line, then tokenize remaining text with existing lexer
 3. Call `parse_interface(tokens)` to get `Program` (AST)
 4. Call `ModuleInterface::from_ast(&program)` to convert
 
@@ -197,6 +210,8 @@ Conversion mapping:
 New function: `InterfaceType::from_annotation(ann: &TypeAnnotation, type_params: &[TypeParam]) -> InterfaceType`
 
 The `type_params` context resolves the `Named` ambiguity: if a `Named(s)` matches a type parameter name, produce `TypeParam { name, bound }`; otherwise produce `Struct(s)`.
+
+When converting struct members, `from_ast` must pass the **struct's** `type_params` (not the method's) when converting method parameter/return types and field types. For example, in `struct Pair<T, U>`, a method `func swap() -> Pair<U, T>` uses `T` and `U` from the struct's type parameter list.
 
 ## File I/O Integration
 
