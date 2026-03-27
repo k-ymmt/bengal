@@ -38,3 +38,4 @@ Generics with monomorphization, protocols, structs (value-type), module system, 
 
 - Always commit when work is done (only tracked files — if `git diff` or `git status` shows changes to tracked files, commit them)
 - When planning changes, prioritize future extensibility and performance over change scope or backward compatibility.
+- NEVER use the `-C` option with git commands. The working directory is always correct — the `-C` flag is unnecessary and must not be used.
