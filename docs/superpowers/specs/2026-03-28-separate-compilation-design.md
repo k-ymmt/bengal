@@ -22,6 +22,8 @@ Enable compiling a Bengal package using only `.bengalmod` interface files from i
 - Source hash-based cache invalidation
 - Parallel builds
 - `Package.toml` manifest file
+- Re-exports of dependency symbols (a package's `.bengalmod` contains only its own symbols and BIR, not those of its dependencies)
+- Diamond dependencies (A depends on B and C, both depend on D) — will be addressed with `.a` archives where the linker handles duplicate symbols
 
 ## Design Decisions
 
@@ -33,6 +35,9 @@ Enable compiling a Bengal package using only `.bengalmod` interface files from i
 | Generic monomorphization | Consumer-side, BIR merge | Matches Rust's downstream monomorphization model; reuses existing `monomorphize` stage |
 | Import resolution | Fallback (local then external) | No new syntax needed; Rust Edition 2018 uses the same implicit model |
 | Cache validation | Format version check only | No build system yet; user is responsible for rebuilding deps |
+| Cyclic package dependencies | Structurally impossible | A package must be compiled before its `.bengalmod` can be consumed, so cycles cannot form |
+
+**`name` vs `package_name` distinction:** `ExternalDep.name` is the CLI-specified dep name used for import path resolution (what the consumer writes in `import` statements). `ExternalDep.package_name` is the original package name from the `.bengalmod` file, used for symbol mangling (must match the dependency's own mangling). These may differ: `--dep mymath=libmath.bengalmod` means imports use `mymath` but mangled names use `libmath`'s package name.
 
 ## Data Types
 
@@ -41,9 +46,9 @@ Enable compiling a Bengal package using only `.bengalmod` interface files from i
 ```rust
 // src/pipeline.rs
 pub struct ExternalDep {
-    /// Dependency name as specified in --dep (used in import statements)
+    /// Dependency name as specified in --dep (used in import path resolution)
     pub name: String,
-    /// Package name from the .bengalmod file
+    /// Package name from the .bengalmod file (used for symbol mangling)
     pub package_name: String,
     /// Per-module interface data
     pub interfaces: HashMap<ModulePath, ModuleInterface>,
@@ -72,17 +77,25 @@ parse
   → load_external_deps (read .bengalmod files → Vec<ExternalDep>)
   → analyze (inject external interfaces into GlobalSymbolTable)
   → lower (name_map uses dep package names for mangling)
+  → emit_interfaces (unchanged — per-module .bengalmod for local package)
+  → emit_package_bengalmod (new — single .bengalmod for entire package)
   → merge_external_bir (merge dep BIR into LoweredPackage)
-  → emit_interfaces (unchanged — emits local package's .bengalmod)
   → optimize
   → monomorphize
   → codegen
   → link
 ```
 
+**Critical ordering:** `emit_interfaces` and `emit_package_bengalmod` MUST run BEFORE `merge_external_bir`. The local package's `.bengalmod` must contain only its own modules, not merged dependency BIR.
+
 ### 1. Package-Level `.bengalmod` Emission
 
-Add `emit_package_bengalmod()` alongside existing `emit_interfaces()`. Produces a single `.bengalmod` containing all modules of the package:
+Add `emit_package_bengalmod()` alongside the existing `emit_interfaces()`. Both coexist:
+
+- **`emit_interfaces()`** (existing): Per-module `.bengalmod` files in `.build/cache/`. Retained for future incremental compilation.
+- **`emit_package_bengalmod()`** (new): Single `.bengalmod` for the entire package. This is what `--dep` consumes.
+
+`compile_to_executable` calls both.
 
 ```rust
 pub fn emit_package_bengalmod(lowered: &LoweredPackage, cache_dir: &Path) {
@@ -106,7 +119,7 @@ pub fn emit_package_bengalmod(lowered: &LoweredPackage, cache_dir: &Path) {
     };
 
     let file_path = cache_dir.join(format!("{}.bengalmod", lowered.package_name));
-    // write with error handling (non-fatal)
+    // write with error handling (non-fatal, same as emit_interfaces)
 }
 ```
 
@@ -129,13 +142,25 @@ pub fn load_external_dep(name: &str, path: &Path) -> Result<ExternalDep, Pipelin
 
 ### 3. Analyze Stage — GlobalSymbolTable Injection
 
-`analyze_package` receives `external_deps: &[ExternalDep]`.
+**New signature for `analyze_package`:**
+
+```rust
+pub fn analyze_package(
+    graph: &ModuleGraph,
+    _package_name: &str,
+    external_deps: &[ExternalDep],  // NEW
+    diag: &mut DiagCtxt,
+) -> Result<PackageSemanticInfo>
+```
+
+When no external deps are present (backward compat), pass `&[]`.
 
 **Phase 1 addition — after `collect_global_symbols`:**
 
 External dependency module paths are prefixed with the dep name to avoid collisions with local modules:
 
 ```rust
+// Defined in src/semantic/package_analysis.rs (used by both analyze and merge stages)
 fn dep_module_path(dep_name: &str, internal_path: &ModulePath) -> ModulePath {
     let mut segments = vec![dep_name.to_string()];
     segments.extend(internal_path.0.iter().cloned());
@@ -148,31 +173,61 @@ Mapping examples:
 - dep name `"math"`, internal `ModulePath(["utils"])` → `ModulePath(["math", "utils"])`
 
 ```rust
+let mut global_symbols = collect_global_symbols(graph)?;
+
+// Inject external dep symbols into GlobalSymbolTable
+let mut external_dep_names: HashMap<ModulePath, String> = HashMap::new();
 for dep in external_deps {
     for (mod_path, iface) in &dep.interfaces {
         let ext_path = dep_module_path(&dep.name, mod_path);
         let symbols = interface_to_global_symbols(iface, &ext_path);
-        global_symbols.insert(ext_path, symbols);
+        global_symbols.insert(ext_path.clone(), symbols);
+        external_dep_names.insert(ext_path, dep.package_name.clone());
     }
 }
 ```
 
+The existing `resolve_imports_for_module` already receives `&global_symbols`, so injected external symbols participate in import resolution automatically.
+
 **Phase 2 change — import resolution fallback:**
 
-`resolve_import_module_path` gains a `global_symbols` parameter:
+**New signature for `resolve_import_module_path`:**
 
 ```rust
-// After building the target ModulePath:
+fn resolve_import_module_path(
+    current_module: &ModulePath,
+    prefix: &PathPrefix,
+    path_segments: &[String],
+    graph: &ModuleGraph,
+    global_symbols: &GlobalSymbolTable,  // NEW
+) -> Result<ModulePath>
+```
+
+After building the target `ModulePath`:
+
+```rust
+// Local module — preferred
 if graph.modules.contains_key(&result) {
-    return Ok(result);  // Local module — preferred
+    return Ok(result);
 }
+// External dependency — fallback
 if global_symbols.contains_key(&result) {
-    return Ok(result);  // External dependency — fallback
+    return Ok(result);
 }
 Err(pkg_err("unresolved import: module '...' not found"))
 ```
 
-This means `import math::add` first checks local modules, then external deps — no new syntax needed.
+**Import path alignment walkthrough:**
+
+For `import math::add` (single symbol):
+- Parser: `PathPrefix::Named("math")`, path = `[]`, tail = `Single("add")`
+- `resolve_import_module_path` builds `ModulePath(["math"])`
+- External dep registered at `dep_module_path("math", root)` = `ModulePath(["math"])` ✓
+
+For `import math::utils::foo` (sub-module):
+- Parser: `PathPrefix::Named("math")`, path = `["utils"]`, tail = `Single("foo")`
+- `resolve_import_module_path` builds `ModulePath(["math", "utils"])`
+- External dep registered at `dep_module_path("math", ["utils"])` = `ModulePath(["math", "utils"])` ✓
 
 **`PackageSemanticInfo` extension:**
 
@@ -185,45 +240,101 @@ pub struct PackageSemanticInfo {
 }
 ```
 
-Populated during Phase 1:
+Construction in `analyze_package` updated:
 ```rust
-for dep in external_deps {
-    for mod_path in dep.interfaces.keys() {
-        let ext_path = dep_module_path(&dep.name, mod_path);
-        pkg_sem_info.external_dep_names.insert(ext_path, dep.package_name.clone());
-    }
-}
+Ok(PackageSemanticInfo {
+    module_infos,
+    import_sources,
+    external_dep_names,  // populated during Phase 1 above
+})
 ```
 
 ### 4. Lower Stage — Name Mangling
 
-`build_name_map` uses `external_dep_names` to determine whether an imported symbol comes from an external package:
+`build_name_map` uses `external_dep_names` to determine whether an imported symbol comes from an external package. Uses `mangle_function` for functions, `mangle_method` for methods, and `mangle_initializer` for struct initializers (note: `mangle_initializer` produces `_BGI...` tags, distinct from `mangle_method`'s `_BGM...` tags). Helper to resolve package name and source segments:
+
+```rust
+/// Returns (package_name, source_module_segments) for mangling.
+/// For external deps, uses the dep's package_name and strips the dep_name prefix.
+/// For local imports, uses the consumer's package_name.
+fn resolve_mangle_context<'a>(
+    source_module: &'a ModulePath,
+    package_name: &'a str,
+    external_dep_names: &'a HashMap<ModulePath, String>,
+) -> (&'a str, &'a [String]) {
+    if let Some(dep_pkg_name) = external_dep_names.get(source_module) {
+        (dep_pkg_name.as_str(), &source_module.0[1..])
+    } else {
+        (package_name, source_module.0.as_slice())
+    }
+}
+```
+
+**Imported functions** (existing section in `build_name_map`, lines 78-93):
 
 ```rust
 for ((imp_mod, imp_name), source_module) in &pkg_sem_info.import_sources {
     if imp_mod != mod_path { continue; }
+    // Skip structs — they are handled in the method mangling section
+    if sem_info.struct_defs.contains_key(imp_name) { continue; }
 
-    let (pkg_name, source_segments) = if let Some(dep_pkg_name) =
-        pkg_sem_info.external_dep_names.get(source_module)
-    {
-        // External: use dep's package name, strip dep_name prefix from path
-        let internal_segments = &source_module.0[1..];
-        (dep_pkg_name.as_str(), internal_segments)
+    let (pkg_name, source_segments) = resolve_mangle_context(
+        source_module, package_name, &pkg_sem_info.external_dep_names
+    );
+    let source_segs: Vec<&str> = if source_segments.is_empty() {
+        vec![""]
     } else {
-        // Local: use own package name
-        (package_name, source_module.0.as_slice())
+        source_segments.iter().map(|s| s.as_str()).collect()
     };
-
-    let mangled = mangle_function(pkg_name, source_segments, imp_name, &[]);
+    let mangled = mangle_function(pkg_name, &source_segs, imp_name, &[]);
     name_map.insert(imp_name.clone(), mangled);
 }
 ```
 
-Same logic applies to method mangling (`mangle_method`).
+**Imported struct methods** (existing section, lines 36-75):
+
+```rust
+for (struct_name, struct_info) in &sem_info.struct_defs {
+    let is_imported = pkg_sem_info
+        .import_sources
+        .contains_key(&(mod_path.clone(), struct_name.clone()));
+    if is_imported {
+        if let Some(source_module) = pkg_sem_info
+            .import_sources
+            .get(&(mod_path.clone(), struct_name.clone()))
+        {
+            let (pkg_name, source_segments) = resolve_mangle_context(
+                source_module, package_name, &pkg_sem_info.external_dep_names
+            );
+            let source_segs: Vec<&str> = if source_segments.is_empty() {
+                vec![""]
+            } else {
+                source_segments.iter().map(|s| s.as_str()).collect()
+            };
+
+            // Methods
+            for method in &struct_info.methods {
+                let local_mangled = format!("{}_{}", struct_name, method.name);
+                let mangled = mangle_method(pkg_name, &source_segs, struct_name, &method.name, &[]);
+                name_map.insert(local_mangled, mangled);
+            }
+
+            // Initializer (if struct has init params)
+            if !struct_info.init.params.is_empty() {
+                let local_mangled = format!("{}_init", struct_name);
+                let mangled = mangle_initializer(pkg_name, &source_segs, struct_name);
+                name_map.insert(local_mangled, mangled);
+            }
+        }
+    } else {
+        // Local struct: existing logic with package_name and module_segments
+    }
+}
+```
 
 ### 5. BIR Merge
 
-After lower, before optimize:
+**Ordering:** Runs AFTER `emit_interfaces`/`emit_package_bengalmod`, BEFORE `optimize`. This ensures the local package's `.bengalmod` does not contain external dependency BIR.
 
 ```rust
 fn merge_external_deps(lowered: &mut LoweredPackage, external_deps: &[ExternalDep]) {
@@ -239,11 +350,13 @@ fn merge_external_deps(lowered: &mut LoweredPackage, external_deps: &[ExternalDe
 }
 ```
 
-The merged BIR modules flow through the rest of the pipeline unchanged:
-- **optimize**: optimization passes run on all modules (local + external)
-- **monomorphize**: consumer-side monomorphization of external generics; concrete instantiations end up in consumer's object code
-- **codegen**: all modules compiled to object bytes
-- **link**: all object files linked into the final executable
+**Downstream stages operate purely on BIR data:**
+- **optimize**: `bir::optimize_module(&mut module.bir)` — BIR only, no `pkg_sem_info` access
+- **monomorphize**: `bir::mono::mono_collect(&module.bir, "main")` — BIR only
+- **codegen**: `codegen::compile_module_with_mono(&module.bir, ...)` — BIR only
+- **link**: operates on `object_bytes` — no semantic info needed
+
+External BIR modules will not have entries in `pkg_sem_info.module_infos`, but this is safe because no post-lower stage consults `pkg_sem_info`. The `emit_interfaces`/`emit_package_bengalmod` functions skip modules with no `sem_info` entry (`None => continue`), which is the correct behavior.
 
 ## Error Handling
 
@@ -254,7 +367,7 @@ The merged BIR modules flow through the rest of the pipeline unchanged:
 | Import targets non-existent module | Existing error: "unresolved import: module '...' not found" |
 | Import targets internal symbol | Existing error: "'...' is not accessible from module '...'" |
 | Duplicate dep names | Fatal error: "--dep 'math' specified multiple times" |
-| Dep name conflicts with local module | Local module wins (fallback semantics) |
+| Dep name conflicts with local module | Local module wins (fallback semantics); emit warning: "dependency 'math' is shadowed by local module 'math'" |
 
 ## Testing Strategy
 
