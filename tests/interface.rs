@@ -958,6 +958,32 @@ fn read_text_interface_file_round_trip() {
     assert_eq!(iface, restored);
 }
 
+// ---------- emit_interfaces pipeline tests ----------
+
+#[test]
+fn emit_interfaces_creates_cache_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache_dir = dir.path().join("cache");
+
+    let lowered = source_to_lowered(
+        "public func add(a: Int32, b: Int32) -> Int32 { return a + b; }
+         func main() -> Int32 { return add(1, 2); }",
+    );
+    bengal::pipeline::emit_interfaces(&lowered, &cache_dir);
+
+    // Verify file exists for root module
+    let root_path = cache_dir.join("root.bengalmod");
+    assert!(root_path.exists(), "root.bengalmod should be created");
+
+    // Verify file is readable and contains expected data
+    let restored = read_interface(&root_path).unwrap();
+    assert_eq!(restored.package_name, lowered.package_name);
+    let root_mod = ModulePath::root();
+    assert!(restored.interfaces.contains_key(&root_mod));
+    let iface = &restored.interfaces[&root_mod];
+    assert!(!iface.functions.is_empty());
+}
+
 // ---------- Resolver::register_interface tests ----------
 
 #[test]

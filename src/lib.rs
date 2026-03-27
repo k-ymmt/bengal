@@ -26,6 +26,7 @@ pub fn compile_to_executable(
     let parsed = pipeline::parse(entry_path)?;
     let analyzed = pipeline::analyze(parsed, &mut diag)?;
     let lowered = pipeline::lower(analyzed, &mut diag)?;
+    pipeline::emit_interfaces(&lowered, std::path::Path::new(".build/cache"));
     let optimized = pipeline::optimize(lowered);
     let mono = pipeline::monomorphize(optimized, &mut diag)?;
     let compiled = pipeline::codegen(mono, &mut diag)?;

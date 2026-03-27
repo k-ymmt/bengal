@@ -376,6 +376,39 @@ pub fn link(
     Ok(())
 }
 
+/// Emit per-module `.bengalmod` interface files into the given cache directory.
+/// Errors are non-fatal — they are reported as warnings on stderr.
+pub fn emit_interfaces(lowered: &LoweredPackage, cache_dir: &std::path::Path) {
+    if let Err(e) = std::fs::create_dir_all(cache_dir) {
+        eprintln!("warning: failed to create cache directory: {}", e);
+        return;
+    }
+
+    for (module_path, module) in &lowered.modules {
+        let sem_info = match lowered.pkg_sem_info.module_infos.get(module_path) {
+            Some(info) => info,
+            None => continue,
+        };
+        let iface = crate::interface::ModuleInterface::from_semantic_info(sem_info);
+        let mod_file = crate::interface::BengalModFile {
+            package_name: lowered.package_name.clone(),
+            modules: HashMap::from([(module_path.clone(), module.bir.clone())]),
+            interfaces: HashMap::from([(module_path.clone(), iface)]),
+        };
+
+        let file_path = cache_dir.join(module_path.to_file_path("bengalmod"));
+        if let Some(parent) = file_path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            eprintln!("warning: failed to create cache subdirectory: {}", e);
+            continue;
+        }
+        if let Err(e) = crate::interface::write_bengalmod_file(&mod_file, &file_path) {
+            eprintln!("warning: failed to write interface cache: {}", e);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
