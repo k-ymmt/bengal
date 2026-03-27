@@ -26,7 +26,9 @@ The text format must distinguish `public` from `package` visibility. Currently t
 In `src/interface.rs`, add `pub visibility: Visibility` to `InterfaceFuncEntry`, `InterfaceStructEntry`, and `InterfaceProtocolEntry`. Use the existing `Visibility` type from `crate::parser::ast`. Add `Serialize`/`Deserialize` derives to `Visibility` in `src/parser/ast.rs` (it currently only has `Debug, Clone, Copy, PartialEq, Eq, Default`).
 
 ```rust
-// src/parser/ast.rs — add Serialize, Deserialize
+// src/parser/ast.rs — add serde import and derives
+use serde::{Serialize, Deserialize};  // ADD at top of file
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Visibility { ... }
 ```
@@ -272,7 +274,7 @@ Add tests in `src/parser/tests/test_definitions.rs` (or a new test file `test_in
 ```rust
 #[test]
 fn parse_interface_function() {
-    let tokens = lex("public func add(a: Int32, b: Int32) -> Int32;");
+    let tokens = tokenize("public func add(a: Int32, b: Int32) -> Int32;");
     let program = parse_interface(tokens).unwrap();
     assert_eq!(program.functions.len(), 1);
     let f = &program.functions[0];
@@ -283,7 +285,7 @@ fn parse_interface_function() {
 
 #[test]
 fn parse_interface_generic_function() {
-    let tokens = lex("public func identity<T>(x: T) -> T;");
+    let tokens = tokenize("public func identity<T>(x: T) -> T;");
     let program = parse_interface(tokens).unwrap();
     let f = &program.functions[0];
     assert_eq!(f.type_params.len(), 1);
@@ -293,7 +295,7 @@ fn parse_interface_generic_function() {
 
 #[test]
 fn parse_interface_unit_return_function() {
-    let tokens = lex("public func doSomething();");
+    let tokens = tokenize("public func doSomething();");
     let program = parse_interface(tokens).unwrap();
     let f = &program.functions[0];
     assert_eq!(f.return_type, TypeAnnotation::Unit);
@@ -302,7 +304,7 @@ fn parse_interface_unit_return_function() {
 
 #[test]
 fn parse_interface_struct() {
-    let tokens = lex("public struct Point { var x: Int32; var y: Int32; init(x: Int32, y: Int32); func sum() -> Int32; }");
+    let tokens = tokenize("public struct Point { var x: Int32; var y: Int32; init(x: Int32, y: Int32); func sum() -> Int32; }");
     let program = parse_interface(tokens).unwrap();
     assert_eq!(program.structs.len(), 1);
     let s = &program.structs[0];
@@ -320,7 +322,7 @@ fn parse_interface_struct() {
 
 #[test]
 fn parse_interface_computed_property() {
-    let tokens = lex("public struct S { var x: Int32 { get }; var y: Int32 { get set }; }");
+    let tokens = tokenize("public struct S { var x: Int32 { get }; var y: Int32 { get set }; }");
     let program = parse_interface(tokens).unwrap();
     let s = &program.structs[0];
     if let StructMember::ComputedProperty { getter, setter, .. } = &s.members[0] {
@@ -1185,7 +1187,7 @@ use crate::parser::ast::Program;
 
 impl ModuleInterface {
     pub fn from_ast(program: &Program) -> Self {
-        let functions: Vec<InterfaceFuncEntry> = program.functions.iter().map(|f| {
+        let mut functions: Vec<InterfaceFuncEntry> = program.functions.iter().map(|f| {
             let type_params: Vec<InterfaceTypeParam> = f.type_params.iter()
                 .map(InterfaceTypeParam::from_type_param).collect();
             InterfaceFuncEntry {
@@ -1201,7 +1203,7 @@ impl ModuleInterface {
             }
         }).collect();
 
-        let structs: Vec<InterfaceStructEntry> = program.structs.iter().map(|s| {
+        let mut structs: Vec<InterfaceStructEntry> = program.structs.iter().map(|s| {
             let struct_tps = &s.type_params;  // thread struct's type params
             let mut fields = Vec::new();
             let mut methods = Vec::new();
@@ -1249,7 +1251,7 @@ impl ModuleInterface {
             }
         }).collect();
 
-        let protocols: Vec<InterfaceProtocolEntry> = program.protocols.iter().map(|p| {
+        let mut protocols: Vec<InterfaceProtocolEntry> = program.protocols.iter().map(|p| {
             InterfaceProtocolEntry {
                 visibility: p.visibility,
                 name: p.name.clone(),
@@ -1324,7 +1326,7 @@ pub fn read_text_interface(text: &str) -> Result<ModuleInterface> {
     }
 
     // Step 2: Strip header, tokenize remaining text
-    let body = &text[first_line.len()..].trim_start_matches('\n');
+    let body = text[first_line.len()..].trim_start_matches('\n');
     if body.trim().is_empty() {
         return Ok(ModuleInterface {
             functions: vec![],
