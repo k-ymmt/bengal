@@ -140,15 +140,11 @@ pub fn analyze(
     diag: &mut DiagCtxt,
 ) -> Result<AnalyzedPackage, crate::error::PipelineError> {
     // Validate generics for all modules
-    for (mod_path, mod_info) in &parsed.graph.modules {
-        crate::semantic::validate_generics(&mod_info.ast).map_err(|e| {
-            crate::error::PipelineError::new(
-                "analyze",
-                &mod_path.to_string(),
-                Some(&mod_info.source),
-                e,
-            )
-        })?;
+    for mod_info in parsed.graph.modules.values() {
+        if let Err(e) = crate::semantic::validate_generics(&mod_info.ast) {
+            diag.emit(e);
+            continue;
+        }
     }
 
     // Run pre-mono type inference per module
@@ -156,20 +152,29 @@ pub fn analyze(
         HashMap::new();
     for (mod_path, mod_info) in &parsed.graph.modules {
         let (inferred, _pre_mono_sem_info) =
-            crate::semantic::analyze_pre_mono_lenient(&mod_info.ast).map_err(|e| {
-                crate::error::PipelineError::new(
-                    "analyze",
-                    &mod_path.to_string(),
-                    Some(&mod_info.source),
-                    e,
-                )
-            })?;
+            match crate::semantic::analyze_pre_mono_lenient(&mod_info.ast) {
+                Ok(result) => result,
+                Err(e) => {
+                    diag.emit(e);
+                    continue;
+                }
+            };
         let inferred_map: HashMap<NodeId, Vec<TypeAnnotation>> = inferred
             .map
             .into_iter()
             .map(|(id, site)| (id, site.type_args))
             .collect();
         inferred_maps.insert(mod_path.clone(), inferred_map);
+    }
+
+    // Bail out if any per-module errors were collected above
+    if diag.has_errors() {
+        return Err(crate::error::PipelineError::package(
+            "analyze",
+            BengalError::PackageError {
+                message: "analysis failed due to module errors".to_string(),
+            },
+        ));
     }
 
     // Cross-module semantic analysis
