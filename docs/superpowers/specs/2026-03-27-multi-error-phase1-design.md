@@ -27,6 +27,7 @@ Introduce a `DiagCtxt` (diagnostic context) for accumulating multiple compilatio
 ### 1. DiagCtxt Struct (`src/error.rs`)
 
 ```rust
+#[derive(Default)]
 pub struct DiagCtxt {
     errors: Vec<BengalError>,
     limit: usize,
@@ -73,7 +74,7 @@ Functions NOT changed (rationale):
 - `optimize` — never fails
 - `link` — external process, single pass
 
-In Phase 1, the `diag` parameter is accepted but **not used** inside these functions. Existing `?`-based early return behavior is preserved.
+In Phase 1, the `diag` parameter is accepted but **not used** inside these functions. Existing `?`-based early return behavior is preserved. Use `_diag` prefix to suppress unused variable warnings from clippy.
 
 ### 3. Public API (`src/lib.rs`)
 
@@ -92,7 +93,11 @@ pub fn compile_to_executable(entry_path: &Path, output_path: &Path) -> Result<()
 }
 ```
 
-Same pattern for `compile_to_bir`, `compile_source_to_bir`, `compile_to_objects`, `compile_source_to_objects`.
+Each public function creates `DiagCtxt::new()` internally and passes it to whichever pipeline functions it calls:
+- `compile_to_bir` / `compile_source_to_bir`: pass to `analyze` and `lower` only
+- `compile_to_objects` / `compile_source_to_objects`: pass to `analyze`, `lower`, `monomorphize`, `codegen`
+
+Note: `compile_source_to_objects` returns `Result<Vec<u8>, BengalError>` (strips `PipelineError`). In Phase 1 the DiagCtxt is discarded at function exit; Phase 6 will address exposing accumulated diagnostics through the public API.
 
 ### 4. CLI (`src/main.rs`)
 
@@ -107,10 +112,13 @@ The `compile` subcommand creates `DiagCtxt::new()` and passes it to pipeline fun
 | `src/lib.rs` | Create `DiagCtxt::new()` in each public function; pass to pipeline |
 | `src/main.rs` | Create `DiagCtxt::new()` in `compile` subcommand; pass to pipeline |
 
+| `tests/interface.rs` | Update `source_to_lowered` helper and `round_trip_multi_module_package` test to pass `&mut DiagCtxt` to `analyze`, `lower` |
+
 ## Not Changed
 
 - `tests/common/mod.rs` — uses `lib.rs` public API which handles DiagCtxt internally
-- All test files (`tests/*.rs`) — no signature changes visible externally
+- Other test files (`tests/*.rs` except `interface.rs`) — no pipeline calls
+- `src/lib.rs` internal tests — use low-level `lexer`/`parser`/`bir` API, not pipeline
 - `src/bir/lowering.rs` — DiagCtxt integration deferred to Phase 4
 - `src/semantic/mod.rs` — DiagCtxt integration deferred to Phase 2
 
