@@ -75,6 +75,7 @@ pub fn try_type_to_annotation(ty: &Type) -> std::result::Result<TypeAnnotation, 
         Type::InferVar(_) | Type::IntegerLiteral(_) | Type::FloatLiteral(_) => {
             Err(unify_err("unresolved type variable in type_to_annotation"))
         }
+        Type::Error => Err(unify_err("error type in type_to_annotation")),
     }
 }
 
@@ -395,6 +396,11 @@ impl InferenceContext {
     /// Unify two types, updating inference variable bindings as needed.
     /// Returns `Ok(())` on success, or an error if the types are incompatible.
     pub fn unify(&mut self, ty1: Type, ty2: Type) -> Result<(), BengalError> {
+        // Error type unifies with anything — prevents cascading errors.
+        if matches!(&ty1, Type::Error) || matches!(&ty2, Type::Error) {
+            return Ok(());
+        }
+
         let ty1 = self.deep_resolve(ty1);
         let ty2 = self.deep_resolve(ty2);
 
@@ -1104,5 +1110,25 @@ mod tests {
             msg
         );
         assert!(msg.contains("'choose'"), "expected func name, got: {}", msg);
+    }
+
+    // --- Type::Error unification tests ---
+
+    #[test]
+    fn unify_error_with_i32_ok() {
+        let mut ctx = InferenceContext::new();
+        assert!(ctx.unify(Type::Error, Type::I32).is_ok());
+    }
+
+    #[test]
+    fn unify_i32_with_error_ok() {
+        let mut ctx = InferenceContext::new();
+        assert!(ctx.unify(Type::I32, Type::Error).is_ok());
+    }
+
+    #[test]
+    fn unify_error_with_error_ok() {
+        let mut ctx = InferenceContext::new();
+        assert!(ctx.unify(Type::Error, Type::Error).is_ok());
     }
 }

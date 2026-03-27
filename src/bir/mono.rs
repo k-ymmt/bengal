@@ -68,6 +68,7 @@ fn mangle_bir_type(ty: &BirType) -> String {
             format!("Array_{}_{}", mangle_bir_type(element), size)
         }
         BirType::TypeParam(name) => panic!("cannot mangle unresolved TypeParam: {name}"),
+        BirType::Error => panic!("cannot mangle BirType::Error"),
     }
 }
 

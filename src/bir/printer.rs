@@ -20,6 +20,7 @@ fn format_type(ty: &BirType) -> String {
             format!("[{}; {}]", format_type(element), size)
         }
         BirType::TypeParam(name) => name.clone(),
+        BirType::Error => "<error>".to_string(),
     }
 }
 

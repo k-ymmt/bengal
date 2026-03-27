@@ -2048,6 +2048,7 @@ pub fn semantic_type_to_bir(ty: &crate::semantic::types::Type) -> BirType {
         | crate::semantic::types::Type::FloatLiteral(_) => {
             unreachable!("inference type in post-mono pass")
         }
+        crate::semantic::types::Type::Error => BirType::Error,
     }
 }
 

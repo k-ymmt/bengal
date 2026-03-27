@@ -22,6 +22,8 @@ pub enum BirType {
         size: u64,
     },
     TypeParam(String),
+    /// Placeholder for a type that failed to resolve; should never reach codegen.
+    Error,
 }
 
 impl BirType {

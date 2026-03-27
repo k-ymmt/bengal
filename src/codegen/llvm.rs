@@ -54,6 +54,7 @@ fn bir_type_to_llvm_type<'ctx>(
             Some(elem_ty.array_type(*size as u32).into())
         }
         BirType::TypeParam(name) => panic!("unresolved TypeParam '{name}' in codegen"),
+        BirType::Error => panic!("BirType::Error reached codegen — this is a compiler bug"),
     }
 }
 
@@ -274,6 +275,7 @@ fn emit_instruction<'ctx>(
                 BirType::TypeParam(name) => {
                     panic!("unresolved TypeParam '{name}' in codegen")
                 }
+                BirType::Error => panic!("BirType::Error reached codegen — this is a compiler bug"),
             };
             ctx.builder
                 .build_store(ctx.alloca_map[result], llvm_val)

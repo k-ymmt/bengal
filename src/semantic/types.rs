@@ -11,12 +11,23 @@ pub enum Type {
     Bool,
     Unit,
     Struct(String),
-    TypeParam { name: String, bound: Option<String> },
-    Generic { name: String, args: Vec<Type> },
-    Array { element: Box<Type>, size: u64 },
+    TypeParam {
+        name: String,
+        bound: Option<String>,
+    },
+    Generic {
+        name: String,
+        args: Vec<Type>,
+    },
+    Array {
+        element: Box<Type>,
+        size: u64,
+    },
     InferVar(u32),
     IntegerLiteral(u32),
     FloatLiteral(u32),
+    /// Represents a failed type resolution; unifies with anything to suppress cascading errors.
+    Error,
 }
 
 impl fmt::Display for Type {
@@ -44,6 +55,7 @@ impl fmt::Display for Type {
             Type::InferVar(id) => write!(f, "?{}", id),
             Type::IntegerLiteral(_) => write!(f, "integer literal"),
             Type::FloatLiteral(_) => write!(f, "float literal"),
+            Type::Error => write!(f, "<error>"),
         }
     }
 }
