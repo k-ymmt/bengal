@@ -7,6 +7,7 @@ pub mod mangle;
 pub mod package;
 pub mod parser;
 pub mod pipeline;
+pub mod pipeline_helpers;
 pub mod semantic;
 pub mod suggest;
 
