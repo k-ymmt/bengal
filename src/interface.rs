@@ -389,7 +389,7 @@ fn emit_visibility(vis: Visibility) -> &'static str {
     match vis {
         Visibility::Public => "public",
         Visibility::Package => "package",
-        _ => "internal",
+        _ => unreachable!("only Public and Package visibility expected in interface"),
     }
 }
 
@@ -490,9 +490,7 @@ pub fn emit_text_interface(iface: &ModuleInterface) -> String {
             }
 
             // Init
-            if !s.init_params.is_empty() {
-                out.push_str(&format!("  init({});\n", emit_params(&s.init_params)));
-            }
+            out.push_str(&format!("  init({});\n", emit_params(&s.init_params)));
 
             // Methods
             for m in &s.methods {
