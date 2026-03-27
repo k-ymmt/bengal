@@ -466,25 +466,33 @@ pub fn monomorphize(
 /// Code generation: compile each module's BIR to native object code.
 pub fn codegen(
     mono: MonomorphizedPackage,
-    _diag: &mut DiagCtxt,
+    diag: &mut DiagCtxt,
 ) -> Result<CompiledPackage, crate::error::PipelineError> {
     let mut object_bytes = HashMap::new();
 
     for (mod_path, module) in &mono.modules {
-        let obj = crate::codegen::compile_module_with_mono(
+        match crate::codegen::compile_module_with_mono(
             &module.bir,
             &module.mono_result,
             &module.external_functions,
-        )
-        .map_err(|e| {
-            crate::error::PipelineError::new(
-                "codegen",
-                &mod_path.to_string(),
-                mono.sources.get(mod_path).map(|s| s.as_str()),
-                e,
-            )
-        })?;
-        object_bytes.insert(mod_path.clone(), obj);
+        ) {
+            Ok(obj) => {
+                object_bytes.insert(mod_path.clone(), obj);
+            }
+            Err(e) => {
+                diag.emit(e);
+                continue;
+            }
+        }
+    }
+
+    if diag.has_errors() {
+        return Err(crate::error::PipelineError::package(
+            "codegen",
+            BengalError::CodegenError {
+                message: format!("{} error(s) during code generation", diag.error_count()),
+            },
+        ));
     }
 
     Ok(CompiledPackage { object_bytes })
