@@ -1,6 +1,7 @@
 pub mod infer;
 pub mod resolver;
 pub mod types;
+mod unify;
 
 mod expr_analysis;
 mod expr_call_analysis;
