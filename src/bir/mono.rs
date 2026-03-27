@@ -31,12 +31,7 @@ pub struct Instance {
 
 impl Instance {
     pub fn mangled_name(&self) -> String {
-        if self.type_args.is_empty() {
-            self.func_name.clone()
-        } else {
-            let args: Vec<String> = self.type_args.iter().map(mangle_bir_type).collect();
-            format!("{}_{}", self.func_name, args.join("_"))
-        }
+        crate::mangle::mangle_generic_suffix(&self.func_name, &self.type_args)
     }
 
     pub fn substitution_map(&self, type_params: &[String]) -> HashMap<String, BirType> {
@@ -45,30 +40,6 @@ impl Instance {
             .zip(&self.type_args)
             .map(|(name, ty)| (name.clone(), ty.clone()))
             .collect()
-    }
-}
-
-fn mangle_bir_type(ty: &BirType) -> String {
-    match ty {
-        BirType::I32 => "Int32".into(),
-        BirType::I64 => "Int64".into(),
-        BirType::F32 => "Float32".into(),
-        BirType::F64 => "Float64".into(),
-        BirType::Bool => "Bool".into(),
-        BirType::Unit => "Unit".into(),
-        BirType::Struct { name, type_args } => {
-            if type_args.is_empty() {
-                name.clone()
-            } else {
-                let args: Vec<String> = type_args.iter().map(mangle_bir_type).collect();
-                format!("{}_{}", name, args.join("_"))
-            }
-        }
-        BirType::Array { element, size } => {
-            format!("Array_{}_{}", mangle_bir_type(element), size)
-        }
-        BirType::TypeParam(name) => panic!("cannot mangle unresolved TypeParam: {name}"),
-        BirType::Error => panic!("cannot mangle BirType::Error"),
     }
 }
 
@@ -351,28 +322,28 @@ mod tests {
     #[test]
     fn instance_mangle_single() {
         let inst = Instance {
-            func_name: "identity".into(),
+            func_name: "_BGFN3pkg8identityE".into(),
             type_args: vec![BirType::I32],
         };
-        assert_eq!(inst.mangled_name(), "identity_Int32");
+        assert_eq!(inst.mangled_name(), "_BGFN3pkg8identityEIiE");
     }
 
     #[test]
     fn instance_mangle_multi() {
         let inst = Instance {
-            func_name: "swap".into(),
+            func_name: "_BGFN3pkg4swapE".into(),
             type_args: vec![BirType::I32, BirType::Bool],
         };
-        assert_eq!(inst.mangled_name(), "swap_Int32_Bool");
+        assert_eq!(inst.mangled_name(), "_BGFN3pkg4swapEIibE");
     }
 
     #[test]
     fn instance_mangle_struct_arg() {
         let inst = Instance {
-            func_name: "getFirst".into(),
+            func_name: "_BGFN3pkg8getFirstE".into(),
             type_args: vec![BirType::struct_simple("Point".into()), BirType::I32],
         };
-        assert_eq!(inst.mangled_name(), "getFirst_Point_Int32");
+        assert_eq!(inst.mangled_name(), "_BGFN3pkg8getFirstEIS5PointiE");
     }
 
     #[test]

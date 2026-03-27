@@ -212,7 +212,7 @@ fn build_name_map(
             name_map.insert("main".to_string(), "main".to_string());
         } else {
             let mangled =
-                crate::mangle::mangle_function(package_name, &module_segments, &func.name);
+                crate::mangle::mangle_function(package_name, &module_segments, &func.name, &[]);
             name_map.insert(func.name.clone(), mangled);
         }
     }
@@ -239,6 +239,7 @@ fn build_name_map(
                         &source_segments,
                         struct_name,
                         &method.name,
+                        &[],
                     );
                     name_map.insert(local_mangled, mangled);
                 }
@@ -251,6 +252,7 @@ fn build_name_map(
                     &module_segments,
                     struct_name,
                     &method.name,
+                    &[],
                 );
                 name_map.insert(local_mangled, mangled);
             }
@@ -270,7 +272,7 @@ fn build_name_map(
         } else {
             source_module.0.iter().map(|s| s.as_str()).collect()
         };
-        let mangled = crate::mangle::mangle_function(package_name, &source_segments, imp_name);
+        let mangled = crate::mangle::mangle_function(package_name, &source_segments, imp_name, &[]);
         name_map.insert(imp_name.clone(), mangled);
     }
 
@@ -367,7 +369,7 @@ fn collect_external_functions(
         .func_instances
         .iter()
         .filter(|inst| defined_funcs.contains(&inst.func_name))
-        .map(|inst| inst.mangled_name())
+        .map(|inst| crate::mangle::mangle_generic_suffix(&inst.func_name, &inst.type_args))
         .collect();
 
     let mut external_functions = Vec::new();

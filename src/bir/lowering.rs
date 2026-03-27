@@ -2879,7 +2879,7 @@ bb0:
         name_map.insert("main".to_string(), "main".to_string());
         name_map.insert(
             "add".to_string(),
-            crate::mangle::mangle_function("my_app", &[""], "add"),
+            crate::mangle::mangle_function("my_app", &[""], "add", &[]),
         );
 
         let module = lower_module(&program, &sem_info, &name_map).unwrap();
@@ -2888,7 +2888,7 @@ bb0:
         // "main" function name should NOT be mangled
         assert!(output.contains("@main("));
         // "add" function name should be mangled
-        let mangled_add = crate::mangle::mangle_function("my_app", &[""], "add");
+        let mangled_add = crate::mangle::mangle_function("my_app", &[""], "add", &[]);
         assert!(
             output.contains(&format!("@{}(", mangled_add)),
             "expected mangled add function, got:\n{}",
@@ -2913,13 +2913,13 @@ bb0:
         name_map.insert("main".to_string(), "main".to_string());
         name_map.insert(
             "Point_get_x".to_string(),
-            crate::mangle::mangle_method("my_app", &[""], "Point", "get_x"),
+            crate::mangle::mangle_method("my_app", &[""], "Point", "get_x", &[]),
         );
 
         let module = lower_module(&program, &sem_info, &name_map).unwrap();
         let output = print_module(&module);
 
-        let mangled_method = crate::mangle::mangle_method("my_app", &[""], "Point", "get_x");
+        let mangled_method = crate::mangle::mangle_method("my_app", &[""], "Point", "get_x", &[]);
         // The method function should have the mangled name
         assert!(
             output.contains(&format!("@{}", mangled_method)),
