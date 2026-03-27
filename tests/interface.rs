@@ -193,6 +193,130 @@ fn read_truncated_payload() {
 }
 
 #[test]
+fn round_trip_semantic_info_functions() {
+    let lowered = source_to_lowered(
+        "public func add(a: Int32, b: Int32) -> Int32 { return a + b; }
+         func internal_helper() -> Int32 { return 0; }
+         func main() -> Int32 { return add(1, 2); }",
+    );
+    let file = NamedTempFile::new().unwrap();
+    write_interface(&lowered, file.path()).unwrap();
+    let loaded = read_interface(file.path()).unwrap();
+
+    let iface = loaded.interfaces.get(&ModulePath::root()).unwrap();
+    // Only public function in interface (main and internal_helper are Internal)
+    assert_eq!(iface.functions.len(), 1);
+    assert_eq!(iface.functions[0].name, "add");
+    assert_eq!(iface.functions[0].sig.params.len(), 2);
+}
+
+#[test]
+fn round_trip_semantic_info_generic_function() {
+    let lowered = source_to_lowered(
+        "public func identity<T>(x: T) -> T { return x; }
+         func main() -> Int32 { return identity<Int32>(42); }",
+    );
+    let file = NamedTempFile::new().unwrap();
+    write_interface(&lowered, file.path()).unwrap();
+    let loaded = read_interface(file.path()).unwrap();
+
+    let iface = loaded.interfaces.get(&ModulePath::root()).unwrap();
+    assert_eq!(iface.functions.len(), 1);
+    assert_eq!(iface.functions[0].name, "identity");
+    assert!(!iface.functions[0].sig.type_params.is_empty());
+    assert_eq!(iface.functions[0].sig.type_params[0].name, "T");
+}
+
+#[test]
+fn round_trip_semantic_info_struct() {
+    let lowered = source_to_lowered(
+        "protocol Summable { func sum() -> Int32; }
+         public struct Point: Summable {
+            var x: Int32;
+            var y: Int32;
+            func sum() -> Int32 { return self.x + self.y; }
+         }
+         func main() -> Int32 {
+            let p = Point(x: 1, y: 2);
+            return p.sum();
+         }",
+    );
+    let file = NamedTempFile::new().unwrap();
+    write_interface(&lowered, file.path()).unwrap();
+    let loaded = read_interface(file.path()).unwrap();
+
+    let iface = loaded.interfaces.get(&ModulePath::root()).unwrap();
+    assert_eq!(iface.structs.len(), 1);
+    assert_eq!(iface.structs[0].name, "Point");
+    assert_eq!(iface.structs[0].conformances, vec!["Summable".to_string()]);
+    assert_eq!(iface.structs[0].fields.len(), 2);
+    assert_eq!(iface.structs[0].methods.len(), 1);
+    assert_eq!(iface.structs[0].init_params.len(), 2);
+}
+
+#[test]
+fn round_trip_semantic_info_protocol() {
+    let lowered = source_to_lowered(
+        "public protocol Drawable {
+            func draw() -> Int32;
+            var visible: Bool { get };
+         }
+         struct Canvas: Drawable {
+            var visible: Bool { get { return true; } };
+            func draw() -> Int32 { return 1; }
+         }
+         func main() -> Int32 { return 0; }",
+    );
+    let file = NamedTempFile::new().unwrap();
+    write_interface(&lowered, file.path()).unwrap();
+    let loaded = read_interface(file.path()).unwrap();
+
+    let iface = loaded.interfaces.get(&ModulePath::root()).unwrap();
+    assert_eq!(iface.protocols.len(), 1);
+    assert_eq!(iface.protocols[0].name, "Drawable");
+    assert_eq!(iface.protocols[0].methods.len(), 1);
+    assert_eq!(iface.protocols[0].properties.len(), 1);
+    assert!(iface.protocols[0].properties[0].has_setter == false);
+}
+
+#[test]
+fn round_trip_multi_module_semantic_info() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("Bengal.toml"),
+        "[package]\nname = \"mypkg\"\nentry = \"main.bengal\"",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("main.bengal"),
+        "module math;\nimport math::add;\nfunc main() -> Int32 { return add(1, 2); }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("math.bengal"),
+        "public func add(a: Int32, b: Int32) -> Int32 { return a + b; }",
+    )
+    .unwrap();
+
+    let parsed = pipeline::parse(&dir.path().join("main.bengal")).unwrap();
+    let analyzed = pipeline::analyze(parsed, &mut bengal::error::DiagCtxt::new()).unwrap();
+    let lowered = pipeline::lower(analyzed, &mut bengal::error::DiagCtxt::new()).unwrap();
+    let optimized = pipeline::optimize(lowered);
+
+    let interface_file = dir.path().join("mypkg.bengalmod");
+    write_interface(&optimized, &interface_file).unwrap();
+    let loaded = read_interface(&interface_file).unwrap();
+
+    // Math module should have `add` in its interface
+    let math_path = ModulePath::root().child("math");
+    let math_iface = loaded.interfaces.get(&math_path).unwrap();
+    assert!(
+        math_iface.functions.iter().any(|f| f.name == "add"),
+        "math module interface should contain public func add"
+    );
+}
+
+#[test]
 fn round_trip_multi_module_package() {
     // Create package on disk
     let dir = TempDir::new().unwrap();
