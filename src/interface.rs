@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use crate::bir::instruction::BirModule;
 use crate::error::{BengalError, Result};
 use crate::package::ModulePath;
-use crate::parser::ast::{TypeParam, Visibility};
+use crate::parser::ast::{
+    Program, ProtocolMember, StructMember, TypeAnnotation, TypeParam, Visibility,
+};
 use crate::pipeline::LoweredPackage;
 use crate::semantic::SemanticInfo;
 use crate::semantic::types::Type;
@@ -64,6 +66,38 @@ impl InterfaceType {
             Type::InferVar(_) | Type::IntegerLiteral(_) | Type::FloatLiteral(_) | Type::Error => {
                 unreachable!("interface types must be fully resolved")
             }
+        }
+    }
+
+    pub fn from_annotation(ann: &TypeAnnotation, type_params: &[TypeParam]) -> Self {
+        match ann {
+            TypeAnnotation::I32 => InterfaceType::I32,
+            TypeAnnotation::I64 => InterfaceType::I64,
+            TypeAnnotation::F32 => InterfaceType::F32,
+            TypeAnnotation::F64 => InterfaceType::F64,
+            TypeAnnotation::Bool => InterfaceType::Bool,
+            TypeAnnotation::Unit => InterfaceType::Unit,
+            TypeAnnotation::Named(name) => {
+                if let Some(tp) = type_params.iter().find(|tp| tp.name == *name) {
+                    InterfaceType::TypeParam {
+                        name: tp.name.clone(),
+                        bound: tp.bound.clone(),
+                    }
+                } else {
+                    InterfaceType::Struct(name.clone())
+                }
+            }
+            TypeAnnotation::Generic { name, args } => InterfaceType::Generic {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|a| InterfaceType::from_annotation(a, type_params))
+                    .collect(),
+            },
+            TypeAnnotation::Array { element, size } => InterfaceType::Array {
+                element: Box::new(InterfaceType::from_annotation(element, type_params)),
+                size: *size,
+            },
         }
     }
 }
@@ -271,6 +305,175 @@ impl ModuleInterface {
             .collect();
 
         // Sort for deterministic output (HashMap iteration order is random)
+        functions.sort_by(|a, b| a.name.cmp(&b.name));
+        structs.sort_by(|a, b| a.name.cmp(&b.name));
+        protocols.sort_by(|a, b| a.name.cmp(&b.name));
+
+        ModuleInterface {
+            functions,
+            structs,
+            protocols,
+        }
+    }
+
+    pub fn from_ast(program: &Program) -> Self {
+        // Convert functions
+        let mut functions: Vec<InterfaceFuncEntry> = program
+            .functions
+            .iter()
+            .map(|f| InterfaceFuncEntry {
+                visibility: f.visibility,
+                name: f.name.clone(),
+                sig: InterfaceFuncSig {
+                    type_params: f
+                        .type_params
+                        .iter()
+                        .map(InterfaceTypeParam::from_type_param)
+                        .collect(),
+                    params: f
+                        .params
+                        .iter()
+                        .map(|p| {
+                            (
+                                p.name.clone(),
+                                InterfaceType::from_annotation(&p.ty, &f.type_params),
+                            )
+                        })
+                        .collect(),
+                    return_type: InterfaceType::from_annotation(&f.return_type, &f.type_params),
+                },
+            })
+            .collect();
+
+        // Convert structs
+        let mut structs: Vec<InterfaceStructEntry> = program
+            .structs
+            .iter()
+            .map(|s| {
+                let struct_tps = &s.type_params;
+                let mut fields = Vec::new();
+                let mut methods = Vec::new();
+                let mut computed = Vec::new();
+                let mut init_params = Vec::new();
+
+                for member in &s.members {
+                    match member {
+                        StructMember::StoredProperty { name, ty, .. } => {
+                            fields.push((
+                                name.clone(),
+                                InterfaceType::from_annotation(ty, struct_tps),
+                            ));
+                        }
+                        StructMember::ComputedProperty {
+                            name, ty, setter, ..
+                        } => {
+                            computed.push(InterfaceComputedProp {
+                                name: name.clone(),
+                                ty: InterfaceType::from_annotation(ty, struct_tps),
+                                has_setter: setter.is_some(),
+                            });
+                        }
+                        StructMember::Initializer { params, .. } => {
+                            init_params = params
+                                .iter()
+                                .map(|p| {
+                                    (
+                                        p.name.clone(),
+                                        InterfaceType::from_annotation(&p.ty, struct_tps),
+                                    )
+                                })
+                                .collect();
+                        }
+                        StructMember::Method {
+                            name,
+                            params,
+                            return_type,
+                            ..
+                        } => {
+                            methods.push(InterfaceMethodSig {
+                                name: name.clone(),
+                                params: params
+                                    .iter()
+                                    .map(|p| {
+                                        (
+                                            p.name.clone(),
+                                            InterfaceType::from_annotation(&p.ty, struct_tps),
+                                        )
+                                    })
+                                    .collect(),
+                                return_type: InterfaceType::from_annotation(
+                                    return_type,
+                                    struct_tps,
+                                ),
+                            });
+                        }
+                    }
+                }
+
+                InterfaceStructEntry {
+                    visibility: s.visibility,
+                    name: s.name.clone(),
+                    type_params: struct_tps
+                        .iter()
+                        .map(InterfaceTypeParam::from_type_param)
+                        .collect(),
+                    conformances: s.conformances.clone(),
+                    fields,
+                    methods,
+                    computed,
+                    init_params,
+                }
+            })
+            .collect();
+
+        // Convert protocols
+        let mut protocols: Vec<InterfaceProtocolEntry> = program
+            .protocols
+            .iter()
+            .map(|p| InterfaceProtocolEntry {
+                visibility: p.visibility,
+                name: p.name.clone(),
+                methods: p
+                    .members
+                    .iter()
+                    .filter_map(|m| match m {
+                        ProtocolMember::MethodSig {
+                            name,
+                            params,
+                            return_type,
+                        } => Some(InterfaceMethodSig {
+                            name: name.clone(),
+                            params: params
+                                .iter()
+                                .map(|p| {
+                                    (p.name.clone(), InterfaceType::from_annotation(&p.ty, &[]))
+                                })
+                                .collect(),
+                            return_type: InterfaceType::from_annotation(return_type, &[]),
+                        }),
+                        _ => None,
+                    })
+                    .collect(),
+                properties: p
+                    .members
+                    .iter()
+                    .filter_map(|m| match m {
+                        ProtocolMember::PropertyReq {
+                            name,
+                            ty,
+                            has_setter,
+                        } => Some(InterfacePropertyReq {
+                            name: name.clone(),
+                            ty: InterfaceType::from_annotation(ty, &[]),
+                            has_setter: *has_setter,
+                        }),
+                        _ => None,
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        // Sort for deterministic output
         functions.sort_by(|a, b| a.name.cmp(&b.name));
         structs.sort_by(|a, b| a.name.cmp(&b.name));
         protocols.sort_by(|a, b| a.name.cmp(&b.name));
@@ -562,6 +765,64 @@ pub fn write_text_interface(iface: &ModuleInterface, path: &Path) -> Result<()> 
             e
         ),
     })
+}
+
+/// Parse a `.bengalinterface` text into a `ModuleInterface`.
+pub fn read_text_interface(text: &str) -> Result<ModuleInterface> {
+    // Step 1: Extract and validate header
+    let first_line = text
+        .lines()
+        .next()
+        .ok_or_else(|| BengalError::InterfaceError {
+            message: "empty interface file".to_string(),
+        })?;
+
+    let expected_prefix = "// bengal-interface-format-version: ";
+    if !first_line.starts_with(expected_prefix) {
+        return Err(BengalError::InterfaceError {
+            message: "missing interface format header".to_string(),
+        });
+    }
+    let version_str = &first_line[expected_prefix.len()..];
+    let version: u32 = version_str
+        .trim()
+        .parse()
+        .map_err(|_| BengalError::InterfaceError {
+            message: format!("invalid interface version: {}", version_str),
+        })?;
+    if version != TEXT_FORMAT_VERSION {
+        return Err(BengalError::InterfaceError {
+            message: format!(
+                "unsupported interface format version {} (expected {})",
+                version, TEXT_FORMAT_VERSION
+            ),
+        });
+    }
+
+    // Step 2: Strip header, tokenize remaining text
+    let body = text[first_line.len()..].trim_start_matches('\n');
+    if body.trim().is_empty() {
+        return Ok(ModuleInterface {
+            functions: vec![],
+            structs: vec![],
+            protocols: vec![],
+        });
+    }
+    let tokens = crate::lexer::tokenize(body)?;
+
+    // Step 3: Parse in interface mode
+    let program = crate::parser::parse_interface(tokens)?;
+
+    // Step 4: Convert AST to ModuleInterface
+    Ok(ModuleInterface::from_ast(&program))
+}
+
+/// Read a `.bengalinterface` file from disk into a `ModuleInterface`.
+pub fn read_text_interface_file(path: &Path) -> Result<ModuleInterface> {
+    let text = std::fs::read_to_string(path).map_err(|e| BengalError::InterfaceError {
+        message: e.to_string(),
+    })?;
+    read_text_interface(&text)
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ use bengal::interface::{
     FORMAT_VERSION, InterfaceComputedProp, InterfaceFuncEntry, InterfaceFuncSig,
     InterfaceMethodSig, InterfacePropertyReq, InterfaceProtocolEntry, InterfaceStructEntry,
     InterfaceType, InterfaceTypeParam, MAGIC, ModuleInterface, emit_text_interface, read_interface,
-    write_interface, write_text_interface,
+    read_text_interface, read_text_interface_file, write_interface, write_text_interface,
 };
 use bengal::package::ModulePath;
 use bengal::parser::ast::Visibility;
@@ -624,4 +624,336 @@ fn write_text_interface_creates_file() {
     let content = std::fs::read_to_string(&path).unwrap();
     assert!(content.contains("// bengal-interface-format-version: 1"));
     assert!(content.contains("public func foo() -> Int32;"));
+}
+
+// ---------- Text reader round-trip tests ----------
+
+#[test]
+fn text_round_trip_simple_function() {
+    let iface = ModuleInterface {
+        functions: vec![InterfaceFuncEntry {
+            visibility: Visibility::Public,
+            name: "add".to_string(),
+            sig: InterfaceFuncSig {
+                type_params: vec![],
+                params: vec![
+                    ("a".into(), InterfaceType::I32),
+                    ("b".into(), InterfaceType::I32),
+                ],
+                return_type: InterfaceType::I32,
+            },
+        }],
+        structs: vec![],
+        protocols: vec![],
+    };
+    let text = emit_text_interface(&iface);
+    let restored = read_text_interface(&text).unwrap();
+    assert_eq!(iface, restored);
+}
+
+#[test]
+fn text_round_trip_generic_function() {
+    let iface = ModuleInterface {
+        functions: vec![InterfaceFuncEntry {
+            visibility: Visibility::Public,
+            name: "identity".to_string(),
+            sig: InterfaceFuncSig {
+                type_params: vec![InterfaceTypeParam {
+                    name: "T".to_string(),
+                    bound: None,
+                }],
+                params: vec![(
+                    "x".to_string(),
+                    InterfaceType::TypeParam {
+                        name: "T".to_string(),
+                        bound: None,
+                    },
+                )],
+                return_type: InterfaceType::TypeParam {
+                    name: "T".to_string(),
+                    bound: None,
+                },
+            },
+        }],
+        structs: vec![],
+        protocols: vec![],
+    };
+    let text = emit_text_interface(&iface);
+    let restored = read_text_interface(&text).unwrap();
+    assert_eq!(iface, restored);
+}
+
+#[test]
+fn text_round_trip_struct_full() {
+    let iface = ModuleInterface {
+        functions: vec![],
+        structs: vec![InterfaceStructEntry {
+            visibility: Visibility::Public,
+            name: "Point".to_string(),
+            type_params: vec![],
+            conformances: vec!["Summable".to_string()],
+            fields: vec![
+                ("x".to_string(), InterfaceType::I32),
+                ("y".to_string(), InterfaceType::I32),
+            ],
+            computed: vec![InterfaceComputedProp {
+                name: "magnitude".to_string(),
+                ty: InterfaceType::I32,
+                has_setter: false,
+            }],
+            init_params: vec![
+                ("x".to_string(), InterfaceType::I32),
+                ("y".to_string(), InterfaceType::I32),
+            ],
+            methods: vec![InterfaceMethodSig {
+                name: "sum".to_string(),
+                params: vec![],
+                return_type: InterfaceType::I32,
+            }],
+        }],
+        protocols: vec![],
+    };
+    let text = emit_text_interface(&iface);
+    let restored = read_text_interface(&text).unwrap();
+    assert_eq!(iface, restored);
+}
+
+#[test]
+fn text_round_trip_protocol() {
+    let iface = ModuleInterface {
+        functions: vec![],
+        structs: vec![],
+        protocols: vec![InterfaceProtocolEntry {
+            visibility: Visibility::Public,
+            name: "Drawable".to_string(),
+            methods: vec![InterfaceMethodSig {
+                name: "draw".to_string(),
+                params: vec![],
+                return_type: InterfaceType::I32,
+            }],
+            properties: vec![InterfacePropertyReq {
+                name: "visible".to_string(),
+                ty: InterfaceType::Bool,
+                has_setter: true,
+            }],
+        }],
+    };
+    let text = emit_text_interface(&iface);
+    let restored = read_text_interface(&text).unwrap();
+    assert_eq!(iface, restored);
+}
+
+#[test]
+fn text_round_trip_array_types() {
+    let iface = ModuleInterface {
+        functions: vec![InterfaceFuncEntry {
+            visibility: Visibility::Public,
+            name: "getArray".to_string(),
+            sig: InterfaceFuncSig {
+                type_params: vec![],
+                params: vec![(
+                    "arr".to_string(),
+                    InterfaceType::Array {
+                        element: Box::new(InterfaceType::I32),
+                        size: 4,
+                    },
+                )],
+                return_type: InterfaceType::Array {
+                    element: Box::new(InterfaceType::I64),
+                    size: 8,
+                },
+            },
+        }],
+        structs: vec![],
+        protocols: vec![],
+    };
+    let text = emit_text_interface(&iface);
+    let restored = read_text_interface(&text).unwrap();
+    assert_eq!(iface, restored);
+}
+
+#[test]
+fn text_round_trip_mixed() {
+    let iface = ModuleInterface {
+        functions: vec![InterfaceFuncEntry {
+            visibility: Visibility::Public,
+            name: "compute".to_string(),
+            sig: InterfaceFuncSig {
+                type_params: vec![],
+                params: vec![("x".into(), InterfaceType::I32)],
+                return_type: InterfaceType::I64,
+            },
+        }],
+        structs: vec![InterfaceStructEntry {
+            visibility: Visibility::Public,
+            name: "Data".to_string(),
+            type_params: vec![],
+            conformances: vec![],
+            fields: vec![("value".to_string(), InterfaceType::F64)],
+            computed: vec![],
+            init_params: vec![("value".to_string(), InterfaceType::F64)],
+            methods: vec![],
+        }],
+        protocols: vec![InterfaceProtocolEntry {
+            visibility: Visibility::Public,
+            name: "Hashable".to_string(),
+            methods: vec![InterfaceMethodSig {
+                name: "hash".to_string(),
+                params: vec![],
+                return_type: InterfaceType::I64,
+            }],
+            properties: vec![],
+        }],
+    };
+    let text = emit_text_interface(&iface);
+    let restored = read_text_interface(&text).unwrap();
+    assert_eq!(iface, restored);
+}
+
+#[test]
+fn text_round_trip_generic_struct_with_conformance() {
+    let iface = ModuleInterface {
+        functions: vec![],
+        structs: vec![InterfaceStructEntry {
+            visibility: Visibility::Public,
+            name: "Container".to_string(),
+            type_params: vec![InterfaceTypeParam {
+                name: "T".to_string(),
+                bound: None,
+            }],
+            conformances: vec!["Printable".to_string()],
+            fields: vec![(
+                "item".to_string(),
+                InterfaceType::TypeParam {
+                    name: "T".to_string(),
+                    bound: None,
+                },
+            )],
+            computed: vec![],
+            init_params: vec![(
+                "item".to_string(),
+                InterfaceType::TypeParam {
+                    name: "T".to_string(),
+                    bound: None,
+                },
+            )],
+            methods: vec![InterfaceMethodSig {
+                name: "get".to_string(),
+                params: vec![],
+                return_type: InterfaceType::TypeParam {
+                    name: "T".to_string(),
+                    bound: None,
+                },
+            }],
+        }],
+        protocols: vec![],
+    };
+    let text = emit_text_interface(&iface);
+    let restored = read_text_interface(&text).unwrap();
+    assert_eq!(iface, restored);
+}
+
+#[test]
+fn text_round_trip_package_visibility() {
+    let iface = ModuleInterface {
+        functions: vec![InterfaceFuncEntry {
+            visibility: Visibility::Package,
+            name: "helper".to_string(),
+            sig: InterfaceFuncSig {
+                type_params: vec![],
+                params: vec![("x".into(), InterfaceType::I32)],
+                return_type: InterfaceType::I32,
+            },
+        }],
+        structs: vec![],
+        protocols: vec![],
+    };
+    let text = emit_text_interface(&iface);
+    let restored = read_text_interface(&text).unwrap();
+    assert_eq!(iface, restored);
+}
+
+#[test]
+fn text_round_trip_generic_with_bound() {
+    let iface = ModuleInterface {
+        functions: vec![InterfaceFuncEntry {
+            visibility: Visibility::Public,
+            name: "total".to_string(),
+            sig: InterfaceFuncSig {
+                type_params: vec![InterfaceTypeParam {
+                    name: "T".to_string(),
+                    bound: Some("Summable".to_string()),
+                }],
+                params: vec![(
+                    "item".to_string(),
+                    InterfaceType::TypeParam {
+                        name: "T".to_string(),
+                        bound: Some("Summable".to_string()),
+                    },
+                )],
+                return_type: InterfaceType::I32,
+            },
+        }],
+        structs: vec![],
+        protocols: vec![],
+    };
+    let text = emit_text_interface(&iface);
+    let restored = read_text_interface(&text).unwrap();
+    assert_eq!(iface, restored);
+}
+
+// ---------- Text reader error tests ----------
+
+#[test]
+fn read_text_missing_header() {
+    let text = "public func foo() -> Int32;";
+    let err = read_text_interface(text).unwrap_err();
+    assert!(
+        err.to_string().contains("missing interface format header"),
+        "{}",
+        err
+    );
+}
+
+#[test]
+fn read_text_wrong_version() {
+    let text = "// bengal-interface-format-version: 999\npublic func foo() -> Int32;";
+    let err = read_text_interface(text).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("unsupported interface format version"),
+        "{}",
+        err
+    );
+}
+
+#[test]
+fn read_text_invalid_syntax() {
+    let text = "// bengal-interface-format-version: 1\npublic func ??? broken;";
+    let err = read_text_interface(text);
+    assert!(err.is_err(), "invalid syntax should produce an error");
+}
+
+// ---------- Text reader file I/O test ----------
+
+#[test]
+fn read_text_interface_file_round_trip() {
+    let iface = ModuleInterface {
+        functions: vec![InterfaceFuncEntry {
+            visibility: Visibility::Public,
+            name: "greet".to_string(),
+            sig: InterfaceFuncSig {
+                type_params: vec![],
+                params: vec![],
+                return_type: InterfaceType::I32,
+            },
+        }],
+        structs: vec![],
+        protocols: vec![],
+    };
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("test.bengalinterface");
+    write_text_interface(&iface, &path).unwrap();
+    let restored = read_text_interface_file(&path).unwrap();
+    assert_eq!(iface, restored);
 }
