@@ -118,12 +118,8 @@ fn run() -> miette::Result<()> {
             }
             let lowered = lowered.map_err(|e| Report::new(e.into_diagnostic()))?;
 
-            // Emit local package .bengalmod (before merging external deps)
+            // Emit per-module interfaces (before merging external deps)
             bengal::pipeline::emit_interfaces(&lowered, std::path::Path::new(".build/cache"));
-            bengal::pipeline::emit_package_bengalmod(
-                &lowered,
-                std::path::Path::new(".build/cache"),
-            );
 
             // Merge external dep BIR into lowered package
             let mut lowered = lowered;
@@ -140,6 +136,7 @@ fn run() -> miette::Result<()> {
                 }
             }
 
+            let emit_data = bengal::pipeline::EmitData::from_lowered(&optimized);
             let mono = bengal::pipeline::monomorphize(optimized, &mut diag)
                 .map_err(|e| Report::new(e.into_diagnostic()))?;
             let compiled = bengal::pipeline::codegen(mono, &mut diag);
@@ -150,6 +147,12 @@ fn run() -> miette::Result<()> {
                 }
             }
             let compiled = compiled.map_err(|e| Report::new(e.into_diagnostic()))?;
+
+            bengal::pipeline::emit_package_bengalmod(
+                &emit_data,
+                &compiled,
+                std::path::Path::new(".build/cache"),
+            );
 
             bengal::pipeline::link(compiled, &exe_path)
                 .map_err(|e| Report::new(e.into_diagnostic()))?;

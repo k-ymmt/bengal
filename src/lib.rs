@@ -28,12 +28,13 @@ pub fn compile_to_executable(
     let analyzed = pipeline::analyze_with_deps(parsed, external_deps, &mut diag)?;
     let lowered = pipeline::lower(analyzed, &mut diag)?;
     pipeline::emit_interfaces(&lowered, std::path::Path::new(".build/cache"));
-    pipeline::emit_package_bengalmod(&lowered, std::path::Path::new(".build/cache"));
     let mut lowered = lowered;
     pipeline::merge_external_deps(&mut lowered, external_deps);
     let optimized = pipeline::optimize(lowered);
+    let emit_data = pipeline::EmitData::from_lowered(&optimized);
     let mono = pipeline::monomorphize(optimized, &mut diag)?;
     let compiled = pipeline::codegen(mono, &mut diag)?;
+    pipeline::emit_package_bengalmod(&emit_data, &compiled, std::path::Path::new(".build/cache"));
     pipeline::link(compiled, output_path)
 }
 

@@ -70,6 +70,28 @@ pub struct CompiledPackage {
     pub object_bytes: HashMap<ModulePath, Vec<u8>>,
 }
 
+/// Data saved from LoweredPackage for emit_package_bengalmod.
+/// Extracted after optimize() but before monomorphize() consumes the package.
+pub struct EmitData {
+    pub package_name: String,
+    pub pkg_sem_info: PackageSemanticInfo,
+    pub modules_bir: HashMap<ModulePath, BirModule>,
+}
+
+impl EmitData {
+    pub fn from_lowered(lowered: &LoweredPackage) -> Self {
+        EmitData {
+            package_name: lowered.package_name.clone(),
+            pkg_sem_info: lowered.pkg_sem_info.clone(),
+            modules_bir: lowered
+                .modules
+                .iter()
+                .map(|(path, m)| (path.clone(), m.bir.clone()))
+                .collect(),
+        }
+    }
+}
+
 /// Output of `compile_to_bir` / `compile_source_to_bir`.
 pub struct BirOutput {
     pub modules: HashMap<ModulePath, LoweredModule>,
@@ -511,8 +533,7 @@ pub fn load_external_dep(
 }
 
 /// Merge external dependency BIR modules into the lowered package.
-/// Must be called AFTER emit_interfaces/emit_package_bengalmod
-/// and BEFORE optimize.
+/// Must be called AFTER emit_interfaces and BEFORE optimize.
 pub fn merge_external_deps(lowered: &mut LoweredPackage, external_deps: &[ExternalDep]) {
     for dep in external_deps {
         for (mod_path, bir_module) in &dep.bir_modules {
@@ -550,7 +571,16 @@ fn filter_generic_functions(bir: &BirModule) -> BirModule {
 
 /// Emit a single `.bengalmod` containing all modules of the package.
 /// This is consumed by `--dep` in other packages.
-pub fn emit_package_bengalmod(lowered: &LoweredPackage, cache_dir: &std::path::Path) {
+///
+/// The emitted file contains:
+/// - Generic-only BIR (non-generic functions are stripped)
+/// - Module interfaces (for type checking)
+/// - Pre-compiled object code (for linking without re-compilation)
+pub fn emit_package_bengalmod(
+    emit_data: &EmitData,
+    compiled: &CompiledPackage,
+    cache_dir: &std::path::Path,
+) {
     if let Err(e) = std::fs::create_dir_all(cache_dir) {
         eprintln!("warning: failed to create cache directory: {}", e);
         return;
@@ -558,25 +588,30 @@ pub fn emit_package_bengalmod(lowered: &LoweredPackage, cache_dir: &std::path::P
 
     let mut all_modules = HashMap::new();
     let mut all_interfaces = HashMap::new();
+    let mut all_object_bytes = HashMap::new();
 
-    for (module_path, module) in &lowered.modules {
-        let sem_info = match lowered.pkg_sem_info.module_infos.get(module_path) {
+    for (module_path, bir) in &emit_data.modules_bir {
+        let sem_info = match emit_data.pkg_sem_info.module_infos.get(module_path) {
             Some(info) => info,
             None => continue,
         };
         let iface = crate::interface::ModuleInterface::from_semantic_info(sem_info);
-        all_modules.insert(module_path.clone(), module.bir.clone());
+        all_modules.insert(module_path.clone(), filter_generic_functions(bir));
         all_interfaces.insert(module_path.clone(), iface);
+
+        if let Some(obj) = compiled.object_bytes.get(module_path) {
+            all_object_bytes.insert(module_path.clone(), obj.clone());
+        }
     }
 
     let mod_file = crate::interface::BengalModFile {
-        package_name: lowered.package_name.clone(),
+        package_name: emit_data.package_name.clone(),
         modules: all_modules,
         interfaces: all_interfaces,
-        object_bytes: HashMap::new(),
+        object_bytes: all_object_bytes,
     };
 
-    let file_path = cache_dir.join(format!("{}.bengalmod", lowered.package_name));
+    let file_path = cache_dir.join(format!("{}.bengalmod", emit_data.package_name));
     if let Err(e) = crate::interface::write_bengalmod_file(&mod_file, &file_path) {
         eprintln!("warning: failed to write package interface: {}", e);
     }
@@ -652,38 +687,43 @@ mod tests {
     fn emit_package_bengalmod_creates_file() {
         let parsed = parse_source(
             "testlib",
-            "public func add(a: Int32, b: Int32) -> Int32 { return a + b; }
-             func main() -> Int32 { return add(1, 2); }",
+            "public func add(a: Int32, b: Int32) -> Int32 { return a + b; }\nfunc main() -> Int32 { return 0; }",
         )
         .unwrap();
         let analyzed = analyze(parsed, &mut DiagCtxt::new()).unwrap();
         let lowered = lower(analyzed, &mut DiagCtxt::new()).unwrap();
+        let optimized = optimize(lowered);
+        let emit_data = EmitData::from_lowered(&optimized);
+        let mono = monomorphize(optimized, &mut DiagCtxt::new()).unwrap();
+        let compiled = codegen(mono, &mut DiagCtxt::new()).unwrap();
 
         let dir = tempfile::TempDir::new().unwrap();
-        emit_package_bengalmod(&lowered, dir.path());
+        emit_package_bengalmod(&emit_data, &compiled, dir.path());
 
         let file_path = dir.path().join("testlib.bengalmod");
-        assert!(file_path.exists(), "package .bengalmod should be created");
-
+        assert!(file_path.exists());
         let loaded = crate::interface::read_interface(&file_path).unwrap();
         assert_eq!(loaded.package_name, "testlib");
         assert!(!loaded.interfaces.is_empty());
-        assert!(!loaded.modules.is_empty());
+        assert!(!loaded.object_bytes.is_empty(), "should have object code");
     }
 
     #[test]
     fn load_external_dep_round_trip() {
         let parsed = parse_source(
             "mathlib",
-            "public func add(a: Int32, b: Int32) -> Int32 { return a + b; }
-             func main() -> Int32 { return add(1, 2); }",
+            "public func add(a: Int32, b: Int32) -> Int32 { return a + b; }\nfunc main() -> Int32 { return 0; }",
         )
         .unwrap();
         let analyzed = analyze(parsed, &mut DiagCtxt::new()).unwrap();
         let lowered = lower(analyzed, &mut DiagCtxt::new()).unwrap();
+        let optimized = optimize(lowered);
+        let emit_data = EmitData::from_lowered(&optimized);
+        let mono = monomorphize(optimized, &mut DiagCtxt::new()).unwrap();
+        let compiled = codegen(mono, &mut DiagCtxt::new()).unwrap();
 
         let dir = tempfile::TempDir::new().unwrap();
-        emit_package_bengalmod(&lowered, dir.path());
+        emit_package_bengalmod(&emit_data, &compiled, dir.path());
 
         let dep = load_external_dep("math", &dir.path().join("mathlib.bengalmod")).unwrap();
         assert_eq!(dep.name, "math");
@@ -703,9 +743,13 @@ mod tests {
         let lib_parsed = parse_source("mathlib", "public func add(a: Int32, b: Int32) -> Int32 { return a + b; }\nfunc main() -> Int32 { return 0; }").unwrap();
         let lib_analyzed = analyze(lib_parsed, &mut DiagCtxt::new()).unwrap();
         let lib_lowered = lower(lib_analyzed, &mut DiagCtxt::new()).unwrap();
+        let lib_optimized = optimize(lib_lowered);
+        let lib_emit_data = EmitData::from_lowered(&lib_optimized);
+        let lib_mono = monomorphize(lib_optimized, &mut DiagCtxt::new()).unwrap();
+        let lib_compiled = codegen(lib_mono, &mut DiagCtxt::new()).unwrap();
 
         let dir = tempfile::TempDir::new().unwrap();
-        emit_package_bengalmod(&lib_lowered, dir.path());
+        emit_package_bengalmod(&lib_emit_data, &lib_compiled, dir.path());
         let dep = load_external_dep("math", &dir.path().join("mathlib.bengalmod")).unwrap();
 
         merge_external_deps(&mut lowered, &[dep]);
@@ -796,5 +840,40 @@ mod tests {
         let mono = monomorphize(optimized, &mut DiagCtxt::new()).unwrap();
         let compiled = codegen(mono, &mut DiagCtxt::new()).unwrap();
         assert!(!compiled.object_bytes.is_empty());
+    }
+
+    #[test]
+    fn emit_package_bengalmod_with_object_code() {
+        let source = r#"
+            public func add(a: Int32, b: Int32) -> Int32 { return a + b; }
+            public func identity<T>(x: T) -> T { return x; }
+            func main() -> Int32 { return add(1, 2); }
+        "#;
+        let parsed = parse_source("testlib", source).unwrap();
+        let analyzed = analyze(parsed, &mut DiagCtxt::new()).unwrap();
+        let lowered = lower(analyzed, &mut DiagCtxt::new()).unwrap();
+        let optimized = optimize(lowered);
+        let emit_data = EmitData::from_lowered(&optimized);
+        let mono = monomorphize(optimized, &mut DiagCtxt::new()).unwrap();
+        let compiled = codegen(mono, &mut DiagCtxt::new()).unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        emit_package_bengalmod(&emit_data, &compiled, dir.path());
+
+        let loaded =
+            crate::interface::read_interface(&dir.path().join("testlib.bengalmod")).unwrap();
+        assert!(
+            !loaded.object_bytes.is_empty(),
+            "object_bytes should be non-empty"
+        );
+
+        let root_bir = loaded.modules.get(&ModulePath::root()).unwrap();
+        for func in &root_bir.functions {
+            assert!(
+                !func.type_params.is_empty(),
+                "BIR should only contain generic functions, found '{}'",
+                func.name
+            );
+        }
     }
 }

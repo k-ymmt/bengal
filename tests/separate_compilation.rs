@@ -8,7 +8,11 @@ fn compile_lib(name: &str, source: &str, dir: &Path) -> std::path::PathBuf {
     let parsed = bengal::pipeline::parse_source(name, source).unwrap();
     let analyzed = bengal::pipeline::analyze(parsed, &mut diag).unwrap();
     let lowered = bengal::pipeline::lower(analyzed, &mut diag).unwrap();
-    bengal::pipeline::emit_package_bengalmod(&lowered, dir);
+    let optimized = bengal::pipeline::optimize(lowered);
+    let emit_data = bengal::pipeline::EmitData::from_lowered(&optimized);
+    let mono = bengal::pipeline::monomorphize(optimized, &mut diag).unwrap();
+    let compiled = bengal::pipeline::codegen(mono, &mut diag).unwrap();
+    bengal::pipeline::emit_package_bengalmod(&emit_data, &compiled, dir);
     dir.join(format!("{}.bengalmod", name))
 }
 

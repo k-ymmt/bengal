@@ -38,7 +38,7 @@ use crate::suggest::find_suggestion;
 use resolver::Resolver;
 use types::{Type, resolve_type};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SemanticInfo {
     pub struct_defs: HashMap<String, resolver::StructInfo>,
     pub struct_init_calls: std::collections::HashSet<NodeId>,
@@ -47,7 +47,7 @@ pub struct SemanticInfo {
     pub visibilities: HashMap<String, Visibility>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PackageSemanticInfo {
     pub module_infos: HashMap<ModulePath, SemanticInfo>,
     /// For each module, maps imported symbol names to their source module path.
