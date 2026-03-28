@@ -103,7 +103,7 @@ CLI → resolve_sysroot()          # Determine sysroot path
 
 Auto-discovery happens **before** `analyze_package()` Phase 1, not during import resolution. This avoids mutating the global symbol table mid-iteration.
 
-1. Parse all source modules and collect all `import` top-level names (e.g., `import Foo::bar` → `Foo`)
+1. Scan all already-parsed modules' `import_decls` and collect top-level names from `PathPrefix::Named(name)` imports only (e.g., `import Foo::bar` → `Foo`). Skip `self::` and `super::` prefixed imports (always local)
 2. For each name not already provided by `--dep`, call `LibrarySearcher::find_bengalmod(name)`
 3. If found, call `load_external_dep(name, found_path)` and add to the `ExternalDep` list
 4. If not found, skip (will produce the existing error during import resolution in Phase 2)
@@ -139,8 +139,6 @@ pub enum SearchPathKind {
 }
 
 pub struct LibrarySearcher {
-    /// Explicitly specified deps via --dep name=path
-    explicit_deps: HashMap<String, PathBuf>,
     /// -L bengal= paths + sysroot (appended last)
     bengal_search_paths: Vec<PathBuf>,
     /// -L native= paths
@@ -152,10 +150,9 @@ impl LibrarySearcher {
     pub fn new(
         sysroot_override: Option<PathBuf>,
         search_paths: Vec<SearchPath>,
-        explicit_deps: Vec<(String, PathBuf)>,
     ) -> Self;
 
-    /// Find .bengalmod by name: explicit_deps → bengal_search_paths
+    /// Find .bengalmod by name in bengal_search_paths (caller filters --dep names beforehand)
     pub fn find_bengalmod(&self, name: &str) -> Option<PathBuf>;
 
     /// Auto-detect sysroot from compiler binary path
@@ -172,8 +169,10 @@ impl LibrarySearcher {
 |------|--------|
 | `src/main.rs` | Parse `--sysroot` and `-L` CLI flags |
 | `src/lib.rs` | Thread `LibrarySearcher` into the pipeline. Public API functions (`compile_to_executable`, etc.) continue to accept `&[ExternalDep]` only — auto-discovery is CLI-only behavior |
-| `src/pipeline.rs` | Add `pre_scan_imports()` between explicit dep loading and `analyze_with_deps`. Pass `native_search_paths` through to `link()` |
+| `src/pipeline.rs` | Add `pre_scan_imports()` between explicit dep loading and `analyze_with_deps`. Extend `link()` signature to accept `native_search_paths: &[PathBuf]` and pass to `link_objects()` |
 | `src/codegen/llvm.rs` | Extend `link_objects()` to accept `native_search_paths: &[PathBuf]` and pass them as `-L` flags to `cc` |
+
+Note: `compile_to_executable` in `src/lib.rs` calls `pipeline::link()` — it passes `&[]` for `native_search_paths` since the public API does not expose search paths.
 
 ### Dummy Core Library
 
@@ -198,3 +197,5 @@ A test helper generates `Core.bengalmod` with a simple public function (e.g., `p
 - **Error case**: `import` of nonexistent library produces clear error message
 - **Local module shadows sysroot**: Local module named `Core` takes priority over sysroot `Core.bengalmod`
 - **Malformed sysroot**: Missing `lib/bengallib/` subdirectory gracefully falls back to no-sysroot
+- **Non-existent `-L bengal=` path**: Produces an error (explicit user-provided path should exist)
+- **Multiple `-L bengal=` with same module**: First match wins (order of specification)
