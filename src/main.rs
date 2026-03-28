@@ -116,6 +116,16 @@ fn run() -> miette::Result<()> {
                 .collect();
             let library_searcher = bengal::sysroot::LibrarySearcher::new(sysroot, lib_search_paths);
 
+            // Validate -L bengal= paths exist (user-provided only, not sysroot)
+            for path in library_searcher.user_bengal_search_paths() {
+                if !path.is_dir() {
+                    return Err(miette::miette!(
+                        "-L bengal= path '{}' does not exist or is not a directory",
+                        path.display()
+                    ));
+                }
+            }
+
             let parsed =
                 bengal::pipeline::parse(&file).map_err(|e| Report::new(e.into_diagnostic()))?;
 

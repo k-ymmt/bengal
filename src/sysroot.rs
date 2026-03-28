@@ -13,6 +13,7 @@ pub enum SearchPathKind {
 pub struct LibrarySearcher {
     bengal_search_paths: Vec<PathBuf>,
     native_search_paths: Vec<PathBuf>,
+    user_bengal_path_count: usize,
 }
 
 impl LibrarySearcher {
@@ -27,6 +28,9 @@ impl LibrarySearcher {
             }
         }
 
+        let user_bengal_path_count = bengal_search_paths.len();
+
+        // Sysroot appended last (lowest priority)
         if let Some(sysroot) = Self::resolve_sysroot(sysroot_override) {
             bengal_search_paths.push(Self::sysroot_lib_path(&sysroot));
         }
@@ -34,6 +38,7 @@ impl LibrarySearcher {
         Self {
             bengal_search_paths,
             native_search_paths,
+            user_bengal_path_count,
         }
     }
 
@@ -54,6 +59,11 @@ impl LibrarySearcher {
 
     pub fn bengal_search_paths(&self) -> &[PathBuf] {
         &self.bengal_search_paths
+    }
+
+    /// Returns only user-specified -L bengal= paths (excludes sysroot).
+    pub fn user_bengal_search_paths(&self) -> &[PathBuf] {
+        &self.bengal_search_paths[..self.user_bengal_path_count]
     }
 
     fn resolve_sysroot(override_path: Option<PathBuf>) -> Option<PathBuf> {
