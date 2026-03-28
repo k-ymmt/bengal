@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::bir::instruction::{BirModule, BirType};
 use crate::bir::mono::MonoCollectResult;
 use crate::error::{BengalError, DiagCtxt};
+use crate::interface::ModuleInterface;
 use crate::package::{ModuleGraph, ModulePath};
 use crate::parser::ast::{NodeId, TypeAnnotation};
 use crate::semantic::PackageSemanticInfo;
@@ -15,6 +16,18 @@ static BUILD_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub struct ParsedPackage {
     pub package_name: String,
     pub graph: ModuleGraph,
+}
+
+/// An external package dependency loaded from a `.bengalmod` file.
+pub struct ExternalDep {
+    /// Dependency name as specified in --dep (used in import path resolution)
+    pub name: String,
+    /// Package name from the .bengalmod file (used for symbol mangling)
+    pub package_name: String,
+    /// Per-module interface data
+    pub interfaces: HashMap<ModulePath, ModuleInterface>,
+    /// Per-module BIR (for codegen and monomorphization)
+    pub bir_modules: HashMap<ModulePath, BirModule>,
 }
 
 /// Output of the `analyze` stage.

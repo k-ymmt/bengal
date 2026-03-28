@@ -94,6 +94,7 @@ pub fn analyze_package(
     Ok(PackageSemanticInfo {
         module_infos,
         import_sources,
+        external_dep_names: HashMap::new(),
     })
 }
 
@@ -269,6 +270,14 @@ fn collect_global_symbols(graph: &ModuleGraph) -> Result<GlobalSymbolTable> {
     Ok(table)
 }
 
+/// Build a module path for an external dependency module.
+/// Prefixes the dep name to the internal module path to avoid collisions.
+pub(crate) fn dep_module_path(dep_name: &str, internal_path: &ModulePath) -> ModulePath {
+    let mut segments = vec![dep_name.to_string()];
+    segments.extend(internal_path.0.iter().cloned());
+    ModulePath(segments)
+}
+
 /// Phase 2: Resolve all import declarations for a given module and populate
 /// the resolver's import maps. Returns a map of (local_name -> source_module_path)
 /// for all imported symbols.
@@ -404,4 +413,24 @@ fn resolve_import_module_path(
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dep_module_path_root() {
+        let result = dep_module_path("math", &ModulePath::root());
+        assert_eq!(result, ModulePath(vec!["math".to_string()]));
+    }
+
+    #[test]
+    fn dep_module_path_submodule() {
+        let result = dep_module_path("math", &ModulePath(vec!["utils".to_string()]));
+        assert_eq!(
+            result,
+            ModulePath(vec!["math".to_string(), "utils".to_string()])
+        );
+    }
 }

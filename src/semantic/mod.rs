@@ -52,6 +52,8 @@ pub struct PackageSemanticInfo {
     /// For each module, maps imported symbol names to their source module path.
     /// Key: (importing module, local symbol name) -> source module path.
     pub import_sources: HashMap<(ModulePath, String), ModulePath>,
+    /// Maps external dep module paths to their original package names (for name mangling).
+    pub external_dep_names: HashMap<ModulePath, String>,
 }
 
 fn sem_err(message: impl Into<String>) -> BengalError {
