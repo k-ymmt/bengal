@@ -454,10 +454,14 @@ pub fn merge_external_deps(lowered: &mut LoweredPackage, external_deps: &[Extern
     for dep in external_deps {
         for (mod_path, bir_module) in &dep.bir_modules {
             let ext_path = crate::semantic::dep_module_path(&dep.name, mod_path);
+            // Strip the `main` entry point from external deps to avoid
+            // duplicate-symbol errors when linking with the consumer's `main`.
+            let mut filtered = bir_module.clone();
+            filtered.functions.retain(|f| f.name != "main");
             lowered.modules.insert(
                 ext_path,
                 LoweredModule {
-                    bir: bir_module.clone(),
+                    bir: filtered,
                     is_entry: false,
                 },
             );
