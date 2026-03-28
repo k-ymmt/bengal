@@ -26,7 +26,7 @@ Embed pre-compiled object code in `.bengalmod` files so consumers skip codegen f
 |----------|--------|-----------|
 | Object code location | Embedded in `.bengalmod` | One file per dep; existing `--dep` CLI unchanged; split to `.bengallib` later |
 | BIR in `.bengalmod` | Generic functions only | Non-generic functions have object code; BIR unnecessary |
-| Format version | Keep v2 | Project is pre-release; no compatibility needed |
+| Format version | Bump to v3 | Adding `object_bytes` changes serialized format; v3 gives clear error on version mismatch |
 | Pipeline position for emit | After codegen | Object code must exist before it can be embedded |
 | Future extensibility | Code structured for `.bengallib` split | `object_bytes` is a separate field, easily moved to another file |
 
@@ -97,11 +97,42 @@ fn filter_generic_functions(bir: &BirModule) -> BirModule {
             .cloned()
             .collect(),
         struct_layouts: bir.struct_layouts.clone(),
+        struct_type_params: bir.struct_type_params.clone(),
+        conformance_map: bir.conformance_map.clone(),
     }
 }
 ```
 
-This function is placed in `src/pipeline.rs` as a private helper. It preserves `struct_layouts` because consumer-side monomorphization of generic functions may need struct layout information.
+This function is placed in `src/pipeline.rs` as a private helper. All four `BirModule` fields are preserved:
+- `functions`: filtered to generic only
+- `struct_layouts`: needed for consumer-side struct codegen
+- `struct_type_params`: needed by `build_generic_struct_types` during consumer-side codegen
+- `conformance_map`: needed by `resolve_function` for protocol method dispatch
+
+**Data preservation for `emit_package_bengalmod`:**
+
+`emit_package_bengalmod` needs `PackageSemanticInfo` (for interface generation) and per-module BIR (for generic filtering), but `monomorphize` consumes `LoweredPackage`. The solution: extract data after `optimize` but before `monomorphize`.
+
+`optimize()` returns `LoweredPackage` with mutated BIR — `pkg_sem_info` survives intact. Save the needed data before passing to `monomorphize`:
+
+```rust
+let optimized = pipeline::optimize(lowered);
+// Save for emit_package_bengalmod (monomorphize consumes optimized)
+let emit_data = pipeline::EmitData::from(&optimized);
+let mono = pipeline::monomorphize(optimized, &mut diag)?;
+```
+
+**`EmitData`** is a lightweight struct holding just what `emit_package_bengalmod` needs:
+
+```rust
+pub struct EmitData {
+    pub package_name: String,
+    pub pkg_sem_info: PackageSemanticInfo,
+    pub modules_bir: HashMap<ModulePath, BirModule>,  // post-optimize BIR
+}
+```
+
+`EmitData::from(&LoweredPackage)` clones `pkg_sem_info` and the BIR. This is acceptable because emit is called once per build, and the data is modest in size.
 
 **`compile_to_executable` update:**
 
@@ -115,28 +146,36 @@ pub fn compile_to_executable(
     let parsed = pipeline::parse(entry_path)?;
     let analyzed = pipeline::analyze_with_deps(parsed, external_deps, &mut diag)?;
     let lowered = pipeline::lower(analyzed, &mut diag)?;
-    pipeline::emit_interfaces(&lowered, Path::new(".build/cache"));
+    pipeline::emit_interfaces(&lowered, Path::new(".build/cache"));  // stays before merge
     let mut lowered = lowered;
     pipeline::merge_external_deps(&mut lowered, external_deps);
     let optimized = pipeline::optimize(lowered);
+    let emit_data = pipeline::EmitData::from(&optimized);  // save before mono consumes
     let mono = pipeline::monomorphize(optimized, &mut diag)?;
     let compiled = pipeline::codegen(mono, &mut diag)?;
-    // emit AFTER codegen (needs object_bytes), BEFORE link
-    pipeline::emit_package_bengalmod(&optimized_ref, &compiled, Path::new(".build/cache"));
+    pipeline::emit_package_bengalmod(&emit_data, &compiled, Path::new(".build/cache"));
     let ext_objects = pipeline::collect_external_objects(external_deps);
     pipeline::link(compiled, &ext_objects, output_path)
 }
 ```
 
-Note: `emit_package_bengalmod` needs both `LoweredPackage` (for SemanticInfo/BIR) and `CompiledPackage` (for object_bytes). Since `optimize` consumes `LoweredPackage`, we need to retain the necessary data. The actual implementation should pass the pre-optimize `LoweredPackage` data that was saved, or restructure to keep `pkg_sem_info` and BIR accessible after codegen. The simplest approach: save a reference to `pkg_sem_info` and the BIR before `optimize` consumes them, or change `optimize`/`monomorphize` to preserve this data in their output types.
-
-**Recommended approach:** Add `pkg_sem_info` to `MonomorphizedPackage` and `CompiledPackage` (or pass it separately). The implementer should choose the cleanest option that avoids cloning large structures unnecessarily.
+Note: `emit_interfaces` (per-module `.bengalmod`) stays at its current position — before merge and optimize. Only `emit_package_bengalmod` (package-level `.bengalmod` with object code) moves to after codegen.
 
 ### Consumer-side (load + merge + link)
 
-**`load_external_dep`:** Trivially updated — `BengalModFile` now has `object_bytes`, which maps directly to `ExternalDep.object_bytes`.
+**`load_external_dep`:** One-line addition — `BengalModFile` now has `object_bytes`:
 
-**`merge_external_deps`:** Unchanged in logic. The BIR in `dep.bir_modules` now contains only generic functions (since that's what `.bengalmod` stores). The existing merge code works as-is.
+```rust
+Ok(ExternalDep {
+    name: name.to_string(),
+    package_name: mod_file.package_name,
+    interfaces: mod_file.interfaces,
+    bir_modules: mod_file.modules,
+    object_bytes: mod_file.object_bytes,  // NEW
+})
+```
+
+**`merge_external_deps`:** Unchanged in code. The behavioral change is implicit: because `.bengalmod` now stores only generic BIR, merged modules contain strictly fewer functions. Non-generic dependency symbols (previously resolved via BIR codegen) are now resolved at link time via the embedded object code from `collect_external_objects`. The `main`-stripping logic in `merge_external_deps` becomes a no-op for new-format files (generic functions are never named `main`) but remains for safety.
 
 **`link` stage:**
 
@@ -149,7 +188,7 @@ pub fn link(
 ) -> Result<(), PipelineError>
 ```
 
-Writes both local and external object bytes to temp `.o` files, then passes all to the system linker.
+Writes both local and external object bytes to temp `.o` files, then passes all to the system linker. External object files are prefixed with `ext_` to avoid filename collisions with local modules in the temp directory (e.g., `ext_math_root.o`).
 
 **`collect_external_objects` helper:**
 
@@ -176,7 +215,7 @@ Same changes as `compile_to_executable`: move `emit_package_bengalmod` after cod
 
 | Condition | Behavior |
 |-----------|----------|
-| `.bengalmod` with empty `object_bytes` | Valid — old-format or library-only package; fall back to BIR codegen (existing path) |
+| `.bengalmod` with empty `object_bytes` | Valid — package with only generic functions. Consumer-side monomorphization handles all codegen. If `object_bytes` is empty and BIR contains all functions (old pre-archive format), the existing BIR merge path handles this correctly |
 | Object code for wrong target architecture | Linker error (not our responsibility to detect) |
 | Serialization of large object bytes | MessagePack handles binary data efficiently; non-fatal warning on write failure |
 
@@ -200,3 +239,7 @@ All 7 tests in `tests/separate_compilation.rs` continue to pass. These are the p
   - `object_bytes` is non-empty
   - `modules` (BIR) contains only generic functions
   - `interfaces` contains all public functions (both generic and non-generic)
+
+**Edge case tests:**
+- Library with only generic functions: `object_bytes` may be empty (monomorphized instances use LinkOnceODR in consumer); BIR contains all functions
+- Library with only non-generic functions: BIR `functions` list is empty; `object_bytes` has content; struct_layouts/conformance_map preserved in BIR
