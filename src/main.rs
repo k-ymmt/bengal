@@ -4,6 +4,16 @@ use std::process;
 use clap::{Parser, Subcommand};
 use miette::Report;
 
+fn parse_dep(s: &str) -> std::result::Result<(String, PathBuf), String> {
+    let (name, path) = s
+        .split_once('=')
+        .ok_or_else(|| format!("invalid dep format '{}', expected name=path.bengalmod", s))?;
+    if name.is_empty() {
+        return Err("dep name cannot be empty".to_string());
+    }
+    Ok((name.to_string(), PathBuf::from(path)))
+}
+
 #[derive(Parser)]
 #[command(name = "bengal", about = "The Bengal compiler")]
 struct Cli {
@@ -20,6 +30,9 @@ enum Command {
         /// Print BIR text representation
         #[arg(long)]
         emit_bir: bool,
+        /// External dependency: --dep name=path.bengalmod
+        #[arg(long = "dep", value_parser = parse_dep)]
+        deps: Vec<(String, PathBuf)>,
     },
     /// Evaluate a Bengal program and print the result
     Eval {
@@ -47,7 +60,11 @@ fn display_diag_errors(
 fn run() -> miette::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Compile { file, emit_bir } => {
+        Command::Compile {
+            file,
+            emit_bir,
+            deps,
+        } => {
             let exe_path = file.with_extension("");
             if exe_path == file {
                 return Err(miette::miette!(
@@ -63,6 +80,18 @@ fn run() -> miette::Result<()> {
             let parsed =
                 bengal::pipeline::parse(&file).map_err(|e| Report::new(e.into_diagnostic()))?;
 
+            // Load external dependencies
+            let mut external_deps = Vec::new();
+            let mut seen_dep_names = std::collections::HashSet::new();
+            for (name, path) in &deps {
+                if !seen_dep_names.insert(name.clone()) {
+                    return Err(miette::miette!("--dep '{}' specified multiple times", name));
+                }
+                let dep = bengal::pipeline::load_external_dep(name, path)
+                    .map_err(|e| Report::new(e.into_diagnostic()))?;
+                external_deps.push(dep);
+            }
+
             // Capture source texts for error display
             let source_map: std::collections::HashMap<String, String> = parsed
                 .graph
@@ -71,7 +100,7 @@ fn run() -> miette::Result<()> {
                 .map(|(path, info)| (path.to_string(), info.source.clone()))
                 .collect();
 
-            let analyzed = bengal::pipeline::analyze(parsed, &mut diag);
+            let analyzed = bengal::pipeline::analyze_with_deps(parsed, &external_deps, &mut diag);
             if let Err(ref _e) = analyzed {
                 if diag.has_errors() {
                     display_diag_errors(&mut diag, &filename, &source_map);
@@ -88,6 +117,17 @@ fn run() -> miette::Result<()> {
                 }
             }
             let lowered = lowered.map_err(|e| Report::new(e.into_diagnostic()))?;
+
+            // Emit local package .bengalmod (before merging external deps)
+            bengal::pipeline::emit_interfaces(&lowered, std::path::Path::new(".build/cache"));
+            bengal::pipeline::emit_package_bengalmod(
+                &lowered,
+                std::path::Path::new(".build/cache"),
+            );
+
+            // Merge external dep BIR into lowered package
+            let mut lowered = lowered;
+            bengal::pipeline::merge_external_deps(&mut lowered, &external_deps);
 
             let optimized = bengal::pipeline::optimize(lowered);
 
