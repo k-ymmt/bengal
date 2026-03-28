@@ -422,6 +422,39 @@ pub fn emit_interfaces(lowered: &LoweredPackage, cache_dir: &std::path::Path) {
     }
 }
 
+/// Emit a single `.bengalmod` containing all modules of the package.
+/// This is consumed by `--dep` in other packages.
+pub fn emit_package_bengalmod(lowered: &LoweredPackage, cache_dir: &std::path::Path) {
+    if let Err(e) = std::fs::create_dir_all(cache_dir) {
+        eprintln!("warning: failed to create cache directory: {}", e);
+        return;
+    }
+
+    let mut all_modules = HashMap::new();
+    let mut all_interfaces = HashMap::new();
+
+    for (module_path, module) in &lowered.modules {
+        let sem_info = match lowered.pkg_sem_info.module_infos.get(module_path) {
+            Some(info) => info,
+            None => continue,
+        };
+        let iface = crate::interface::ModuleInterface::from_semantic_info(sem_info);
+        all_modules.insert(module_path.clone(), module.bir.clone());
+        all_interfaces.insert(module_path.clone(), iface);
+    }
+
+    let mod_file = crate::interface::BengalModFile {
+        package_name: lowered.package_name.clone(),
+        modules: all_modules,
+        interfaces: all_interfaces,
+    };
+
+    let file_path = cache_dir.join(format!("{}.bengalmod", lowered.package_name));
+    if let Err(e) = crate::interface::write_bengalmod_file(&mod_file, &file_path) {
+        eprintln!("warning: failed to write package interface: {}", e);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,6 +519,29 @@ mod tests {
         assert_eq!(compiled.object_bytes.len(), 1);
         let obj = compiled.object_bytes.get(&ModulePath::root()).unwrap();
         assert!(!obj.is_empty());
+    }
+
+    #[test]
+    fn emit_package_bengalmod_creates_file() {
+        let parsed = parse_source(
+            "testlib",
+            "public func add(a: Int32, b: Int32) -> Int32 { return a + b; }
+             func main() -> Int32 { return add(1, 2); }",
+        )
+        .unwrap();
+        let analyzed = analyze(parsed, &mut DiagCtxt::new()).unwrap();
+        let lowered = lower(analyzed, &mut DiagCtxt::new()).unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        emit_package_bengalmod(&lowered, dir.path());
+
+        let file_path = dir.path().join("testlib.bengalmod");
+        assert!(file_path.exists(), "package .bengalmod should be created");
+
+        let loaded = crate::interface::read_interface(&file_path).unwrap();
+        assert_eq!(loaded.package_name, "testlib");
+        assert!(!loaded.interfaces.is_empty());
+        assert!(!loaded.modules.is_empty());
     }
 
     #[test]

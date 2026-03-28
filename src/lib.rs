@@ -27,6 +27,7 @@ pub fn compile_to_executable(
     let analyzed = pipeline::analyze(parsed, &mut diag)?;
     let lowered = pipeline::lower(analyzed, &mut diag)?;
     pipeline::emit_interfaces(&lowered, std::path::Path::new(".build/cache"));
+    pipeline::emit_package_bengalmod(&lowered, std::path::Path::new(".build/cache"));
     let optimized = pipeline::optimize(lowered);
     let mono = pipeline::monomorphize(optimized, &mut diag)?;
     let compiled = pipeline::codegen(mono, &mut diag)?;
