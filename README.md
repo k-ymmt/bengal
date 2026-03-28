@@ -189,4 +189,4 @@ parse → analyze → lower → optimize → monomorphize → codegen → link
 
 ## License
 
-TBD
+[MIT](LICENSE)
