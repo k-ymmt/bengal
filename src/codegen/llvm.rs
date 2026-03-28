@@ -308,11 +308,18 @@ pub fn compile_module(
 }
 
 /// Link multiple object files into an executable using the system linker.
-pub fn link_objects(obj_files: &[std::path::PathBuf], output: &std::path::Path) -> Result<()> {
-    let status = std::process::Command::new("cc")
-        .args(obj_files.iter().map(|p| p.as_os_str()))
-        .arg("-o")
-        .arg(output)
+pub fn link_objects(
+    obj_files: &[std::path::PathBuf],
+    output: &std::path::Path,
+    native_search_paths: &[std::path::PathBuf],
+) -> Result<()> {
+    let mut cmd = std::process::Command::new("cc");
+    cmd.args(obj_files.iter().map(|p| p.as_os_str()));
+    for path in native_search_paths {
+        cmd.arg("-L").arg(path);
+    }
+    cmd.arg("-o").arg(output);
+    let status = cmd
         .status()
         .map_err(|e| codegen_err(format!("linker failed: {}", e)))?;
     if !status.success() {

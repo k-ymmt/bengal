@@ -36,7 +36,7 @@ fn compile_and_run_with_deps(source: &str, deps: &[(&str, &Path)]) -> i32 {
 
     let link_dir = tempfile::TempDir::new().unwrap();
     let exe_path = link_dir.path().join("test_exe");
-    bengal::pipeline::link(compiled, &ext_objects, &exe_path).unwrap();
+    bengal::pipeline::link(compiled, &ext_objects, &exe_path, &[]).unwrap();
 
     let output = std::process::Command::new(&exe_path)
         .output()

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::bir::instruction::{BirModule, BirType};
@@ -459,6 +459,7 @@ pub fn link(
     compiled: CompiledPackage,
     external_objects: &HashMap<ModulePath, Vec<u8>>,
     output_path: &Path,
+    native_search_paths: &[PathBuf],
 ) -> Result<(), crate::error::PipelineError> {
     let build_id = BUILD_COUNTER.fetch_add(1, Ordering::Relaxed);
     let temp_dir =
@@ -510,7 +511,7 @@ pub fn link(
         obj_files.push(obj_path);
     }
 
-    crate::codegen::link_objects(&obj_files, output_path)
+    crate::codegen::link_objects(&obj_files, output_path, native_search_paths)
         .map_err(|e| crate::error::PipelineError::package("link", e))?;
 
     let _ = std::fs::remove_dir_all(&temp_dir);

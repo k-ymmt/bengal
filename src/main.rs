@@ -203,8 +203,13 @@ fn run() -> miette::Result<()> {
             );
 
             let ext_objects = bengal::pipeline::collect_external_objects(&external_deps);
-            bengal::pipeline::link(compiled, &ext_objects, &exe_path)
-                .map_err(|e| Report::new(e.into_diagnostic()))?;
+            bengal::pipeline::link(
+                compiled,
+                &ext_objects,
+                &exe_path,
+                library_searcher.native_search_paths(),
+            )
+            .map_err(|e| Report::new(e.into_diagnostic()))?;
             eprintln!("Wrote {}", exe_path.display());
         }
         Command::Eval { expr, emit_bir } => {
