@@ -192,8 +192,9 @@ pub fn analyze(
     }
 
     // Cross-module semantic analysis
-    let pkg_sem_info = crate::semantic::analyze_package(&parsed.graph, &parsed.package_name, diag)
-        .map_err(|e| crate::error::PipelineError::package("analyze", e))?;
+    let pkg_sem_info =
+        crate::semantic::analyze_package(&parsed.graph, &parsed.package_name, &[], diag)
+            .map_err(|e| crate::error::PipelineError::package("analyze", e))?;
 
     Ok(AnalyzedPackage {
         package_name: parsed.package_name,

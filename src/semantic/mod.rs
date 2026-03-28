@@ -17,7 +17,8 @@ mod struct_analysis;
 
 pub use generic_validation::{validate_generics, validate_main};
 pub use package_analysis::{
-    GlobalSymbol, GlobalSymbolTable, SymbolKind, analyze_package, interface_to_global_symbols,
+    GlobalSymbol, GlobalSymbolTable, SymbolKind, analyze_package, dep_module_path,
+    interface_to_global_symbols,
 };
 pub use post_mono::analyze_post_mono;
 pub use pre_mono::{analyze_pre_mono, analyze_pre_mono_lenient};

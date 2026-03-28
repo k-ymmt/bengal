@@ -15,7 +15,7 @@ fn analyze_test_package(files: &[(&str, &str)]) -> Result<PackageSemanticInfo> {
     let entry = dir.path().join(files[0].0);
     let graph = build_module_graph(&entry)?;
     let mut diag = DiagCtxt::new();
-    let result = analyze_package(&graph, "test_pkg", &mut diag);
+    let result = analyze_package(&graph, "test_pkg", &[], &mut diag);
     if result.is_err() {
         // Return the first real error from diag instead of the sentinel
         let errors = diag.take_errors();

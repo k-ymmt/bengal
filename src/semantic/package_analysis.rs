@@ -44,12 +44,24 @@ pub type GlobalSymbolTable = HashMap<ModulePath, HashMap<String, GlobalSymbol>>;
 pub fn analyze_package(
     graph: &ModuleGraph,
     _package_name: &str,
+    external_deps: &[crate::pipeline::ExternalDep],
     diag: &mut DiagCtxt,
 ) -> Result<PackageSemanticInfo> {
     // ---------------------------------------------------------------
     // Phase 1: Collect all top-level symbols from all modules
     // ---------------------------------------------------------------
-    let global_symbols = collect_global_symbols(graph)?;
+    let mut global_symbols = collect_global_symbols(graph)?;
+
+    // Inject external dep symbols into GlobalSymbolTable
+    let mut external_dep_names: HashMap<ModulePath, String> = HashMap::new();
+    for dep in external_deps {
+        for (mod_path, iface) in &dep.interfaces {
+            let ext_path = dep_module_path(&dep.name, mod_path);
+            let symbols = interface_to_global_symbols(iface, &ext_path);
+            global_symbols.insert(ext_path.clone(), symbols);
+            external_dep_names.insert(ext_path, dep.package_name.clone());
+        }
+    }
 
     // ---------------------------------------------------------------
     // Phase 2 + 3: For each module, resolve imports then run analysis
@@ -94,7 +106,7 @@ pub fn analyze_package(
     Ok(PackageSemanticInfo {
         module_infos,
         import_sources,
-        external_dep_names: HashMap::new(),
+        external_dep_names,
     })
 }
 
@@ -272,7 +284,7 @@ fn collect_global_symbols(graph: &ModuleGraph) -> Result<GlobalSymbolTable> {
 
 /// Build a module path for an external dependency module.
 /// Prefixes the dep name to the internal module path to avoid collisions.
-pub(crate) fn dep_module_path(dep_name: &str, internal_path: &ModulePath) -> ModulePath {
+pub fn dep_module_path(dep_name: &str, internal_path: &ModulePath) -> ModulePath {
     let mut segments = vec![dep_name.to_string()];
     segments.extend(internal_path.0.iter().cloned());
     ModulePath(segments)
@@ -292,8 +304,13 @@ fn resolve_imports_for_module(
 
     for import in import_decls {
         // Resolve the target module path from the prefix + path segments
-        let target_module =
-            resolve_import_module_path(current_module, &import.prefix, &import.path, graph)?;
+        let target_module = resolve_import_module_path(
+            current_module,
+            &import.prefix,
+            &import.path,
+            graph,
+            global_symbols,
+        )?;
 
         let target_symbols = global_symbols.get(&target_module).ok_or_else(|| {
             pkg_err(format!(
@@ -389,6 +406,7 @@ fn resolve_import_module_path(
     prefix: &PathPrefix,
     path_segments: &[String],
     graph: &ModuleGraph,
+    global_symbols: &GlobalSymbolTable,
 ) -> Result<ModulePath> {
     let base = match prefix {
         PathPrefix::SelfKw => current_module.clone(),
@@ -404,15 +422,18 @@ fn resolve_import_module_path(
         result = result.child(seg);
     }
 
-    // Verify the target module exists in the graph
-    if !graph.modules.contains_key(&result) {
-        return Err(pkg_err(format!(
-            "unresolved import: module '{}' not found",
-            result
-        )));
+    // Local module — preferred
+    if graph.modules.contains_key(&result) {
+        return Ok(result);
     }
-
-    Ok(result)
+    // External dependency — fallback
+    if global_symbols.contains_key(&result) {
+        return Ok(result);
+    }
+    Err(pkg_err(format!(
+        "unresolved import: module '{}' not found",
+        result
+    )))
 }
 
 #[cfg(test)]
@@ -432,5 +453,62 @@ mod tests {
             result,
             ModulePath(vec!["math".to_string(), "utils".to_string()])
         );
+    }
+
+    #[test]
+    fn analyze_package_injects_external_dep_symbols() {
+        use crate::interface::ModuleInterface;
+        use crate::parser::ast::Visibility;
+        use crate::pipeline::ExternalDep;
+
+        let iface = ModuleInterface {
+            functions: vec![crate::interface::InterfaceFuncEntry {
+                visibility: Visibility::Public,
+                name: "ext_add".to_string(),
+                sig: crate::interface::InterfaceFuncSig {
+                    type_params: vec![],
+                    params: vec![
+                        ("a".to_string(), crate::interface::InterfaceType::I32),
+                        ("b".to_string(), crate::interface::InterfaceType::I32),
+                    ],
+                    return_type: crate::interface::InterfaceType::I32,
+                },
+            }],
+            structs: vec![],
+            protocols: vec![],
+        };
+
+        let dep = ExternalDep {
+            name: "extlib".to_string(),
+            package_name: "extlib".to_string(),
+            interfaces: HashMap::from([(ModulePath::root(), iface)]),
+            bir_modules: HashMap::new(),
+        };
+
+        let graph = crate::package::ModuleGraph::from_source(
+            "app",
+            "import extlib::ext_add;\nfunc main() -> Int32 { return ext_add(1, 2); }",
+        )
+        .unwrap();
+
+        let mut diag = crate::error::DiagCtxt::new();
+        let result = analyze_package(&graph, "app", &[dep], &mut diag);
+        assert!(
+            result.is_ok(),
+            "analyze_package should succeed with external dep: {:?}",
+            result.err()
+        );
+
+        let pkg_info = result.unwrap();
+        let source = pkg_info
+            .import_sources
+            .get(&(ModulePath::root(), "ext_add".to_string()));
+        assert!(source.is_some(), "ext_add should be in import_sources");
+        assert_eq!(source.unwrap(), &ModulePath(vec!["extlib".to_string()]));
+
+        let dep_name = pkg_info
+            .external_dep_names
+            .get(&ModulePath(vec!["extlib".to_string()]));
+        assert_eq!(dep_name, Some(&"extlib".to_string()));
     }
 }
