@@ -450,20 +450,9 @@ Expected: PASS
 feat(semantic): inject external deps into GlobalSymbolTable with import fallback
 ```
 
-- [ ] **Step 3: Run tests**
-
-Run: `cargo test --lib`
-Expected: PASS (all tests including the one from Task 4)
-
-- [ ] **Step 4: Commit**
-
-```
-feat(semantic): add import resolution fallback to external deps
-```
-
 ---
 
-### Task 6: Name Mangling for External Dependencies
+### Task 5: Name Mangling for External Dependencies
 
 **Files:**
 - Modify: `src/pipeline_helpers.rs:9-96` — add `resolve_mangle_context`, update `build_name_map`
@@ -645,7 +634,7 @@ feat(pipeline): add external dep name mangling in build_name_map
 
 ---
 
-### Task 7: BIR Merge and Pipeline Wiring
+### Task 6: BIR Merge and Pipeline Wiring
 
 **Files:**
 - Modify: `src/pipeline.rs` — add `merge_external_deps`
@@ -827,7 +816,7 @@ feat(pipeline): add merge_external_deps and wire into compilation
 
 ---
 
-### Task 8: CLI `--dep` Flag
+### Task 7: CLI `--dep` Flag
 
 **Files:**
 - Modify: `src/main.rs` — add `deps` to Compile subcommand, wire loading
@@ -911,7 +900,7 @@ feat(cli): add --dep flag for external package dependencies
 
 ---
 
-### Task 9: Integration Test — Basic Function Call
+### Task 8: Integration Test — Basic Function Call
 
 **Files:**
 - Create: `tests/separate_compilation.rs`
@@ -999,7 +988,7 @@ test: add separate compilation basic function call test
 
 ---
 
-### Task 10: Integration Test — Struct Usage
+### Task 9: Integration Test — Struct Usage
 
 **Files:**
 - Modify: `tests/separate_compilation.rs`
@@ -1051,7 +1040,7 @@ test: add separate compilation struct usage test
 
 ---
 
-### Task 11: Integration Test — Generic Function
+### Task 10: Integration Test — Generic Function
 
 **Files:**
 - Modify: `tests/separate_compilation.rs`
@@ -1096,7 +1085,7 @@ test: add separate compilation generic function test
 
 ---
 
-### Task 12: Integration Test — Protocol
+### Task 11: Integration Test — Protocol
 
 **Files:**
 - Modify: `tests/separate_compilation.rs`
@@ -1151,7 +1140,7 @@ test: add separate compilation protocol test
 
 ---
 
-### Task 13: Integration Test — Multiple Dependencies
+### Task 12: Integration Test — Multiple Dependencies
 
 **Files:**
 - Modify: `tests/separate_compilation.rs`
@@ -1201,7 +1190,7 @@ test: add separate compilation multiple deps test
 
 ---
 
-### Task 14: Integration Test — Error Cases
+### Task 13: Integration Test — Error Cases
 
 **Files:**
 - Modify: `tests/separate_compilation.rs`
@@ -1281,7 +1270,7 @@ test: add separate compilation error case tests
 
 ---
 
-### Task 15: Final Verification
+### Task 14: Final Verification
 
 - [ ] **Step 1: Run full test suite**
 
