@@ -34,8 +34,9 @@ pub fn compile_to_executable(
     let emit_data = pipeline::EmitData::from_lowered(&optimized);
     let mono = pipeline::monomorphize(optimized, &mut diag)?;
     let compiled = pipeline::codegen(mono, &mut diag)?;
-    pipeline::emit_package_bengalmod(&emit_data, &compiled, std::path::Path::new(".build/cache"));
-    pipeline::link(compiled, output_path)
+    pipeline::emit_package_bengalmod(&emit_data, std::path::Path::new(".build/cache"));
+    let ext_objects = pipeline::collect_external_objects(external_deps);
+    pipeline::link(compiled, &ext_objects, output_path)
 }
 
 /// Compile a Bengal source file (or package) to BIR output.

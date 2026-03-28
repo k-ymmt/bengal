@@ -10,9 +10,7 @@ fn compile_lib(name: &str, source: &str, dir: &Path) -> std::path::PathBuf {
     let lowered = bengal::pipeline::lower(analyzed, &mut diag).unwrap();
     let optimized = bengal::pipeline::optimize(lowered);
     let emit_data = bengal::pipeline::EmitData::from_lowered(&optimized);
-    let mono = bengal::pipeline::monomorphize(optimized, &mut diag).unwrap();
-    let compiled = bengal::pipeline::codegen(mono, &mut diag).unwrap();
-    bengal::pipeline::emit_package_bengalmod(&emit_data, &compiled, dir);
+    bengal::pipeline::emit_package_bengalmod(&emit_data, dir);
     dir.join(format!("{}.bengalmod", name))
 }
 
@@ -34,9 +32,11 @@ fn compile_and_run_with_deps(source: &str, deps: &[(&str, &Path)]) -> i32 {
     let mono = bengal::pipeline::monomorphize(optimized, &mut diag).unwrap();
     let compiled = bengal::pipeline::codegen(mono, &mut diag).unwrap();
 
+    let ext_objects = bengal::pipeline::collect_external_objects(&external_deps);
+
     let link_dir = tempfile::TempDir::new().unwrap();
     let exe_path = link_dir.path().join("test_exe");
-    bengal::pipeline::link(compiled, &exe_path).unwrap();
+    bengal::pipeline::link(compiled, &ext_objects, &exe_path).unwrap();
 
     let output = std::process::Command::new(&exe_path)
         .output()

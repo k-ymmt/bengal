@@ -483,6 +483,7 @@ mod tests {
             package_name: "extlib".to_string(),
             interfaces: HashMap::from([(ModulePath::root(), iface)]),
             bir_modules: HashMap::new(),
+            object_bytes: HashMap::new(),
         };
 
         let graph = crate::package::ModuleGraph::from_source(

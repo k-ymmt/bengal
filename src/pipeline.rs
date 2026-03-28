@@ -28,6 +28,8 @@ pub struct ExternalDep {
     pub interfaces: HashMap<ModulePath, ModuleInterface>,
     /// Per-module BIR (for codegen and monomorphization)
     pub bir_modules: HashMap<ModulePath, BirModule>,
+    /// Pre-compiled object code per module (for linking without re-compilation)
+    pub object_bytes: HashMap<ModulePath, Vec<u8>>,
 }
 
 /// Output of the `analyze` stage.
@@ -440,9 +442,22 @@ pub fn codegen(
     Ok(CompiledPackage { object_bytes })
 }
 
+/// Collect pre-compiled object bytes from external dependencies for linking.
+pub fn collect_external_objects(external_deps: &[ExternalDep]) -> HashMap<ModulePath, Vec<u8>> {
+    let mut objects = HashMap::new();
+    for dep in external_deps {
+        for (mod_path, bytes) in &dep.object_bytes {
+            let ext_path = crate::semantic::dep_module_path(&dep.name, mod_path);
+            objects.insert(ext_path, bytes.clone());
+        }
+    }
+    objects
+}
+
 /// Link object files into an executable.
 pub fn link(
     compiled: CompiledPackage,
+    external_objects: &HashMap<ModulePath, Vec<u8>>,
     output_path: &Path,
 ) -> Result<(), crate::error::PipelineError> {
     let build_id = BUILD_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -470,6 +485,25 @@ pub fn link(
                 "link",
                 BengalError::PackageError {
                     message: format!("failed to write object file: {}", e),
+                },
+            )
+        })?;
+        obj_files.push(obj_path);
+    }
+
+    // Write external dependency object files
+    for (mod_path, bytes) in external_objects {
+        let obj_name = if mod_path.0.is_empty() {
+            "ext_root.o".to_string()
+        } else {
+            format!("ext_{}.o", mod_path.0.join("_"))
+        };
+        let obj_path = temp_dir.join(&obj_name);
+        std::fs::write(&obj_path, bytes).map_err(|e| {
+            crate::error::PipelineError::package(
+                "link",
+                BengalError::PackageError {
+                    message: format!("failed to write external object file: {}", e),
                 },
             )
         })?;
@@ -529,6 +563,7 @@ pub fn load_external_dep(
         package_name: mod_file.package_name,
         interfaces: mod_file.interfaces,
         bir_modules: mod_file.modules,
+        object_bytes: mod_file.object_bytes,
     })
 }
 
@@ -550,6 +585,22 @@ pub fn merge_external_deps(lowered: &mut LoweredPackage, external_deps: &[Extern
                 },
             );
         }
+    }
+}
+
+/// Filter a BIR module to remove the `main` entry point.
+/// Used when producing library object code for archives.
+fn filter_main(bir: &BirModule) -> BirModule {
+    BirModule {
+        functions: bir
+            .functions
+            .iter()
+            .filter(|f| f.name != "main")
+            .cloned()
+            .collect(),
+        struct_layouts: bir.struct_layouts.clone(),
+        struct_type_params: bir.struct_type_params.clone(),
+        conformance_map: bir.conformance_map.clone(),
     }
 }
 
@@ -576,11 +627,10 @@ fn filter_generic_functions(bir: &BirModule) -> BirModule {
 /// - Generic-only BIR (non-generic functions are stripped)
 /// - Module interfaces (for type checking)
 /// - Pre-compiled object code (for linking without re-compilation)
-pub fn emit_package_bengalmod(
-    emit_data: &EmitData,
-    compiled: &CompiledPackage,
-    cache_dir: &std::path::Path,
-) {
+///
+/// Object bytes are compiled from BIR with `main` stripped, so that
+/// consumers do not get duplicate symbol errors at link time.
+pub fn emit_package_bengalmod(emit_data: &EmitData, cache_dir: &std::path::Path) {
     if let Err(e) = std::fs::create_dir_all(cache_dir) {
         eprintln!("warning: failed to create cache directory: {}", e);
         return;
@@ -599,8 +649,22 @@ pub fn emit_package_bengalmod(
         all_modules.insert(module_path.clone(), filter_generic_functions(bir));
         all_interfaces.insert(module_path.clone(), iface);
 
-        if let Some(obj) = compiled.object_bytes.get(module_path) {
-            all_object_bytes.insert(module_path.clone(), obj.clone());
+        // Compile library object bytes from BIR with `main` stripped so that
+        // consumers do not get duplicate `main` symbols at link time.
+        let lib_bir = filter_main(bir);
+        if !lib_bir.functions.is_empty() || !lib_bir.struct_layouts.is_empty() {
+            let mono_result = crate::bir::mono::mono_collect(&lib_bir, "main");
+            match crate::codegen::compile_module_with_mono(&lib_bir, &mono_result, &[]) {
+                Ok(obj) => {
+                    all_object_bytes.insert(module_path.clone(), obj);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "warning: failed to compile library objects for {}: {}",
+                        module_path, e
+                    );
+                }
+            }
         }
     }
 
@@ -694,11 +758,9 @@ mod tests {
         let lowered = lower(analyzed, &mut DiagCtxt::new()).unwrap();
         let optimized = optimize(lowered);
         let emit_data = EmitData::from_lowered(&optimized);
-        let mono = monomorphize(optimized, &mut DiagCtxt::new()).unwrap();
-        let compiled = codegen(mono, &mut DiagCtxt::new()).unwrap();
 
         let dir = tempfile::TempDir::new().unwrap();
-        emit_package_bengalmod(&emit_data, &compiled, dir.path());
+        emit_package_bengalmod(&emit_data, dir.path());
 
         let file_path = dir.path().join("testlib.bengalmod");
         assert!(file_path.exists());
@@ -719,11 +781,9 @@ mod tests {
         let lowered = lower(analyzed, &mut DiagCtxt::new()).unwrap();
         let optimized = optimize(lowered);
         let emit_data = EmitData::from_lowered(&optimized);
-        let mono = monomorphize(optimized, &mut DiagCtxt::new()).unwrap();
-        let compiled = codegen(mono, &mut DiagCtxt::new()).unwrap();
 
         let dir = tempfile::TempDir::new().unwrap();
-        emit_package_bengalmod(&emit_data, &compiled, dir.path());
+        emit_package_bengalmod(&emit_data, dir.path());
 
         let dep = load_external_dep("math", &dir.path().join("mathlib.bengalmod")).unwrap();
         assert_eq!(dep.name, "math");
@@ -745,11 +805,9 @@ mod tests {
         let lib_lowered = lower(lib_analyzed, &mut DiagCtxt::new()).unwrap();
         let lib_optimized = optimize(lib_lowered);
         let lib_emit_data = EmitData::from_lowered(&lib_optimized);
-        let lib_mono = monomorphize(lib_optimized, &mut DiagCtxt::new()).unwrap();
-        let lib_compiled = codegen(lib_mono, &mut DiagCtxt::new()).unwrap();
 
         let dir = tempfile::TempDir::new().unwrap();
-        emit_package_bengalmod(&lib_emit_data, &lib_compiled, dir.path());
+        emit_package_bengalmod(&lib_emit_data, dir.path());
         let dep = load_external_dep("math", &dir.path().join("mathlib.bengalmod")).unwrap();
 
         merge_external_deps(&mut lowered, &[dep]);
@@ -854,11 +912,9 @@ mod tests {
         let lowered = lower(analyzed, &mut DiagCtxt::new()).unwrap();
         let optimized = optimize(lowered);
         let emit_data = EmitData::from_lowered(&optimized);
-        let mono = monomorphize(optimized, &mut DiagCtxt::new()).unwrap();
-        let compiled = codegen(mono, &mut DiagCtxt::new()).unwrap();
 
         let dir = tempfile::TempDir::new().unwrap();
-        emit_package_bengalmod(&emit_data, &compiled, dir.path());
+        emit_package_bengalmod(&emit_data, dir.path());
 
         let loaded =
             crate::interface::read_interface(&dir.path().join("testlib.bengalmod")).unwrap();
@@ -875,5 +931,21 @@ mod tests {
                 func.name
             );
         }
+    }
+
+    #[test]
+    fn collect_external_objects_maps_correctly() {
+        let dep = ExternalDep {
+            name: "math".to_string(),
+            package_name: "mathlib".to_string(),
+            interfaces: HashMap::new(),
+            bir_modules: HashMap::new(),
+            object_bytes: HashMap::from([(ModulePath::root(), vec![1, 2, 3])]),
+        };
+
+        let objects = collect_external_objects(&[dep]);
+        let ext_path = crate::semantic::dep_module_path("math", &ModulePath::root());
+        assert!(objects.contains_key(&ext_path));
+        assert_eq!(objects[&ext_path], vec![1, 2, 3]);
     }
 }

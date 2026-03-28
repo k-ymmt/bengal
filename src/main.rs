@@ -150,11 +150,11 @@ fn run() -> miette::Result<()> {
 
             bengal::pipeline::emit_package_bengalmod(
                 &emit_data,
-                &compiled,
                 std::path::Path::new(".build/cache"),
             );
 
-            bengal::pipeline::link(compiled, &exe_path)
+            let ext_objects = bengal::pipeline::collect_external_objects(&external_deps);
+            bengal::pipeline::link(compiled, &ext_objects, &exe_path)
                 .map_err(|e| Report::new(e.into_diagnostic()))?;
             eprintln!("Wrote {}", exe_path.display());
         }
