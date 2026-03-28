@@ -36,6 +36,7 @@ Generics with monomorphization, protocols, structs (value-type), module system, 
 
 ## Important
 
+- **This project is under active development. Do NOT worry about backward compatibility.** Breaking changes to APIs, data formats, syntax, or internal structures are perfectly fine. Always choose the best design for the future over preserving existing behavior.
 - Always commit when work is done (only tracked files — if `git diff` or `git status` shows changes to tracked files, commit them)
 - When planning changes, prioritize future extensibility and performance over change scope or backward compatibility.
 - NEVER use the `-C` option with git commands. The working directory is always correct — the `-C` flag is unnecessary and must not be used.
