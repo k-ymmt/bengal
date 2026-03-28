@@ -14,6 +14,22 @@ fn parse_dep(s: &str) -> std::result::Result<(String, PathBuf), String> {
     Ok((name.to_string(), PathBuf::from(path)))
 }
 
+fn parse_search_path(s: &str) -> std::result::Result<(String, PathBuf), String> {
+    let (kind, path) = s.split_once('=').ok_or_else(|| {
+        format!(
+            "unsupported -L form: expected '-L bengal=<path>' or '-L native=<path>', got '-L {}'",
+            s
+        )
+    })?;
+    match kind {
+        "bengal" | "native" => Ok((kind.to_string(), PathBuf::from(path))),
+        _ => Err(format!(
+            "unsupported -L kind '{}': expected 'bengal' or 'native'",
+            kind
+        )),
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "bengal", about = "The Bengal compiler")]
 struct Cli {
@@ -33,6 +49,12 @@ enum Command {
         /// External dependency: --dep name=path.bengalmod
         #[arg(long = "dep", value_parser = parse_dep)]
         deps: Vec<(String, PathBuf)>,
+        /// Sysroot path override
+        #[arg(long)]
+        sysroot: Option<PathBuf>,
+        /// Library search path: -L bengal=<path> or -L native=<path>
+        #[arg(short = 'L', value_parser = parse_search_path)]
+        search_paths: Vec<(String, PathBuf)>,
     },
     /// Evaluate a Bengal program and print the result
     Eval {
@@ -64,6 +86,8 @@ fn run() -> miette::Result<()> {
             file,
             emit_bir,
             deps,
+            sysroot,
+            search_paths,
         } => {
             let exe_path = file.with_extension("");
             if exe_path == file {
@@ -77,6 +101,21 @@ fn run() -> miette::Result<()> {
 
             // Run pipeline, collecting multiple errors in diag
             let mut diag = bengal::error::DiagCtxt::new();
+
+            // Build library searcher from --sysroot and -L flags
+            let lib_search_paths: Vec<bengal::sysroot::SearchPath> = search_paths
+                .into_iter()
+                .map(|(kind, path)| {
+                    let kind = match kind.as_str() {
+                        "bengal" => bengal::sysroot::SearchPathKind::Bengal,
+                        "native" => bengal::sysroot::SearchPathKind::Native,
+                        _ => unreachable!(),
+                    };
+                    bengal::sysroot::SearchPath { kind, path }
+                })
+                .collect();
+            let library_searcher = bengal::sysroot::LibrarySearcher::new(sysroot, lib_search_paths);
+
             let parsed =
                 bengal::pipeline::parse(&file).map_err(|e| Report::new(e.into_diagnostic()))?;
 
