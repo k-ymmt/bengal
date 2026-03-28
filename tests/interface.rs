@@ -1186,6 +1186,7 @@ fn emit_interfaces_nested_module_path() {
                 protocols: vec![],
             },
         )]),
+        object_bytes: std::collections::HashMap::new(),
     };
 
     let file_path = cache_dir.join(mod_path.to_file_path("bengalmod"));

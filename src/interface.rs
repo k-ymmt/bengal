@@ -19,7 +19,7 @@ use crate::semantic::resolver::{
 use crate::semantic::types::Type;
 
 pub const MAGIC: &[u8; 4] = b"BGMD";
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 pub const TEXT_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -648,6 +648,7 @@ pub struct BengalModFile {
     pub package_name: String,
     pub modules: HashMap<ModulePath, BirModule>,
     pub interfaces: HashMap<ModulePath, ModuleInterface>,
+    pub object_bytes: HashMap<ModulePath, Vec<u8>>,
 }
 
 /// Serialize a `BengalModFile` and write it to disk.
@@ -690,6 +691,7 @@ pub fn write_interface(package: &LoweredPackage, path: &Path) -> Result<()> {
         package_name: package.package_name.clone(),
         modules,
         interfaces,
+        object_bytes: HashMap::new(),
     };
 
     write_bengalmod_file(&file, path)

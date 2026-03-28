@@ -479,6 +479,7 @@ pub fn emit_interfaces(lowered: &LoweredPackage, cache_dir: &std::path::Path) {
             package_name: lowered.package_name.clone(),
             modules: HashMap::from([(module_path.clone(), module.bir.clone())]),
             interfaces: HashMap::from([(module_path.clone(), iface)]),
+            object_bytes: HashMap::new(),
         };
 
         let file_path = cache_dir.join(module_path.to_file_path("bengalmod"));
@@ -556,6 +557,7 @@ pub fn emit_package_bengalmod(lowered: &LoweredPackage, cache_dir: &std::path::P
         package_name: lowered.package_name.clone(),
         modules: all_modules,
         interfaces: all_interfaces,
+        object_bytes: HashMap::new(),
     };
 
     let file_path = cache_dir.join(format!("{}.bengalmod", lowered.package_name));
