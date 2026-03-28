@@ -43,15 +43,20 @@ pub(crate) fn build_name_map(
                 .import_sources
                 .get(&(mod_path.clone(), struct_name.clone()))
             {
-                let source_segments: Vec<&str> = if source_module.0.is_empty() {
+                let (pkg_name, src_segs) = resolve_mangle_context(
+                    source_module,
+                    package_name,
+                    &pkg_sem_info.external_dep_names,
+                );
+                let source_segments: Vec<&str> = if src_segs.is_empty() {
                     vec![""]
                 } else {
-                    source_module.0.iter().map(|s| s.as_str()).collect()
+                    src_segs.iter().map(|s| s.as_str()).collect()
                 };
                 for method in &struct_info.methods {
                     let local_mangled = format!("{}_{}", struct_name, method.name);
                     let mangled = crate::mangle::mangle_method(
-                        package_name,
+                        pkg_name,
                         &source_segments,
                         struct_name,
                         &method.name,
@@ -83,16 +88,38 @@ pub(crate) fn build_name_map(
         if sem_info.struct_defs.contains_key(imp_name) {
             continue;
         }
-        let source_segments: Vec<&str> = if source_module.0.is_empty() {
+        let (pkg_name, source_segments) = resolve_mangle_context(
+            source_module,
+            package_name,
+            &pkg_sem_info.external_dep_names,
+        );
+        let source_segs: Vec<&str> = if source_segments.is_empty() {
             vec![""]
         } else {
-            source_module.0.iter().map(|s| s.as_str()).collect()
+            source_segments.iter().map(|s| s.as_str()).collect()
         };
-        let mangled = crate::mangle::mangle_function(package_name, &source_segments, imp_name, &[]);
+        let mangled = crate::mangle::mangle_function(pkg_name, &source_segs, imp_name, &[]);
         name_map.insert(imp_name.clone(), mangled);
     }
 
     name_map
+}
+
+/// Determine the package name and module segments for name mangling.
+/// For external deps, uses the dep's package_name and strips the dep_name prefix.
+/// For local imports, uses the consumer's package_name.
+fn resolve_mangle_context<'a>(
+    source_module: &'a ModulePath,
+    package_name: &'a str,
+    external_dep_names: &'a HashMap<ModulePath, String>,
+) -> (&'a str, &'a [String]) {
+    if let Some(dep_pkg_name) = external_dep_names.get(source_module) {
+        // Strip the dep_name prefix (first segment) added by dep_module_path().
+        // Invariant: dep_module_path always prepends exactly one segment.
+        (dep_pkg_name.as_str(), &source_module.0[1..])
+    } else {
+        (package_name, source_module.0.as_slice())
+    }
 }
 
 /// Collect functions called but not defined in a BIR module.
@@ -173,4 +200,42 @@ pub(crate) fn collect_external_functions(
     }
 
     external_functions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::ModulePath;
+
+    #[test]
+    fn resolve_mangle_context_local() {
+        let external_dep_names = HashMap::new();
+        let source = ModulePath(vec!["utils".to_string()]);
+        let (pkg, segs) = resolve_mangle_context(&source, "myapp", &external_dep_names);
+        assert_eq!(pkg, "myapp");
+        assert_eq!(segs, &["utils".to_string()]);
+    }
+
+    #[test]
+    fn resolve_mangle_context_external() {
+        let mut external_dep_names = HashMap::new();
+        external_dep_names.insert(ModulePath(vec!["math".to_string()]), "mathlib".to_string());
+        let source = ModulePath(vec!["math".to_string()]);
+        let (pkg, segs) = resolve_mangle_context(&source, "myapp", &external_dep_names);
+        assert_eq!(pkg, "mathlib");
+        assert!(segs.is_empty());
+    }
+
+    #[test]
+    fn resolve_mangle_context_external_submodule() {
+        let mut external_dep_names = HashMap::new();
+        external_dep_names.insert(
+            ModulePath(vec!["math".to_string(), "advanced".to_string()]),
+            "mathlib".to_string(),
+        );
+        let source = ModulePath(vec!["math".to_string(), "advanced".to_string()]);
+        let (pkg, segs) = resolve_mangle_context(&source, "myapp", &external_dep_names);
+        assert_eq!(pkg, "mathlib");
+        assert_eq!(segs, &["advanced".to_string()]);
+    }
 }
