@@ -422,6 +422,21 @@ pub fn emit_interfaces(lowered: &LoweredPackage, cache_dir: &std::path::Path) {
     }
 }
 
+/// Load an external dependency from a `.bengalmod` file.
+pub fn load_external_dep(
+    name: &str,
+    path: &std::path::Path,
+) -> Result<ExternalDep, crate::error::PipelineError> {
+    let mod_file = crate::interface::read_interface(path)
+        .map_err(|e| crate::error::PipelineError::package("load_dep", e))?;
+    Ok(ExternalDep {
+        name: name.to_string(),
+        package_name: mod_file.package_name,
+        interfaces: mod_file.interfaces,
+        bir_modules: mod_file.modules,
+    })
+}
+
 /// Emit a single `.bengalmod` containing all modules of the package.
 /// This is consumed by `--dep` in other packages.
 pub fn emit_package_bengalmod(lowered: &LoweredPackage, cache_dir: &std::path::Path) {
@@ -542,6 +557,27 @@ mod tests {
         assert_eq!(loaded.package_name, "testlib");
         assert!(!loaded.interfaces.is_empty());
         assert!(!loaded.modules.is_empty());
+    }
+
+    #[test]
+    fn load_external_dep_round_trip() {
+        let parsed = parse_source(
+            "mathlib",
+            "public func add(a: Int32, b: Int32) -> Int32 { return a + b; }
+             func main() -> Int32 { return add(1, 2); }",
+        )
+        .unwrap();
+        let analyzed = analyze(parsed, &mut DiagCtxt::new()).unwrap();
+        let lowered = lower(analyzed, &mut DiagCtxt::new()).unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        emit_package_bengalmod(&lowered, dir.path());
+
+        let dep = load_external_dep("math", &dir.path().join("mathlib.bengalmod")).unwrap();
+        assert_eq!(dep.name, "math");
+        assert_eq!(dep.package_name, "mathlib");
+        assert!(!dep.interfaces.is_empty());
+        assert!(!dep.bir_modules.is_empty());
     }
 
     #[test]
