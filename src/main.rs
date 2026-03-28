@@ -131,6 +131,16 @@ fn run() -> miette::Result<()> {
                 external_deps.push(dep);
             }
 
+            // Auto-discover dependencies from search paths
+            match bengal::pipeline::pre_scan_imports(
+                &parsed.graph,
+                &seen_dep_names,
+                &library_searcher,
+            ) {
+                Ok(discovered) => external_deps.extend(discovered),
+                Err(e) => return Err(Report::new(e.into_diagnostic())),
+            }
+
             // Capture source texts for error display
             let source_map: std::collections::HashMap<String, String> = parsed
                 .graph

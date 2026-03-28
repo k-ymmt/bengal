@@ -567,6 +567,37 @@ pub fn load_external_dep(
     })
 }
 
+/// Scan all parsed modules for `import` statements with `PathPrefix::Named` prefix,
+/// and auto-discover unknown dependencies from the library searcher.
+/// Returns additional `ExternalDep`s found via search paths (not including explicit --dep ones).
+pub fn pre_scan_imports(
+    graph: &crate::package::ModuleGraph,
+    explicit_dep_names: &std::collections::HashSet<String>,
+    searcher: &crate::sysroot::LibrarySearcher,
+) -> Result<Vec<ExternalDep>, crate::error::PipelineError> {
+    use crate::parser::ast::PathPrefix;
+
+    let mut discovered_names = std::collections::HashSet::new();
+    let mut discovered_deps = Vec::new();
+
+    // Collect all top-level import names from PathPrefix::Named
+    for mod_info in graph.modules.values() {
+        for import_decl in &mod_info.ast.import_decls {
+            if let PathPrefix::Named(name) = &import_decl.prefix
+                && !explicit_dep_names.contains(name)
+                && !discovered_names.contains(name)
+                && let Some(path) = searcher.find_bengalmod(name)
+            {
+                let dep = load_external_dep(name, &path)?;
+                discovered_names.insert(name.clone());
+                discovered_deps.push(dep);
+            }
+        }
+    }
+
+    Ok(discovered_deps)
+}
+
 /// Merge external dependency BIR modules into the lowered package.
 /// Must be called AFTER emit_interfaces and BEFORE optimize.
 pub fn merge_external_deps(lowered: &mut LoweredPackage, external_deps: &[ExternalDep]) {
