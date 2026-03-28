@@ -88,7 +88,7 @@ pub fn compile_and_run_package(files: &[(&str, &str)]) -> i32 {
 
     let entry_path = dir.path().join(files[0].0);
     let exe_path = dir.path().join("test_exe");
-    bengal::compile_to_executable(&entry_path, &exe_path)
+    bengal::compile_to_executable(&entry_path, &exe_path, &[])
         .map_err(|e| e.source_error)
         .unwrap();
 
@@ -115,7 +115,7 @@ pub fn compile_package_should_fail(files: &[(&str, &str)]) -> String {
 
     let entry_path = dir.path().join(files[0].0);
     let exe_path = dir.path().join("test_exe");
-    let err = bengal::compile_to_executable(&entry_path, &exe_path)
+    let err = bengal::compile_to_executable(&entry_path, &exe_path, &[])
         .map_err(|e| e.source_error)
         .unwrap_err();
     err.to_string()

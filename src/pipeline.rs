@@ -148,9 +148,10 @@ pub fn parse_source(
     })
 }
 
-/// Semantic analysis: validate generics, run pre-mono inference, cross-module resolution.
-pub fn analyze(
+/// Semantic analysis with external dependencies.
+pub fn analyze_with_deps(
     parsed: ParsedPackage,
+    external_deps: &[ExternalDep],
     diag: &mut DiagCtxt,
 ) -> Result<AnalyzedPackage, crate::error::PipelineError> {
     // Validate generics for all modules
@@ -193,7 +194,7 @@ pub fn analyze(
 
     // Cross-module semantic analysis
     let pkg_sem_info =
-        crate::semantic::analyze_package(&parsed.graph, &parsed.package_name, &[], diag)
+        crate::semantic::analyze_package(&parsed.graph, &parsed.package_name, external_deps, diag)
             .map_err(|e| crate::error::PipelineError::package("analyze", e))?;
 
     Ok(AnalyzedPackage {
@@ -202,6 +203,14 @@ pub fn analyze(
         inferred_maps,
         pkg_sem_info,
     })
+}
+
+/// Semantic analysis (no external deps). Delegates to `analyze_with_deps`.
+pub fn analyze(
+    parsed: ParsedPackage,
+    diag: &mut DiagCtxt,
+) -> Result<AnalyzedPackage, crate::error::PipelineError> {
+    analyze_with_deps(parsed, &[], diag)
 }
 
 /// BIR lowering: build name maps, lower each module's AST to BIR.
@@ -438,6 +447,24 @@ pub fn load_external_dep(
     })
 }
 
+/// Merge external dependency BIR modules into the lowered package.
+/// Must be called AFTER emit_interfaces/emit_package_bengalmod
+/// and BEFORE optimize.
+pub fn merge_external_deps(lowered: &mut LoweredPackage, external_deps: &[ExternalDep]) {
+    for dep in external_deps {
+        for (mod_path, bir_module) in &dep.bir_modules {
+            let ext_path = crate::semantic::dep_module_path(&dep.name, mod_path);
+            lowered.modules.insert(
+                ext_path,
+                LoweredModule {
+                    bir: bir_module.clone(),
+                    is_entry: false,
+                },
+            );
+        }
+    }
+}
+
 /// Emit a single `.bengalmod` containing all modules of the package.
 /// This is consumed by `--dep` in other packages.
 pub fn emit_package_bengalmod(lowered: &LoweredPackage, cache_dir: &std::path::Path) {
@@ -579,6 +606,37 @@ mod tests {
         assert_eq!(dep.package_name, "mathlib");
         assert!(!dep.interfaces.is_empty());
         assert!(!dep.bir_modules.is_empty());
+    }
+
+    #[test]
+    fn merge_external_deps_adds_modules() {
+        let parsed = parse_source("app", "func main() -> Int32 { return 1; }").unwrap();
+        let analyzed = analyze(parsed, &mut DiagCtxt::new()).unwrap();
+        let mut lowered = lower(analyzed, &mut DiagCtxt::new()).unwrap();
+
+        assert_eq!(lowered.modules.len(), 1); // just root
+
+        let lib_parsed = parse_source("mathlib", "public func add(a: Int32, b: Int32) -> Int32 { return a + b; }\nfunc main() -> Int32 { return 0; }").unwrap();
+        let lib_analyzed = analyze(lib_parsed, &mut DiagCtxt::new()).unwrap();
+        let lib_lowered = lower(lib_analyzed, &mut DiagCtxt::new()).unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        emit_package_bengalmod(&lib_lowered, dir.path());
+        let dep = load_external_dep("math", &dir.path().join("mathlib.bengalmod")).unwrap();
+
+        merge_external_deps(&mut lowered, &[dep]);
+
+        assert!(lowered.modules.len() > 1, "external BIR should be merged");
+        let ext_path = crate::semantic::dep_module_path("math", &ModulePath::root());
+        let ext_module = lowered.modules.get(&ext_path);
+        assert!(
+            ext_module.is_some(),
+            "external module should exist at dep_module_path"
+        );
+        assert!(
+            !ext_module.unwrap().is_entry,
+            "external module should not be entry"
+        );
     }
 
     #[test]

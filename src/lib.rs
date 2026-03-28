@@ -21,13 +21,16 @@ use pipeline::BirOutput;
 pub fn compile_to_executable(
     entry_path: &Path,
     output_path: &Path,
+    external_deps: &[pipeline::ExternalDep],
 ) -> std::result::Result<(), error::PipelineError> {
     let mut diag = DiagCtxt::new();
     let parsed = pipeline::parse(entry_path)?;
-    let analyzed = pipeline::analyze(parsed, &mut diag)?;
+    let analyzed = pipeline::analyze_with_deps(parsed, external_deps, &mut diag)?;
     let lowered = pipeline::lower(analyzed, &mut diag)?;
     pipeline::emit_interfaces(&lowered, std::path::Path::new(".build/cache"));
     pipeline::emit_package_bengalmod(&lowered, std::path::Path::new(".build/cache"));
+    let mut lowered = lowered;
+    pipeline::merge_external_deps(&mut lowered, external_deps);
     let optimized = pipeline::optimize(lowered);
     let mono = pipeline::monomorphize(optimized, &mut diag)?;
     let compiled = pipeline::codegen(mono, &mut diag)?;
