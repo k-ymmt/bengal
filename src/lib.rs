@@ -10,6 +10,7 @@ pub mod pipeline;
 pub mod pipeline_helpers;
 pub mod semantic;
 pub mod suggest;
+pub mod sysroot;
 
 use std::collections::HashMap;
 use std::path::Path;
