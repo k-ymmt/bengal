@@ -292,25 +292,87 @@ pub fn optimize(mut lowered: LoweredPackage) -> LoweredPackage {
 }
 
 /// Monomorphization collection: find all concrete instantiations needed.
+///
+/// After per-module collection, propagates generic instances across module
+/// boundaries so that external dep modules containing generic templates
+/// also emit the required concrete specialisations.
 pub fn monomorphize(
     lowered: LoweredPackage,
     _diag: &mut DiagCtxt,
 ) -> Result<MonomorphizedPackage, crate::error::PipelineError> {
-    let mut modules = HashMap::new();
+    use crate::bir::mono::Instance;
+    use std::collections::HashSet;
 
+    // Phase 1: per-module mono_collect.
+    let mut modules = HashMap::new();
     for (mod_path, module) in lowered.modules {
         let mono_result = crate::bir::mono::mono_collect(&module.bir, "main");
-        let external_functions =
-            crate::pipeline_helpers::collect_external_functions(&module.bir, &mono_result);
-
         modules.insert(
             mod_path,
             MonomorphizedModule {
                 bir: module.bir,
                 mono_result,
-                external_functions,
+                external_functions: Vec::new(),
                 is_entry: module.is_entry,
             },
+        );
+    }
+
+    // Phase 2: propagate cross-module generic instances.
+    // Build an index: function_name -> module_path for generic templates.
+    let mut generic_owner: HashMap<String, ModulePath> = HashMap::new();
+    for (mod_path, mono_mod) in &modules {
+        for func in &mono_mod.bir.functions {
+            if !func.type_params.is_empty() {
+                generic_owner.insert(func.name.clone(), mod_path.clone());
+            }
+        }
+    }
+
+    // Collect instances that need to be forwarded to other modules.
+    let mut forwarded: HashMap<ModulePath, Vec<Instance>> = HashMap::new();
+    for (mod_path, mono_mod) in &modules {
+        let defined: HashSet<&str> = mono_mod
+            .bir
+            .functions
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        for inst in &mono_mod.mono_result.func_instances {
+            if !defined.contains(inst.func_name.as_str())
+                && let Some(owner_path) = generic_owner.get(&inst.func_name)
+                && owner_path != mod_path
+            {
+                forwarded
+                    .entry(owner_path.clone())
+                    .or_default()
+                    .push(inst.clone());
+            }
+        }
+    }
+
+    // Merge forwarded instances into target modules.
+    for (target_path, instances) in forwarded {
+        if let Some(target_mod) = modules.get_mut(&target_path) {
+            let existing: HashSet<Instance> = target_mod
+                .mono_result
+                .func_instances
+                .iter()
+                .cloned()
+                .collect();
+            for inst in instances {
+                if !existing.contains(&inst) {
+                    target_mod.mono_result.func_instances.push(inst);
+                }
+            }
+        }
+    }
+
+    // Phase 3: collect external functions per module.
+    for mono_mod in modules.values_mut() {
+        mono_mod.external_functions = crate::pipeline_helpers::collect_external_functions(
+            &mono_mod.bir,
+            &mono_mod.mono_result,
         );
     }
 

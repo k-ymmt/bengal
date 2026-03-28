@@ -181,19 +181,29 @@ pub(crate) fn collect_external_functions(
                 if let Instruction::Call {
                     func_name,
                     args,
+                    type_args,
                     ty,
                     ..
                 } = inst
                     && !defined_funcs.contains(func_name)
                     && !resolved_instance_names.contains(func_name)
-                    && !seen_externals.contains(func_name)
                 {
+                    // For generic calls to external functions, use the mangled name
+                    // so codegen can find the declaration after name resolution.
+                    let effective_name = if !type_args.is_empty() {
+                        crate::mangle::mangle_generic_suffix(func_name, type_args)
+                    } else {
+                        func_name.clone()
+                    };
+                    if seen_externals.contains(&effective_name) {
+                        continue;
+                    }
                     let arg_types: Vec<BirType> = args
                         .iter()
                         .map(|arg| value_types.get(arg).cloned().unwrap_or(BirType::I32))
                         .collect();
-                    external_functions.push((func_name.clone(), arg_types, ty.clone()));
-                    seen_externals.insert(func_name.clone());
+                    external_functions.push((effective_name.clone(), arg_types, ty.clone()));
+                    seen_externals.insert(effective_name);
                 }
             }
         }

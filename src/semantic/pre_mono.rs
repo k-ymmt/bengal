@@ -185,18 +185,24 @@ fn analyze_pre_mono_inner(
     // --- Phase 2c: check protocol conformance ---
     for struct_def in &program.structs {
         for proto_name in &struct_def.conformances {
-            let proto_info = resolver
-                .lookup_protocol(proto_name)
-                .ok_or_else(|| {
+            let proto_info = match resolver.lookup_protocol(proto_name) {
+                Some(info) => info.clone(),
+                None if lenient => {
+                    // In lenient mode, skip conformance checks for unknown
+                    // protocols — they may come from cross-module imports
+                    // that aren't resolved until package-level analysis.
+                    continue;
+                }
+                None => {
                     let help = find_suggestion(proto_name, resolver.all_protocol_names())
                         .map(|s| format!("did you mean '{s}'?"));
-                    sem_err_with_help(
+                    return Err(sem_err_with_help(
                         format!("unknown protocol `{}`", proto_name),
                         Span { start: 0, end: 0 },
                         help,
-                    )
-                })?
-                .clone();
+                    ));
+                }
+            };
             let struct_info = resolver
                 .lookup_struct(&struct_def.name)
                 .ok_or_else(|| {
