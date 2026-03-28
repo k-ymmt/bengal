@@ -532,6 +532,22 @@ pub fn merge_external_deps(lowered: &mut LoweredPackage, external_deps: &[Extern
     }
 }
 
+/// Filter a BIR module to retain only generic functions.
+/// Non-function data (struct_layouts, struct_type_params, conformance_map) is preserved.
+fn filter_generic_functions(bir: &BirModule) -> BirModule {
+    BirModule {
+        functions: bir
+            .functions
+            .iter()
+            .filter(|f| !f.type_params.is_empty())
+            .cloned()
+            .collect(),
+        struct_layouts: bir.struct_layouts.clone(),
+        struct_type_params: bir.struct_type_params.clone(),
+        conformance_map: bir.conformance_map.clone(),
+    }
+}
+
 /// Emit a single `.bengalmod` containing all modules of the package.
 /// This is consumed by `--dep` in other packages.
 pub fn emit_package_bengalmod(lowered: &LoweredPackage, cache_dir: &std::path::Path) {
@@ -705,6 +721,66 @@ mod tests {
             !ext_module.unwrap().is_entry,
             "external module should not be entry"
         );
+    }
+
+    #[test]
+    fn filter_generic_functions_mixed() {
+        use crate::bir::instruction::BirFunction;
+
+        let generic_fn = BirFunction {
+            name: "identity".to_string(),
+            type_params: vec!["T".to_string()],
+            params: vec![],
+            return_type: BirType::TypeParam("T".to_string()),
+            blocks: vec![],
+            body: vec![],
+        };
+        let non_generic_fn = BirFunction {
+            name: "add".to_string(),
+            type_params: vec![],
+            params: vec![],
+            return_type: BirType::I32,
+            blocks: vec![],
+            body: vec![],
+        };
+        let bir = BirModule {
+            functions: vec![generic_fn, non_generic_fn],
+            struct_layouts: HashMap::from([(
+                "Point".to_string(),
+                vec![("x".to_string(), BirType::I32)],
+            )]),
+            struct_type_params: HashMap::from([("Box".to_string(), vec!["T".to_string()])]),
+            conformance_map: HashMap::new(),
+        };
+
+        let filtered = filter_generic_functions(&bir);
+        assert_eq!(filtered.functions.len(), 1);
+        assert_eq!(filtered.functions[0].name, "identity");
+        assert_eq!(filtered.struct_layouts.len(), 1);
+        assert_eq!(filtered.struct_type_params.len(), 1);
+    }
+
+    #[test]
+    fn filter_generic_functions_no_generics() {
+        use crate::bir::instruction::BirFunction;
+
+        let bir = BirModule {
+            functions: vec![BirFunction {
+                name: "add".to_string(),
+                type_params: vec![],
+                params: vec![],
+                return_type: BirType::I32,
+                blocks: vec![],
+                body: vec![],
+            }],
+            struct_layouts: HashMap::from([("Point".to_string(), vec![])]),
+            struct_type_params: HashMap::new(),
+            conformance_map: HashMap::new(),
+        };
+
+        let filtered = filter_generic_functions(&bir);
+        assert!(filtered.functions.is_empty());
+        assert_eq!(filtered.struct_layouts.len(), 1, "struct_layouts preserved");
     }
 
     #[test]
